@@ -1,0 +1,11 @@
+<resources>
+    <color name="black">#FF121212</color>
+    <color name="pure_black">#FF000000</color>
+    <color name="card_dark">#FF1E1E1E</color>
+    <color name="card_darker">#FF181818</color>
+    <color name="teal_primary">#FF4DB6AC</color>
+    <color name="teal_accent">#FF80CBC4</color>
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#FFAAAAAA</color>
+    <color name="divider_color">#FF2C2C2C</color>
+</resources>

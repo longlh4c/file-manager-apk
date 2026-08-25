@@ -1,0 +1,24 @@
+<resources>
+    <string name="app_name">File Manager +</string>
+    <string name="main_storage">Main storage</string>
+    <string name="downloads">Downloads</string>
+    <string name="images">Images</string>
+    <string name="audio">Audio</string>
+    <string name="videos">Videos</string>
+    <string name="documents">Documents</string>
+    <string name="cloud">Cloud</string>
+    <string name="access_from_network">Access from network</string>
+    <string name="recycle_bin">Recycle Bin</string>
+    <string name="random_password">Random password</string>
+    <string name="port">Port</string>
+    <string name="password">Password</string>
+    <string name="show_hidden_files">Show hidden files</string>
+    <string name="start_service_desc">Start the service to access files from another device.</string>
+    <string name="start_service">START SERVICE</string>
+    <string name="stop_service">STOP SERVICE</string>
+    <string name="add_cloud_location">Add a cloud location</string>
+    <string name="service_running_notification">FTP Service is running</string>
+    <string name="service_tap_to_manage">Tap to open File Manager</string>
+    <string name="transfer_running_notification">File transfer in progress</string>
+    <string name="transfer_running_notification_text">Copying, moving, uploading or downloading files…</string>
+</resources>
