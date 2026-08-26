@@ -73,7 +73,7 @@ fun AppNavigation() {
         val parent = if (isStreamUrl) "" else File(file.path).parentFile?.absolutePath ?: ""
         when (ext) {
             "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng" -> {
-                navController.navigate(Screen.ImageViewer.createRoute(file.path, parent, sortOption.name, cloudAccountId))
+                navController.navigate(Screen.ImageViewer.createRoute(file.path, parent, sortOption.name, cloudAccountId, fileName = file.name))
             }
             "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v" -> {
                 navController.navigate(Screen.VideoPlayer.createRoute(file.path, parent, sortOption.name, cloudAccountId, fileName = file.name))
@@ -312,7 +312,8 @@ fun AppNavigation() {
                 navArgument("path") { type = NavType.StringType; defaultValue = "" },
                 navArgument("parentPath") { type = NavType.StringType; defaultValue = "" },
                 navArgument("sortOption") { type = NavType.StringType; defaultValue = FileSortOption.BY_NAME_ASC.name },
-                navArgument("cloudAccountId") { type = NavType.StringType; defaultValue = "" }
+                navArgument("cloudAccountId") { type = NavType.StringType; defaultValue = "" },
+                navArgument("fileName") { type = NavType.StringType; defaultValue = "" }
             )
         ) { backStackEntry ->
             val path = backStackEntry.arguments?.getString("path") ?: ""
@@ -321,11 +322,13 @@ fun AppNavigation() {
                 FileSortOption.valueOf(backStackEntry.arguments?.getString("sortOption") ?: "")
             }.getOrDefault(FileSortOption.BY_NAME_ASC)
             val cloudAccountId = backStackEntry.arguments?.getString("cloudAccountId")?.takeIf { it.isNotEmpty() }
+            val fileName = backStackEntry.arguments?.getString("fileName") ?: ""
             ImageViewerScreen(
                 initialPath = path,
                 parentPath = parentPath,
                 sortOption = sortOption,
                 cloudAccountId = cloudAccountId,
+                fileName = fileName,
                 onNavigateBack = { navController.popBackStack() }
             )
         }

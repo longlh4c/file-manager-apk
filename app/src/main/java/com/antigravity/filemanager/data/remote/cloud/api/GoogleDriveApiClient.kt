@@ -93,6 +93,29 @@ class GoogleDriveApiClient @Inject constructor(
         }
     }
 
+    /**
+     * Drive's v3 media-download endpoint has no pre-signed/anonymous URL option like Dropbox's
+     * `getTemporaryLink` — every request needs a fresh bearer token attached. `credential.token`
+     * does a blocking fetch that auto-refreshes an expired token, same call already used above
+     * for thumbnails, so this is safe to call from a background dispatcher.
+     */
+    suspend fun getAuthenticatedMediaUrl(account: CloudAccount, fileId: String): Result<com.antigravity.filemanager.domain.model.CloudStreamSource> =
+        withContext(Dispatchers.IO) {
+            try {
+                val credential = buildCredential(account)
+                val token = credential.token
+                val url = "https://www.googleapis.com/drive/v3/files/$fileId?alt=media&supportsAllDrives=true"
+                Result.success(
+                    com.antigravity.filemanager.domain.model.CloudStreamSource(
+                        url = url,
+                        headers = mapOf("Authorization" to "Bearer $token")
+                    )
+                )
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
     private fun toFileItem(f: DriveFile): FileItem {
         val isDir = f.mimeType == "application/vnd.google-apps.folder"
         val rawExt = if (!isDir && f.name.contains(".")) f.name.substringAfterLast(".", "") else ""

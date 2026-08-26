@@ -29,7 +29,8 @@ import javax.inject.Singleton
 @Singleton
 class StorageRepositoryImpl @Inject constructor(
     private val scanner: LocalFileScanner,
-    private val database: AppDatabase
+    private val database: AppDatabase,
+    private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager
 ) : IStorageRepository {
 
     override suspend fun getStorageVolumeInfo(): StorageVolumeInfo = withContext(Dispatchers.IO) {
@@ -129,34 +130,43 @@ class StorageRepositoryImpl @Inject constructor(
     }
 
     override fun observeCategorySummaries(): Flow<List<CategorySummary>> = flow {
-        // Step 1: Immediate emission of baseline cards with fast volume info (<1ms)
-        val volume = scanner.getStorageVolume()
-        val baseline = listOf(
-            CategorySummary(
-                type = CategoryType.MAIN_STORAGE,
-                title = "Main storage",
-                totalSizeBytes = volume.totalBytes,
-                subtitle = "${volume.formattedUsed} / ${volume.formattedTotal}"
-            ),
-            CategorySummary(type = CategoryType.DOWNLOADS, title = "Downloads"),
-            CategorySummary(
-                type = CategoryType.STORAGE_ANALYSIS,
-                title = "Storage Anal…",
-                totalSizeBytes = volume.usedBytes,
-                subtitle = "${volume.usedPercentageInt}% used"
-            ),
-            CategorySummary(type = CategoryType.IMAGES, title = "Images"),
-            CategorySummary(type = CategoryType.AUDIO, title = "Audio"),
-            CategorySummary(type = CategoryType.VIDEOS, title = "Videos"),
-            CategorySummary(type = CategoryType.DOCUMENTS, title = "Documents"),
-            CategorySummary(type = CategoryType.CLOUD, title = "Cloud"),
-            CategorySummary(type = CategoryType.ACCESS_FROM_NETWORK, title = "FTP"),
-            CategorySummary(type = CategoryType.RECYCLE_BIN, title = "Recycle Bin")
-        )
-        emit(baseline)
+        // Step 1: instantly show last session's numbers (persisted to disk) if we have them,
+        // instead of blank placeholder cards — a cold app start used to always show 0/empty
+        // cards until the full scan below finished.
+        val cached = folderCacheManager.getDashboardSummaries()
+        if (cached != null) {
+            emit(cached)
+        } else {
+            val volume = scanner.getStorageVolume()
+            val baseline = listOf(
+                CategorySummary(
+                    type = CategoryType.MAIN_STORAGE,
+                    title = "Main storage",
+                    totalSizeBytes = volume.totalBytes,
+                    subtitle = "${volume.formattedUsed} / ${volume.formattedTotal}"
+                ),
+                CategorySummary(type = CategoryType.DOWNLOADS, title = "Downloads"),
+                CategorySummary(
+                    type = CategoryType.STORAGE_ANALYSIS,
+                    title = "Storage Anal…",
+                    totalSizeBytes = volume.usedBytes,
+                    subtitle = "${volume.usedPercentageInt}% used"
+                ),
+                CategorySummary(type = CategoryType.IMAGES, title = "Images"),
+                CategorySummary(type = CategoryType.AUDIO, title = "Audio"),
+                CategorySummary(type = CategoryType.VIDEOS, title = "Videos"),
+                CategorySummary(type = CategoryType.DOCUMENTS, title = "Documents"),
+                CategorySummary(type = CategoryType.CLOUD, title = "Cloud"),
+                CategorySummary(type = CategoryType.ACCESS_FROM_NETWORK, title = "FTP"),
+                CategorySummary(type = CategoryType.RECYCLE_BIN, title = "Recycle Bin")
+            )
+            emit(baseline)
+        }
 
-        // Step 2: Compute full summaries in parallel and emit
-        emit(getCategorySummaries())
+        // Step 2: compute the real, current summaries in the background and update the cache.
+        val fresh = getCategorySummaries()
+        folderCacheManager.putDashboardSummaries(fresh)
+        emit(fresh)
     }
 }
 
@@ -579,6 +589,12 @@ class CloudRepositoryImpl @Inject constructor(
         val account = database.cloudDao().getById(accountId)?.toDomain()
             ?: return@withContext Result.failure(Exception("Account not found"))
         cloudManager.getStreamableLink(account, remotePath)
+    }
+
+    override suspend fun getCloudStreamSource(accountId: String, remotePath: String): Result<com.antigravity.filemanager.domain.model.CloudStreamSource> = withContext(Dispatchers.IO) {
+        val account = database.cloudDao().getById(accountId)?.toDomain()
+            ?: return@withContext Result.failure(Exception("Account not found"))
+        cloudManager.getStreamSource(account, remotePath)
     }
 }
 

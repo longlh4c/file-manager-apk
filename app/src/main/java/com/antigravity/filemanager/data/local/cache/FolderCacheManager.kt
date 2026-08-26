@@ -1,6 +1,8 @@
 package com.antigravity.filemanager.data.local.cache
 
 import android.content.Context
+import com.antigravity.filemanager.domain.model.AppSourceBadge
+import com.antigravity.filemanager.domain.model.CategorySummary
 import com.antigravity.filemanager.domain.model.CategoryType
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FileSortOption
@@ -51,31 +53,158 @@ class FolderCacheManager @Inject constructor(
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // MediaStore-backed category folders (Images/Audio/Videos/Downloads) are a different shape
-    // (MediaFolder, not FileItem) from everything else this class caches, and — unlike a plain
-    // directory listing — expensive mainly because of the MediaStore query + per-file stat()
-    // fan-out, not disk I/O we'd want to persist across process restarts. In-memory only is enough
-    // to make repeat visits within a session instant; a cold app start always re-scans for real.
+    // (MediaFolder, not FileItem) from everything else this class caches. Like Documents below,
+    // this is persisted to disk (not just in-memory) so a cold app start can paint the previous
+    // result instantly instead of always re-running the MediaStore query + per-file stat() fan-out
+    // before showing anything — a fresh scan still happens in the background to catch up.
     private data class MediaFoldersCacheEntry(val folders: List<MediaFolder>, val timestamp: Long)
     private val mediaFoldersCache = ConcurrentHashMap<String, MediaFoldersCacheEntry>()
 
-    private fun mediaFoldersKey(categoryType: CategoryType, sort: FileSortOption) = "${categoryType.name}_${sort.name}"
+    private fun mediaFoldersKey(categoryType: CategoryType, sort: FileSortOption) = "mediafolders_${categoryType.name}_${sort.name}"
 
-    fun getMediaFolders(categoryType: CategoryType, sort: FileSortOption, freshTtlMs: Long = 0L): CachedMediaFoldersResult? {
-        val entry = mediaFoldersCache[mediaFoldersKey(categoryType, sort)] ?: return null
-        val fresh = freshTtlMs > 0 && (System.currentTimeMillis() - entry.timestamp) < freshTtlMs
-        return CachedMediaFoldersResult(entry.folders, fresh)
+    suspend fun getMediaFolders(categoryType: CategoryType, sort: FileSortOption, freshTtlMs: Long = 0L): CachedMediaFoldersResult? {
+        val key = mediaFoldersKey(categoryType, sort)
+        fun freshnessOf(timestamp: Long) = freshTtlMs > 0 && (System.currentTimeMillis() - timestamp) < freshTtlMs
+
+        mediaFoldersCache[key]?.let { return CachedMediaFoldersResult(it.folders, freshnessOf(it.timestamp)) }
+
+        return withContext(Dispatchers.IO) {
+            val hashed = hashKey(key)
+            val file = File(cacheDir, "$hashed.json")
+            if (!file.exists() || file.length() == 0L) return@withContext null
+
+            try {
+                val jsonStr = file.readText()
+                val root = JSONObject(jsonStr)
+                val timestamp = root.optLong("timestamp", 0L)
+                val arr = root.getJSONArray("items")
+                val list = mutableListOf<MediaFolder>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    val badgeName = obj.optString("appSourceBadge", AppSourceBadge.NONE.name)
+                    val badge = try { AppSourceBadge.valueOf(badgeName) } catch (e: Exception) { AppSourceBadge.NONE }
+                    list.add(
+                        MediaFolder(
+                            id = obj.getString("id"),
+                            name = obj.getString("name"),
+                            path = obj.getString("path"),
+                            itemCount = obj.optInt("itemCount", 0),
+                            latestThumbnailUri = obj.optString("latestThumbnailUri").ifBlank { null },
+                            appSourceBadge = badge,
+                            totalSizeBytes = obj.optLong("totalSizeBytes", 0L),
+                            lastModified = obj.optLong("lastModified", 0L)
+                        )
+                    )
+                }
+                mediaFoldersCache[key] = MediaFoldersCacheEntry(list, timestamp)
+                CachedMediaFoldersResult(list, freshnessOf(timestamp))
+            } catch (e: Exception) {
+                null
+            }
+        }
     }
 
-    fun putMediaFolders(categoryType: CategoryType, sort: FileSortOption, folders: List<MediaFolder>) {
-        mediaFoldersCache[mediaFoldersKey(categoryType, sort)] = MediaFoldersCacheEntry(folders, System.currentTimeMillis())
+    suspend fun putMediaFolders(categoryType: CategoryType, sort: FileSortOption, folders: List<MediaFolder>) {
+        val key = mediaFoldersKey(categoryType, sort)
+        val timestamp = System.currentTimeMillis()
+        mediaFoldersCache[key] = MediaFoldersCacheEntry(folders, timestamp)
+        withContext(Dispatchers.IO) {
+            val hashed = hashKey(key)
+            try {
+                val arr = JSONArray()
+                folders.forEach { f ->
+                    arr.put(JSONObject().apply {
+                        put("id", f.id)
+                        put("name", f.name)
+                        put("path", f.path)
+                        put("itemCount", f.itemCount)
+                        put("latestThumbnailUri", f.latestThumbnailUri ?: "")
+                        put("appSourceBadge", f.appSourceBadge.name)
+                        put("totalSizeBytes", f.totalSizeBytes)
+                        put("lastModified", f.lastModified)
+                    })
+                }
+                val root = JSONObject().apply {
+                    put("timestamp", timestamp)
+                    put("items", arr)
+                }
+                File(cacheDir, "$hashed.json").writeText(root.toString())
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // Dashboard category cards (Main storage / Downloads / Images / Audio / Videos / Documents /
+    // Cloud / Recycle Bin counts+sizes) — same instant-then-refresh idea as media folders above.
+    // Single global entry: there's only ever one dashboard.
+    @Volatile private var dashboardSummaryCache: Pair<List<CategorySummary>, Long>? = null
+    private val dashboardCacheFile = File(cacheDir, "dashboard_summary.json")
+
+    suspend fun getDashboardSummaries(): List<CategorySummary>? {
+        dashboardSummaryCache?.let { return it.first }
+        return withContext(Dispatchers.IO) {
+            if (!dashboardCacheFile.exists() || dashboardCacheFile.length() == 0L) return@withContext null
+            try {
+                val root = JSONObject(dashboardCacheFile.readText())
+                val arr = root.getJSONArray("items")
+                val list = mutableListOf<CategorySummary>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.getJSONObject(i)
+                    list.add(
+                        CategorySummary(
+                            type = CategoryType.valueOf(obj.getString("type")),
+                            title = obj.getString("title"),
+                            totalSizeBytes = obj.optLong("totalSizeBytes", 0L),
+                            itemCount = obj.optInt("itemCount", 0),
+                            subtitle = obj.optString("subtitle", "")
+                        )
+                    )
+                }
+                val timestamp = root.optLong("timestamp", 0L)
+                dashboardSummaryCache = list to timestamp
+                list
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    suspend fun putDashboardSummaries(summaries: List<CategorySummary>) {
+        val timestamp = System.currentTimeMillis()
+        dashboardSummaryCache = summaries to timestamp
+        withContext(Dispatchers.IO) {
+            try {
+                val arr = JSONArray()
+                summaries.forEach { s ->
+                    arr.put(JSONObject().apply {
+                        put("type", s.type.name)
+                        put("title", s.title)
+                        put("totalSizeBytes", s.totalSizeBytes)
+                        put("itemCount", s.itemCount)
+                        put("subtitle", s.subtitle)
+                    })
+                }
+                val root = JSONObject().apply {
+                    put("timestamp", timestamp)
+                    put("items", arr)
+                }
+                dashboardCacheFile.writeText(root.toString())
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     /** Call after any operation that could add/remove/rename files under any media category
      * (copy/move/delete/download-to-local, etc). Clears every category rather than trying to
      * guess which bucket(s) were affected — cheap since it's just re-scanning MediaStore next visit. */
     fun invalidateMediaFolders() {
+        dashboardSummaryCache = null
+        ioScope.launch { dashboardCacheFile.delete() }
+        val mediaKeys = mediaFoldersCache.keys.toList()
         mediaFoldersCache.clear()
-        val keysToRemove = cacheRemoveByPrefix("docs_")
+        val keysToRemove = cacheRemoveByPrefix("docs_") + mediaKeys
         ioScope.launch {
             keysToRemove.forEach { key ->
                 val hashed = hashKey(key)
@@ -254,6 +383,7 @@ class FolderCacheManager @Inject constructor(
     fun clearAll() {
         cacheClear()
         mediaFoldersCache.clear()
+        dashboardSummaryCache = null
         ioScope.launch {
             cacheDir.deleteRecursively()
             cacheDir.mkdirs()

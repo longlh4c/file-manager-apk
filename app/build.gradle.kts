@@ -98,6 +98,7 @@ dependencies {
     // Coil Image Loader
     implementation(libs.coil.compose)
     implementation(libs.coil.video)
+    implementation(libs.coil.gif)
 
     // Media3 / ExoPlayer
     implementation(libs.androidx.media3.exoplayer)

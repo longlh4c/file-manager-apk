@@ -322,5 +322,11 @@ class CloudStorageUseCase @Inject constructor(
      * without downloading the whole file. Only some providers support this (see [CloudManager]). */
     suspend fun getStreamableLink(accountId: String, remotePath: String): Result<String> =
         cloudRepository.getCloudStreamableLink(accountId, remotePath)
+
+    /** Direct playable/decodable source (URL + any required headers) for viewing an image or
+     * video without downloading it first. Supported for Dropbox and Google Drive; fails for
+     * MEGA (client-side encrypted). */
+    suspend fun getStreamSource(accountId: String, remotePath: String): Result<com.antigravity.filemanager.domain.model.CloudStreamSource> =
+        cloudRepository.getCloudStreamSource(accountId, remotePath)
 }
 

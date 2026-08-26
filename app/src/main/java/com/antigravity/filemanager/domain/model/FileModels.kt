@@ -286,6 +286,14 @@ data class OverwriteConflict(
     val newSize: Long
 )
 
+/** A direct, playable/decodable URL for a cloud media file, plus any HTTP headers the request
+ * needs (e.g. Google Drive requires a bearer token on every request; Dropbox's temporary link
+ * is pre-signed and needs none). */
+data class CloudStreamSource(
+    val url: String,
+    val headers: Map<String, String> = emptyMap()
+)
+
 data class CloudTransferProgress(
     val currentFileName: String = "",
     val currentIndex: Int = 1,

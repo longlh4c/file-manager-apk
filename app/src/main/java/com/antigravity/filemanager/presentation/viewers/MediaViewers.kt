@@ -65,10 +65,17 @@ private sealed class ViewerEntry {
 }
 
 /** A resolved playable source for [VideoPlayerScreen] — either a downloaded local file, or (for
- * a Dropbox video opened via a pre-signed streamable link) a remote URI played directly. */
+ * a cloud video opened via a direct/pre-signed link) a remote URI played directly. */
 private sealed class ResolvedVideoMedia {
     data class LocalFile(val file: File) : ResolvedVideoMedia()
     data class StreamUri(val uri: Uri) : ResolvedVideoMedia()
+}
+
+/** Same idea as [ResolvedVideoMedia] but for [ImageViewerScreen] — Coil decodes a stream URL
+ * directly (with any required headers) instead of a local file. */
+private sealed class ResolvedImageMedia {
+    data class LocalFile(val file: File) : ResolvedImageMedia()
+    data class StreamUri(val url: String) : ResolvedImageMedia()
 }
 
 private fun sortSiblingFiles(files: List<File>, sortOption: FileSortOption): List<File> {
@@ -90,12 +97,23 @@ fun ImageViewerScreen(
     parentPath: String = "",
     sortOption: FileSortOption = FileSortOption.BY_NAME_ASC,
     cloudAccountId: String? = null,
+    fileName: String = "",
     onNavigateBack: () -> Unit,
     cloudMediaViewerViewModel: CloudMediaViewerViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
     val actualInitialPath = remember(initialPath) { Uri.decode(initialPath) }
     val actualParentPath = remember(parentPath) { Uri.decode(parentPath) }
+    val actualFileName = remember(fileName) { Uri.decode(fileName) }
+    // A tapped Dropbox/Google Drive image (including .gif) may already be a direct streamable
+    // URL (see CloudExplorerViewModel.openMediaStream) rather than a downloaded local file —
+    // decode it directly instead of treating it as a filesystem path.
+    val isInitialStream = remember(actualInitialPath) {
+        actualInitialPath.startsWith("http://") || actualInitialPath.startsWith("https://")
+    }
+    val initialDisplayName = remember(actualInitialPath, actualFileName) {
+        if (isInitialStream && actualFileName.isNotEmpty()) actualFileName else File(actualInitialPath).name
+    }
 
     // Gather sibling images, ordered the same way the caller had them sorted. Cloud files come
     // from the session the explorer screen stashed (there's no local folder to scan for them).
@@ -114,9 +132,8 @@ fun ImageViewerScreen(
         }
     }
 
-    val initialIndex = remember(actualInitialPath, imageEntries) {
-        val initialName = File(actualInitialPath).name
-        val idx = imageEntries.indexOfFirst { it.entryName == initialName }
+    val initialIndex = remember(initialDisplayName, imageEntries) {
+        val idx = imageEntries.indexOfFirst { it.entryName == initialDisplayName }
         if (idx >= 0) idx else 0
     }
 
@@ -127,20 +144,29 @@ fun ImageViewerScreen(
 
     var showControls by remember { mutableStateOf(true) }
 
-    // The tapped file is already downloaded; other cloud pages resolve on demand as swiped to.
-    val resolvedCloudFiles = remember(cloudAccountId) {
-        mutableStateMapOf<String, File>().apply {
-            if (cloudAccountId != null) put(File(actualInitialPath).name, File(actualInitialPath))
+    // The tapped file is already resolved (local or stream); other cloud pages resolve on
+    // demand as swiped to.
+    val resolvedCloudMedia = remember(cloudAccountId) {
+        mutableStateMapOf<String, ResolvedImageMedia>().apply {
+            if (cloudAccountId != null) {
+                val media = if (isInitialStream) {
+                    ResolvedImageMedia.StreamUri(actualInitialPath)
+                } else {
+                    ResolvedImageMedia.LocalFile(File(actualInitialPath))
+                }
+                put(initialDisplayName, media)
+            }
         }
     }
 
     val currentEntry = imageEntries.getOrNull(pagerState.currentPage)
-    val currentLocalFile: File? = when (currentEntry) {
-        is ViewerEntry.Local -> currentEntry.file
-        is ViewerEntry.Cloud -> resolvedCloudFiles[currentEntry.entryName]
-        null -> File(actualInitialPath)
+    val currentMedia: ResolvedImageMedia? = when (currentEntry) {
+        is ViewerEntry.Local -> ResolvedImageMedia.LocalFile(currentEntry.file)
+        is ViewerEntry.Cloud -> resolvedCloudMedia[currentEntry.entryName]
+        null -> if (isInitialStream) ResolvedImageMedia.StreamUri(actualInitialPath) else ResolvedImageMedia.LocalFile(File(actualInitialPath))
     }
-    val currentName = currentEntry?.entryName ?: File(actualInitialPath).name
+    val currentLocalFile: File? = (currentMedia as? ResolvedImageMedia.LocalFile)?.file
+    val currentName = currentEntry?.entryName ?: initialDisplayName
 
     Scaffold(
         topBar = {
@@ -220,31 +246,34 @@ fun ImageViewerScreen(
                 state = pagerState,
                 modifier = Modifier.fillMaxSize()
             ) { page ->
-                when (val entry = imageEntries[page]) {
-                    is ViewerEntry.Local -> ZoomableImagePage(
-                        file = entry.file,
-                        onTap = { showControls = !showControls }
-                    )
-                    is ViewerEntry.Cloud -> {
-                        val resolved = resolvedCloudFiles[entry.entryName]
-                        if (resolved != null) {
-                            ZoomableImagePage(
-                                file = resolved,
-                                onTap = { showControls = !showControls }
-                            )
-                        } else {
-                            LaunchedEffect(entry.entryName, cloudAccountId) {
-                                val result = cloudMediaViewerViewModel.resolveLocalFile(cloudAccountId!!, entry.item)
-                                result.getOrNull()?.let { resolvedCloudFiles[entry.entryName] = it }
-                            }
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                CircularProgressIndicator(color = TextSecondary)
+                val entry = imageEntries[page]
+                val resolvedMedia = when (entry) {
+                    is ViewerEntry.Local -> ResolvedImageMedia.LocalFile(entry.file)
+                    is ViewerEntry.Cloud -> resolvedCloudMedia[entry.entryName]
+                }
+
+                if (resolvedMedia == null) {
+                    LaunchedEffect(entry.entryName, cloudAccountId) {
+                        val cloudEntry = entry as? ViewerEntry.Cloud ?: return@LaunchedEffect
+                        val result = cloudMediaViewerViewModel.resolveMedia(cloudAccountId!!, cloudEntry.item)
+                        result.getOrNull()?.let { media ->
+                            resolvedCloudMedia[entry.entryName] = when (media) {
+                                is ResolvedMedia.LocalFile -> ResolvedImageMedia.LocalFile(media.file)
+                                is ResolvedMedia.Stream -> ResolvedImageMedia.StreamUri(media.url)
                             }
                         }
                     }
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = TextSecondary)
+                    }
+                } else {
+                    ZoomableImagePage(
+                        media = resolvedMedia,
+                        onTap = { showControls = !showControls }
+                    )
                 }
             }
         }
@@ -253,11 +282,24 @@ fun ImageViewerScreen(
 
 @Composable
 private fun ZoomableImagePage(
-    file: File,
+    media: ResolvedImageMedia,
     onTap: () -> Unit
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+    val displayName = when (media) {
+        is ResolvedImageMedia.LocalFile -> media.file.name
+        is ResolvedImageMedia.StreamUri -> media.url.substringAfterLast("/")
+    }
+    // A stream URL that needs headers (e.g. Google Drive's bearer token) gets them attached by
+    // FileManagerApp's shared OkHttpClient network interceptor (keyed by this same URL via
+    // CloudStreamHeaders) — a plain String model is enough here, no per-request ImageRequest
+    // needed, and unlike headers set directly on the request, a network interceptor still runs
+    // if the response 302s to a different host.
+    val imageModel = when (media) {
+        is ResolvedImageMedia.LocalFile -> media.file.absolutePath
+        is ResolvedImageMedia.StreamUri -> media.url
+    }
 
     Box(
         modifier = Modifier
@@ -304,9 +346,14 @@ private fun ZoomableImagePage(
         contentAlignment = Alignment.Center
     ) {
         AsyncImage(
-            model = file.absolutePath,
-            contentDescription = file.name,
+            model = imageModel,
+            contentDescription = displayName,
             contentScale = ContentScale.Fit,
+            onState = { state ->
+                if (state is coil.compose.AsyncImagePainter.State.Error) {
+                    android.util.Log.e("ZoomableImagePage", "Failed to load $displayName ($imageModel)", state.result.throwable)
+                }
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
@@ -474,8 +521,13 @@ fun VideoPlayerScreen(
                     if (isCurrent) {
                         LaunchedEffect(entry.entryName, cloudAccountId) {
                             val cloudEntry = entry as? ViewerEntry.Cloud ?: return@LaunchedEffect
-                            val result = cloudMediaViewerViewModel.resolveLocalFile(cloudAccountId!!, cloudEntry.item)
-                            result.getOrNull()?.let { resolvedCloudMedia[cloudEntry.entryName] = ResolvedVideoMedia.LocalFile(it) }
+                            val result = cloudMediaViewerViewModel.resolveMedia(cloudAccountId!!, cloudEntry.item)
+                            result.getOrNull()?.let { media ->
+                                resolvedCloudMedia[cloudEntry.entryName] = when (media) {
+                                    is ResolvedMedia.LocalFile -> ResolvedVideoMedia.LocalFile(media.file)
+                                    is ResolvedMedia.Stream -> ResolvedVideoMedia.StreamUri(Uri.parse(media.url))
+                                }
+                            }
                         }
                     }
                     Box(
@@ -489,9 +541,22 @@ fun VideoPlayerScreen(
                         is ResolvedVideoMedia.LocalFile -> Uri.fromFile(resolvedMedia.file)
                         is ResolvedVideoMedia.StreamUri -> resolvedMedia.uri
                     }
+                    // A stream URI may need headers (e.g. Google Drive's bearer token) — Dropbox's
+                    // pre-signed link needs none, so this is empty for that case and ExoPlayer's
+                    // default HTTP data source is used either way.
                     val exoPlayer = remember(playbackUri) {
-                        ExoPlayer.Builder(context).build().apply {
-                            setMediaItem(MediaItem.fromUri(playbackUri))
+                        val headers = CloudStreamHeaders.get(playbackUri.toString())
+                        val player = ExoPlayer.Builder(context).build()
+                        if (headers.isEmpty()) {
+                            player.setMediaItem(MediaItem.fromUri(playbackUri))
+                        } else {
+                            val dataSourceFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                                .setDefaultRequestProperties(headers)
+                            val mediaSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(dataSourceFactory)
+                                .createMediaSource(MediaItem.fromUri(playbackUri))
+                            player.setMediaSource(mediaSource)
+                        }
+                        player.apply {
                             prepare()
                             playWhenReady = true
                         }

@@ -491,28 +491,42 @@ class CloudExplorerViewModel @Inject constructor(
     }
 
     /**
-     * Plays a video straight off Dropbox's pre-signed streamable link instead of downloading the
-     * whole file first — falls back to the normal download-then-open flow ([openFile]) if the
-     * file's already cached locally, the provider isn't Dropbox, or the link request fails.
+     * A local cache file only counts as "already downloaded" if its size matches the known
+     * remote size. Without this check, a file left truncated by an interrupted prior download
+     * (app killed mid-transfer, cancelled job, network drop) — non-empty but incomplete — gets
+     * silently served as if it were the real thing, which is exactly what made some large
+     * videos "fail" to play: a 50MB partial file passed off as a 500MB video. The stale copy is
+     * deleted so nothing else can be fooled by it either.
      */
-    fun openVideoStream(file: FileItem, onReadyToOpen: (FileItem) -> Unit) {
-        val provider = _uiState.value.account?.provider
-        if (provider != com.antigravity.filemanager.domain.model.CloudProvider.DROPBOX) {
-            openFile(file, onReadyToOpen)
-            return
+    private fun isCompleteLocalCopy(localFile: File, expectedSize: Long): Boolean {
+        if (!localFile.exists() || localFile.length() <= 0) return false
+        if (expectedSize > 0 && localFile.length() != expectedSize) {
+            localFile.delete()
+            return false
         }
+        return true
+    }
+
+    /**
+     * Views an image or video straight off a provider's direct/pre-signed link instead of
+     * downloading the whole file first — falls back to the normal download-then-open flow
+     * ([openFile]) if the file's already cached locally, the provider doesn't support direct
+     * streaming (MEGA — client-side encrypted), or the link request fails.
+     */
+    fun openMediaStream(file: FileItem, onReadyToOpen: (FileItem) -> Unit) {
         val targetDir = File(context.cacheDir, "cloud_downloads/$accountId")
         val localFile = File(targetDir, file.name)
-        if (localFile.exists() && localFile.length() > 0) {
+        if (isCompleteLocalCopy(localFile, file.size)) {
             onReadyToOpen(file.copy(path = localFile.absolutePath))
             return
         }
 
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
-            val link = cloudUseCase.getStreamableLink(accountId, file.path).getOrNull()
-            if (link != null) {
-                onReadyToOpen(file.copy(path = link))
+            val source = cloudUseCase.getStreamSource(accountId, file.path).getOrNull()
+            if (source != null) {
+                com.antigravity.filemanager.presentation.viewers.CloudStreamHeaders.put(source.url, source.headers)
+                onReadyToOpen(file.copy(path = source.url))
             } else {
                 openFile(file, onReadyToOpen)
             }
@@ -525,7 +539,7 @@ class CloudExplorerViewModel @Inject constructor(
             try {
                 val targetDir = File(context.cacheDir, "cloud_downloads/$accountId").apply { mkdirs() }
                 val localFile = File(targetDir, file.name)
-                if (localFile.exists() && localFile.length() > 0) {
+                if (isCompleteLocalCopy(localFile, file.size)) {
                     onReadyToOpen(file.copy(path = localFile.absolutePath))
                     return@launch
                 }

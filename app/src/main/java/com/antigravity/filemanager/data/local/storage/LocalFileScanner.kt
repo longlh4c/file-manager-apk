@@ -9,6 +9,8 @@ import android.webkit.MimeTypeMap
 import com.antigravity.filemanager.domain.model.*
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.*
@@ -88,40 +90,46 @@ class LocalFileScanner @Inject constructor(
         val isDateSort = sortOption == FileSortOption.BY_DATE_DESC || sortOption == FileSortOption.BY_DATE_ASC
         val isSizeSort = sortOption == FileSortOption.BY_SIZE_DESC || sortOption == FileSortOption.BY_SIZE_ASC
 
+        // Sorting by date or size needs a recursive scan of every subfolder (to find its most
+        // recently modified file, or its total size) — expensive once there are many subfolders.
+        // Running one entry at a time made that cost add up sequentially; doing them concurrently
+        // lets the IO dispatcher's thread pool overlap those scans instead.
         val list = files.filter { showHidden || !it.name.startsWith(".") }
             .map { file ->
-                val isDir = file.isDirectory
-                val ext = if (!isDir) file.extension.lowercase(Locale.getDefault()) else ""
-                val isVideo = ext in videoExtensions
-                val isImage = ext in imageExtensions
-                val isAudio = ext in audioExtensions
-                val mime = if (!isDir) getMimeType(file) else "resource/folder"
-                val count = if (isDir) file.list()?.size ?: 0 else 0
-                val size = if (isDir) {
-                    if (isSizeSort) getFolderTotalSize(file, maxDepth = 2) else 0L
-                } else file.length()
-                val badge = detectBadgeFromPath(file.absolutePath, isVideo = isVideo)
-                val folderBadge = if (isDir) detectFolderBadge(file.name) else FolderBadgeType.STANDARD
-                val effectiveTime = if (isDir) {
-                    if (isDateSort) getFolderEffectiveLastModified(file, maxDepth = 2) else file.lastModified()
-                } else file.lastModified()
+                async {
+                    val isDir = file.isDirectory
+                    val ext = if (!isDir) file.extension.lowercase(Locale.getDefault()) else ""
+                    val isVideo = ext in videoExtensions
+                    val isImage = ext in imageExtensions
+                    val isAudio = ext in audioExtensions
+                    val mime = if (!isDir) getMimeType(file) else "resource/folder"
+                    val count = if (isDir) file.list()?.size ?: 0 else 0
+                    val size = if (isDir) {
+                        if (isSizeSort) getFolderTotalSize(file, maxDepth = 2) else 0L
+                    } else file.length()
+                    val badge = detectBadgeFromPath(file.absolutePath, isVideo = isVideo)
+                    val folderBadge = if (isDir) detectFolderBadge(file.name) else FolderBadgeType.STANDARD
+                    val effectiveTime = if (isDir) {
+                        if (isDateSort) getFolderEffectiveLastModified(file, maxDepth = 2) else file.lastModified()
+                    } else file.lastModified()
 
-                FileItem(
-                    id = file.absolutePath,
-                    name = file.name,
-                    path = file.absolutePath,
-                    size = size,
-                    lastModified = effectiveTime,
-                    isDirectory = isDir,
-                    mimeType = mime,
-                    extension = ext,
-                    itemCount = count,
-                    thumbnailUri = if (!isDir && (isVideo || isImage || isAudio || mime.startsWith("image/") || mime.startsWith("video/"))) file.absolutePath else null,
-                    appSourceBadge = badge,
-                    folderBadgeType = folderBadge,
-                    isHidden = file.name.startsWith(".")
-                )
-            }
+                    FileItem(
+                        id = file.absolutePath,
+                        name = file.name,
+                        path = file.absolutePath,
+                        size = size,
+                        lastModified = effectiveTime,
+                        isDirectory = isDir,
+                        mimeType = mime,
+                        extension = ext,
+                        itemCount = count,
+                        thumbnailUri = if (!isDir && (isVideo || isImage || isAudio || mime.startsWith("image/") || mime.startsWith("video/"))) file.absolutePath else null,
+                        appSourceBadge = badge,
+                        folderBadgeType = folderBadge,
+                        isHidden = file.name.startsWith(".")
+                    )
+                }
+            }.awaitAll()
 
         sortFileList(list, sortOption)
     }

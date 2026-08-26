@@ -26,12 +26,13 @@ sealed class Screen(val route: String) {
         }
     }
 
-    object ImageViewer : Screen("image_viewer?path={path}&parentPath={parentPath}&sortOption={sortOption}&cloudAccountId={cloudAccountId}") {
-        fun createRoute(path: String, parentPath: String = "", sortOption: String = "BY_NAME_ASC", cloudAccountId: String? = null): String {
+    object ImageViewer : Screen("image_viewer?path={path}&parentPath={parentPath}&sortOption={sortOption}&cloudAccountId={cloudAccountId}&fileName={fileName}") {
+        fun createRoute(path: String, parentPath: String = "", sortOption: String = "BY_NAME_ASC", cloudAccountId: String? = null, fileName: String = ""): String {
             val encodedPath = Uri.encode(path)
             val encodedParent = Uri.encode(parentPath)
             val encodedAccountId = Uri.encode(cloudAccountId ?: "")
-            return "image_viewer?path=$encodedPath&parentPath=$encodedParent&sortOption=$sortOption&cloudAccountId=$encodedAccountId"
+            val encodedFileName = Uri.encode(fileName)
+            return "image_viewer?path=$encodedPath&parentPath=$encodedParent&sortOption=$sortOption&cloudAccountId=$encodedAccountId&fileName=$encodedFileName"
         }
     }
 

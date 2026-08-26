@@ -545,6 +545,33 @@ class CloudManager @Inject constructor(
         }
     }
 
+    /**
+     * Like [getStreamableLink], but for the media viewers (image/video playback) rather than
+     * the video-thumbnail frame grab — also covers Google Drive, whose media endpoint needs a
+     * bearer token attached to the request rather than a bare pre-signed URL. Still unsupported
+     * for MEGA (client-side encrypted; a raw range fetch would return ciphertext).
+     */
+    suspend fun getStreamSource(account: CloudAccount, remotePath: String): Result<com.antigravity.filemanager.domain.model.CloudStreamSource> =
+        withContext(Dispatchers.IO) {
+            when (account.provider) {
+                CloudProvider.DROPBOX -> dropboxApi.getTemporaryLink(account, remotePath)
+                    .map { com.antigravity.filemanager.domain.model.CloudStreamSource(it) }
+                CloudProvider.GOOGLE_DRIVE -> {
+                    // A Drive FileItem's `path` is a synthetic display path (e.g. "/My Drive/x.jpg"),
+                    // not the real Drive file ID the media endpoint needs — same resolution
+                    // [downloadFile] below uses to turn one back into an ID via folderIdCache.
+                    val fileName = remotePath.substringAfterLast("/").ifEmpty { "cloud_file" }
+                    val fileId = folderIdCache[remotePath]
+                        ?: folderIdCache[remotePath.trimStart('/')]
+                        ?: folderIdCache[fileName]
+                        ?: folderIdCache["/$fileName"]
+                        ?: remotePath
+                    googleDriveApi.getAuthenticatedMediaUrl(account, fileId)
+                }
+                CloudProvider.MEGA -> Result.failure(Exception("Streaming not supported for ${account.provider}"))
+            }
+        }
+
     suspend fun downloadFile(
         account: CloudAccount,
         remotePath: String,

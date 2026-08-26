@@ -240,10 +240,10 @@ class DropboxApiClient @Inject constructor() {
         fileName: String,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Result<File> = withContext(Dispatchers.IO) {
+        val targetFile = File(localTargetDir, fileName)
         try {
             val client = buildClient(account)
             val path = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
-            val targetFile = File(localTargetDir, fileName)
             targetFile.parentFile?.mkdirs()
             if (targetFile.exists()) {
                 targetFile.delete()
@@ -266,7 +266,10 @@ class DropboxApiClient @Inject constructor() {
             onProgress?.invoke(targetFile.length(), targetFile.length())
             Result.success(targetFile)
         } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
+            if (e is kotlinx.coroutines.CancellationException) {
+                targetFile.delete()
+                throw e
+            }
             Result.failure(e)
         }
     }

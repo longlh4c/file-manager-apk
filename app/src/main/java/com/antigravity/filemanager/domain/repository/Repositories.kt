@@ -96,6 +96,7 @@ interface ICloudRepository {
     suspend fun getCloudQuota(accountId: String): Result<Pair<Long, Long>>
     suspend fun downloadCloudThumbnail(accountId: String, nodeId: String): Result<ByteArray>
     suspend fun getCloudStreamableLink(accountId: String, remotePath: String): Result<String>
+    suspend fun getCloudStreamSource(accountId: String, remotePath: String): Result<com.antigravity.filemanager.domain.model.CloudStreamSource>
 }
 
 

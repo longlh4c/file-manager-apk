@@ -39,6 +39,8 @@ import com.antigravity.filemanager.presentation.theme.*
 import com.antigravity.filemanager.presentation.viewers.CloudViewerSession
 
 private val CLOUD_VIDEO_EXTENSIONS = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v")
+private val CLOUD_IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng")
+private val CLOUD_STREAMABLE_EXTENSIONS = CLOUD_VIDEO_EXTENSIONS + CLOUD_IMAGE_EXTENSIONS
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -520,7 +522,7 @@ fun CloudExplorerScreen(
                                         } else {
                                             CloudViewerSession.set(accountId, filteredFiles)
                                             val openWith: (FileItem, (FileItem) -> Unit) -> Unit =
-                                                if (file.extension.lowercase() in CLOUD_VIDEO_EXTENSIONS) viewModel::openVideoStream else viewModel::openFile
+                                                if (file.extension.lowercase() in CLOUD_STREAMABLE_EXTENSIONS) viewModel::openMediaStream else viewModel::openFile
                                             openWith(file) { readyItem ->
                                                 onOpenFile(readyItem, uiState.sortOption, accountId)
                                             }
