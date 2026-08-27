@@ -218,6 +218,22 @@ fun AudioListItem(
     }
 }
 
+/**
+ * "N subfolders, M files" when the split is actually known (currently only MEGA populates
+ * subfolderCount/fileChildCount — see MegaApiClient.listFiles), otherwise falls back to the
+ * plain combined count other providers/local storage already show. The split is only trusted
+ * when it sums back to itemCount, so an unpopulated 0/0 on a provider that hasn't split its
+ * count doesn't get misread as "this folder is empty".
+ */
+private fun folderItemCountLabel(file: FileItem): String {
+    val hasSplit = file.subfolderCount + file.fileChildCount == file.itemCount
+    return if (hasSplit) {
+        "${file.subfolderCount} folders, ${file.fileChildCount} items"
+    } else {
+        "${file.itemCount} items"
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FileListItem(
@@ -299,7 +315,7 @@ fun FileListItem(
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
-                text = if (file.isDirectory) "${file.itemCount} items" else file.formattedSize,
+                text = if (file.isDirectory) folderItemCountLabel(file) else file.formattedSize,
                 color = TextSecondary,
                 fontSize = 13.sp
             )

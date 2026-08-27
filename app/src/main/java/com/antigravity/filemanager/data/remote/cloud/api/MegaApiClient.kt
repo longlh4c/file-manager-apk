@@ -216,7 +216,9 @@ class MegaApiClient @Inject constructor(
             val result = filtered.map { node ->
                 val isDir = node.type == 1
                 val ext = if (!isDir) node.name.substringAfterLast(".", "") else ""
-                val count = if (isDir) childrenByParent[node.handle]?.count { it.type == 0 || it.type == 1 } ?: 0 else 0
+                val children = if (isDir) childrenByParent[node.handle] else null
+                val subfolders = children?.count { it.type == 1 } ?: 0
+                val childFiles = children?.count { it.type == 0 } ?: 0
                 FileItem(
                     id = node.handle,
                     name = node.name,
@@ -224,7 +226,9 @@ class MegaApiClient @Inject constructor(
                     size = node.size,
                     lastModified = node.timestamp,
                     isDirectory = isDir,
-                    itemCount = count,
+                    itemCount = subfolders + childFiles,
+                    subfolderCount = subfolders,
+                    fileChildCount = childFiles,
                     extension = ext
                 )
             }.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase(Locale.getDefault()) }))

@@ -286,11 +286,16 @@ class CloudExplorerViewModel @Inject constructor(
                     launch(Dispatchers.IO) {
                         semaphore.withPermit {
                             val result = cloudUseCase.getFiles(accountId, folder.path)
-                            val count = result.getOrNull()?.size ?: 0
+                            val children = result.getOrNull() ?: emptyList()
+                            val count = children.size
                             if (count > 0) {
+                                val subfolders = children.count { it.isDirectory }
+                                val childFiles = count - subfolders
                                 withContext(Dispatchers.Main) {
                                     val updated = _uiState.value.files.map {
-                                        if (it.id == folder.id) it.copy(itemCount = count) else it
+                                        if (it.id == folder.id) {
+                                            it.copy(itemCount = count, subfolderCount = subfolders, fileChildCount = childFiles)
+                                        } else it
                                     }
                                     _uiState.value = _uiState.value.copy(files = updated)
                                 }
