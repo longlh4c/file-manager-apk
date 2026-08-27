@@ -318,14 +318,6 @@ class CloudStorageUseCase @Inject constructor(
     suspend fun downloadThumbnail(accountId: String, nodeId: String): Result<ByteArray> =
         cloudRepository.downloadCloudThumbnail(accountId, nodeId)
 
-    /** MEGA-only on-demand decrypting data source — see [CloudManager.openThumbnailDataSource]. */
-    suspend fun openThumbnailDataSource(accountId: String, nodeId: String): Result<android.media.MediaDataSource> =
-        cloudRepository.openCloudThumbnailDataSource(accountId, nodeId)
-
-    /** Fallback for [openThumbnailDataSource] — see [CloudManager.downloadFilePartial]. */
-    suspend fun downloadFilePartial(accountId: String, nodeId: String, localTargetFile: java.io.File, maxBytes: Long): Result<java.io.File> =
-        cloudRepository.downloadCloudFilePartial(accountId, nodeId, localTargetFile, maxBytes)
-
     /** Range-request-capable direct URL for the file — lets a video thumbnail be decoded
      * without downloading the whole file. Only some providers support this (see [CloudManager]). */
     suspend fun getStreamableLink(accountId: String, remotePath: String): Result<String> =

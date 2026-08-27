@@ -95,8 +95,6 @@ interface ICloudRepository {
     suspend fun renameCloudFile(accountId: String, remotePath: String, newName: String): Result<FileItem>
     suspend fun getCloudQuota(accountId: String): Result<Pair<Long, Long>>
     suspend fun downloadCloudThumbnail(accountId: String, nodeId: String): Result<ByteArray>
-    suspend fun downloadCloudFilePartial(accountId: String, nodeId: String, localTargetFile: java.io.File, maxBytes: Long): Result<java.io.File>
-    suspend fun openCloudThumbnailDataSource(accountId: String, nodeId: String): Result<android.media.MediaDataSource>
     suspend fun getCloudStreamableLink(accountId: String, remotePath: String): Result<String>
     suspend fun getCloudStreamSource(accountId: String, remotePath: String): Result<com.antigravity.filemanager.domain.model.CloudStreamSource>
 }
