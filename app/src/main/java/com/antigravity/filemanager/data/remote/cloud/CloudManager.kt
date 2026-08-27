@@ -263,9 +263,18 @@ class CloudManager @Inject constructor(
                 return@withContext remoteResult
             }
 
-            // 2. Read from the account's local cloud drive directory
+            // 2. Read from the account's local cloud drive directory — a best-effort offline
+            // fallback for providers that actually mirror files there. For MEGA this directory
+            // is normally empty (nothing mirrors into it), so on a transient remote failure (e.g.
+            // MEGA briefly rate-limiting under concurrent requests) this used to silently return
+            // an empty "success", wiping out whatever was already displayed. Only trust this
+            // fallback when it actually found something — otherwise surface the original remote
+            // failure so callers can keep showing their last-known-good (e.g. cached) list.
             val folder = getAccountStorageDir(account.id, remotePath)
             val children = folder.listFiles() ?: emptyArray()
+            if (children.isEmpty()) {
+                return@withContext remoteResult
+            }
 
             val resultList = children.map { file ->
                 val isDir = file.isDirectory
@@ -529,6 +538,35 @@ class CloudManager @Inject constructor(
             CloudProvider.DROPBOX -> Result.failure(Exception("Thumbnail endpoint not supported for ${account.provider}"))
         }
     }
+
+    /**
+     * Fallback for [openThumbnailDataSource] — downloads just the first [maxBytes] of a file,
+     * decrypted. MEGA-only: its AES-CTR encryption is byte-range addressable, unlike other
+     * providers here.
+     */
+    suspend fun downloadFilePartial(account: CloudAccount, nodeId: String, localTargetFile: java.io.File, maxBytes: Long): Result<java.io.File> =
+        withContext(Dispatchers.IO) {
+            when (account.provider) {
+                CloudProvider.MEGA -> megaApi.downloadFilePartial(account, nodeId, localTargetFile, maxBytes)
+                CloudProvider.DROPBOX, CloudProvider.GOOGLE_DRIVE ->
+                    Result.failure(Exception("Partial download not supported for ${account.provider}"))
+            }
+        }
+
+    /**
+     * MEGA-only: an on-demand decrypting [android.media.MediaDataSource] that fetches just the
+     * byte ranges a reader (MediaMetadataRetriever, for thumbnail extraction) actually requests,
+     * instead of eagerly downloading a fixed-size prefix. See
+     * [com.antigravity.filemanager.data.remote.cloud.api.MegaApiClient.openThumbnailDataSource].
+     */
+    suspend fun openThumbnailDataSource(account: CloudAccount, nodeId: String): Result<android.media.MediaDataSource> =
+        withContext(Dispatchers.IO) {
+            when (account.provider) {
+                CloudProvider.MEGA -> megaApi.openThumbnailDataSource(account, nodeId)
+                CloudProvider.DROPBOX, CloudProvider.GOOGLE_DRIVE ->
+                    Result.failure(Exception("On-demand thumbnail data source not supported for ${account.provider}"))
+            }
+        }
 
     /**
      * A pre-signed Range-request-capable URL for streaming/seeking directly into the file

@@ -195,12 +195,25 @@ class CloudExplorerViewModel @Inject constructor(
             if (!skipRevalidate) {
                 launch {
                     val result = cloudUseCase.getFiles(accountId, path, forceFullRefresh)
+                    if (result.isFailure) {
+                        // Don't let a transient API error (e.g. MEGA rate-limiting under
+                        // concurrent thumbnail fetches) wipe out a file list already on screen —
+                        // just stop the spinner and leave whatever's showing (cached or empty)
+                        // alone; the user can pull-to-refresh to retry.
+                        _uiState.value = _uiState.value.copy(isLoading = false)
+                        return@launch
+                    }
                     val rawFilesList = result.getOrDefault(emptyList())
 
-                    // Match already downloaded thumbnail files on disk
+                    // Match already downloaded thumbnail files on disk. Images only — Coil can
+                    // render those directly, but handing it a raw video file to decode itself is
+                    // unreliable on some devices (see fetchThumbnailFor), so videos always go
+                    // through requestThumbnail()'s proper frame-extraction path instead.
                     val targetDir = File(context.cacheDir, "cloud_downloads/$accountId")
                     val filesList = rawFilesList.map { file ->
-                        if (!file.isDirectory && file.thumbnailUri == null) {
+                        if (!file.isDirectory && file.thumbnailUri == null &&
+                            file.extension.lowercase() in thumbnailImageExtensions
+                        ) {
                             val local = File(targetDir, file.name)
                             if (local.exists() && local.length() > 0) {
                                 file.copy(thumbnailUri = local.absolutePath)
@@ -326,6 +339,105 @@ class CloudExplorerViewModel @Inject constructor(
             thread.start()
         }
 
+    /** Decodes from a local (partially downloaded) file — fallback for MEGA when the on-demand
+     * data source path fails. Deletes [localFile] afterwards (it's a disposable temp file). */
+    private suspend fun extractVideoFrameThumbnailFromFile(localFile: File, cachedThumb: File): String? =
+        kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            val thread = Thread({
+                val retriever = android.media.MediaMetadataRetriever()
+                val result = try {
+                    retriever.setDataSource(localFile.absolutePath)
+                    val frame = retriever.getFrameAtTime(1_000_000L, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        ?: retriever.getFrameAtTime(-1, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    if (frame != null) {
+                        cachedThumb.outputStream().use { out ->
+                            frame.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, out)
+                        }
+                        frame.recycle()
+                        cachedThumb.absolutePath
+                    } else {
+                        null
+                    }
+                } catch (t: Throwable) {
+                    null
+                } finally {
+                    retriever.release()
+                    localFile.delete()
+                }
+                if (cont.isActive) cont.resumeWith(Result.success(result))
+            }, "video-thumb-extract-partial")
+            thread.isDaemon = true
+            thread.start()
+        }
+
+    /** Same as [extractVideoFrameThumbnailFromFile] but for a persistent local copy (the full
+     * cached download) rather than a disposable partial-download temp file — must NOT delete
+     * [localFile] afterwards. */
+    private suspend fun extractVideoFrameThumbnailFromLocalCopy(localFile: File, cachedThumb: File): String? =
+        kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            val thread = Thread({
+                val retriever = android.media.MediaMetadataRetriever()
+                val result = try {
+                    retriever.setDataSource(localFile.absolutePath)
+                    val frame = retriever.getFrameAtTime(1_000_000L, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        ?: retriever.getFrameAtTime(-1, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    if (frame != null) {
+                        cachedThumb.outputStream().use { out ->
+                            frame.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, out)
+                        }
+                        frame.recycle()
+                        cachedThumb.absolutePath
+                    } else {
+                        null
+                    }
+                } catch (t: Throwable) {
+                    null
+                } finally {
+                    retriever.release()
+                }
+                if (cont.isActive) cont.resumeWith(Result.success(result))
+            }, "video-thumb-extract-localcopy")
+            thread.isDaemon = true
+            thread.start()
+        }
+
+    /** Decodes a frame straight off a [android.media.MediaDataSource] (see
+     * [com.antigravity.filemanager.data.remote.cloud.api.MegaDecryptingDataSource]), which only
+     * fetches+decrypts the byte ranges the retriever actually reads — no eager fixed-size
+     * download needed. Used for MEGA, whose content is client-side encrypted so there's no bare
+     * URL MediaMetadataRetriever could stream from directly. */
+    private suspend fun extractVideoFrameThumbnailFromDataSource(dataSource: android.media.MediaDataSource, cachedThumb: File): String? =
+        kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            val thread = Thread({
+                val retriever = android.media.MediaMetadataRetriever()
+                val result = try {
+                    retriever.setDataSource(dataSource)
+                    // A frame right at position 0 is often a black fade-in/intro/watermark
+                    // splash — try ~1s in first so short/leading-black videos don't get an
+                    // all-black thumbnail.
+                    val frame = retriever.getFrameAtTime(1_000_000L, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        ?: retriever.getFrameAtTime(-1, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    if (frame != null) {
+                        cachedThumb.outputStream().use { out ->
+                            frame.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, out)
+                        }
+                        frame.recycle()
+                        cachedThumb.absolutePath
+                    } else {
+                        null
+                    }
+                } catch (t: Throwable) {
+                    null
+                } finally {
+                    retriever.release()
+                    try { dataSource.close() } catch (e: Exception) {}
+                }
+                if (cont.isActive) cont.resumeWith(Result.success(result))
+            }, "video-thumb-extract-datasource")
+            thread.isDaemon = true
+            thread.start()
+        }
+
     private val thumbnailSemaphore = kotlinx.coroutines.sync.Semaphore(3)
     private val inFlightThumbnailIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     private val thumbnailImageExtensions = setOf("jpg", "jpeg", "png", "webp", "gif")
@@ -340,14 +452,25 @@ class CloudExplorerViewModel @Inject constructor(
      * far the user scrolled.
      */
     fun requestThumbnail(file: FileItem) {
-        if (file.isDirectory || file.thumbnailUri != null) return
         val ext = file.extension.lowercase()
+        // A video's thumbnailUri is only ever set to a real extracted JPEG (cloud_thumbs/*.jpg)
+        // by this class — EXCEPT stale entries persisted (via folderCacheManager) from before
+        // videos went through proper frame extraction, when it could still be a raw video file
+        // path. Treat those as unset so they get re-derived instead of staying stuck broken.
+        val hasStaleRawVideoThumbnail = file.thumbnailUri != null &&
+            ext in thumbnailVideoExtensions && !file.thumbnailUri.endsWith(".jpg")
+        if (file.isDirectory || (file.thumbnailUri != null && !hasStaleRawVideoThumbnail)) return
         val provider = _uiState.value.account?.provider
         // Dropbox exposes a pre-signed, Range-request-capable direct link (getStreamableLink),
         // so MediaMetadataRetriever can seek straight to one frame without downloading the
         // whole video — unlike the size-capped full-download fallback, it doesn't care how
         // large the file is.
         val supportsStreamableVideo = provider == com.antigravity.filemanager.domain.model.CloudProvider.DROPBOX
+        // MEGA content is encrypted, so there's no bare streamable URL — but its AES-CTR
+        // encryption is byte-range addressable, so a MEGA video's thumbnail can come from an
+        // on-demand decrypting data source (openThumbnailDataSource) instead of a flat download,
+        // same as the size-uncapped Dropbox/streamable path above.
+        val supportsOnDemandVideo = provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA
         // Dropbox has no lightweight thumbnail endpoint for images either, but the same
         // pre-signed streamable link works for them too — Coil can decode straight off that
         // URL (including .gif) without us downloading the full file first, so images aren't
@@ -358,7 +481,7 @@ class CloudExplorerViewModel @Inject constructor(
         val isVideo = ext in thumbnailVideoExtensions
         val isImage = ext in thumbnailImageExtensions
         val eligible = when {
-            isVideo && supportsStreamableVideo -> true
+            isVideo && (supportsStreamableVideo || supportsOnDemandVideo) -> true
             isImage && hasCheapImagePath -> true
             isVideo || isImage -> file.size in 1..maxImageThumbnailPrefetchBytes
             else -> false
@@ -422,8 +545,28 @@ class CloudExplorerViewModel @Inject constructor(
 
             val localFile = File(targetDir, item.name)
             if (localFile.exists() && localFile.length() > 0) {
-                withContext(Dispatchers.Main) { updateThumbnailUriInState(item.id, localFile.absolutePath) }
-                return
+                if (isVideo) {
+                    // Handing Coil the raw video file (its generic VideoThumbnailFetcher) is
+                    // unreliable on some devices/ROMs (a known ThumbnailUtils
+                    // NumberFormatException bug) — extract a real JPEG frame ourselves instead.
+                    val safeId = item.id.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                    val cachedThumb = File(thumbDir, "$safeId.jpg")
+                    if (cachedThumb.exists() && cachedThumb.length() > 0) {
+                        withContext(Dispatchers.Main) { updateThumbnailUriInState(item.id, cachedThumb.absolutePath) }
+                        return
+                    }
+                    val resultPath = kotlinx.coroutines.withTimeoutOrNull(20_000) {
+                        extractVideoFrameThumbnailFromLocalCopy(localFile, cachedThumb)
+                    }
+                    if (resultPath != null) {
+                        withContext(Dispatchers.Main) { updateThumbnailUriInState(item.id, resultPath) }
+                        return
+                    }
+                    // Extraction failed too — fall through so other strategies still get a shot.
+                } else {
+                    withContext(Dispatchers.Main) { updateThumbnailUriInState(item.id, localFile.absolutePath) }
+                    return
+                }
             }
 
             // A provider's own pre-generated thumbnail (a few KB) is far cheaper than the full
@@ -442,6 +585,45 @@ class CloudExplorerViewModel @Inject constructor(
                     cachedThumb.writeBytes(thumbBytes)
                     withContext(Dispatchers.Main) { updateThumbnailUriInState(item.id, cachedThumb.absolutePath) }
                     return
+                }
+            }
+
+            if (isVideo && provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA) {
+                // No server-side thumbnail attribute for this video (checked above). Prefer an
+                // on-demand decrypting data source — MediaMetadataRetriever only pulls the byte
+                // ranges it actually needs (header + one keyframe), typically far less than a
+                // flat prefix download. Falls back to fetching a fixed prefix if that fails.
+                val safeId = item.id.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                val cachedThumb = File(thumbDir, "$safeId.jpg")
+                if (cachedThumb.exists() && cachedThumb.length() > 0) {
+                    withContext(Dispatchers.Main) { updateThumbnailUriInState(item.id, cachedThumb.absolutePath) }
+                    return
+                }
+
+                val dataSource = cloudUseCase.openThumbnailDataSource(accountId, item.id).getOrNull()
+                if (dataSource != null) {
+                    val resultPath = kotlinx.coroutines.withTimeoutOrNull(20_000) {
+                        extractVideoFrameThumbnailFromDataSource(dataSource, cachedThumb)
+                    }
+                    if (resultPath != null) {
+                        withContext(Dispatchers.Main) { updateThumbnailUriInState(item.id, resultPath) }
+                        return
+                    }
+                }
+
+                val partialFile = File(targetDir, "$safeId.partial")
+                val partialResult = cloudUseCase.downloadFilePartial(accountId, item.id, partialFile, 1_500_000L)
+                val partialDownloaded = partialResult.getOrNull()
+                if (partialDownloaded != null && partialDownloaded.exists() && partialDownloaded.length() > 0) {
+                    val resultPath = kotlinx.coroutines.withTimeoutOrNull(20_000) {
+                        extractVideoFrameThumbnailFromFile(partialDownloaded, cachedThumb)
+                    }
+                    if (resultPath != null) {
+                        withContext(Dispatchers.Main) { updateThumbnailUriInState(item.id, resultPath) }
+                        return
+                    }
+                } else {
+                    partialDownloaded?.delete()
                 }
             }
 
