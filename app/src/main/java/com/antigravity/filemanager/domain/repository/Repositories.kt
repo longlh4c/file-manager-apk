@@ -91,7 +91,8 @@ interface ICloudRepository {
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Result<Unit>
     suspend fun createFolder(accountId: String, folderName: String, parentPath: String): Result<FileItem>
-    suspend fun deleteCloudFile(accountId: String, remotePath: String): Result<Unit>
+    suspend fun deleteCloudFile(accountId: String, remotePath: String, moveToTrash: Boolean = true): Result<Unit>
+    suspend fun restoreCloudFile(accountId: String, remotePath: String): Result<Unit>
     suspend fun renameCloudFile(accountId: String, remotePath: String, newName: String): Result<FileItem>
     suspend fun getCloudQuota(accountId: String): Result<Pair<Long, Long>>
     suspend fun downloadCloudThumbnail(accountId: String, nodeId: String): Result<ByteArray>

@@ -263,7 +263,13 @@ private fun ConflictChoiceChip(
 fun DeleteConfirmDialog(
     itemCount: Int,
     onConfirm: (moveToTrash: Boolean) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    // When false, this is a "Delete Permanently" confirmation (e.g. already inside a trash/
+    // rubbish-bin view) — there's no "move to trash" choice left to make, so the checkbox is
+    // hidden and onConfirm always fires with false.
+    showMoveToTrashOption: Boolean = true,
+    title: String = "Delete",
+    message: String = "Are you sure you want to delete $itemCount item(s)?"
 ) {
     var moveToTrash by remember { mutableStateOf(true) }
 
@@ -271,7 +277,7 @@ fun DeleteConfirmDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "Delete",
+                text = title,
                 color = TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 18.sp
@@ -280,35 +286,37 @@ fun DeleteConfirmDialog(
         text = {
             Column {
                 Text(
-                    text = "Are you sure you want to delete $itemCount item(s)?",
+                    text = message,
                     color = TextSecondary,
                     fontSize = 15.sp
                 )
-                Spacer(modifier = Modifier.height(16.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.clickable { moveToTrash = !moveToTrash }
-                ) {
-                    Checkbox(
-                        checked = moveToTrash,
-                        onCheckedChange = { moveToTrash = it },
-                        colors = CheckboxDefaults.colors(
-                            checkedColor = TealPrimary,
-                            uncheckedColor = TextSecondary
+                if (showMoveToTrashOption) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable { moveToTrash = !moveToTrash }
+                    ) {
+                        Checkbox(
+                            checked = moveToTrash,
+                            onCheckedChange = { moveToTrash = it },
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = TealPrimary,
+                                uncheckedColor = TextSecondary
+                            )
                         )
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Move to Recycle Bin",
-                        color = TextPrimary,
-                        fontSize = 14.sp
-                    )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Move to Recycle Bin",
+                            color = TextPrimary,
+                            fontSize = 14.sp
+                        )
+                    }
                 }
             }
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(moveToTrash) },
+                onClick = { onConfirm(if (showMoveToTrashOption) moveToTrash else false) },
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF5350), contentColor = Color.White)
             ) {
                 Text(text = "DELETE", fontWeight = FontWeight.Bold)
@@ -448,7 +456,15 @@ fun AddCloudDialog(
             .requestScopes(com.google.android.gms.common.api.Scope(com.google.api.services.drive.DriveScopes.DRIVE))
             .build()
         val client = GoogleSignIn.getClient(context, gso)
-        googleSignInLauncher.launch(client.signInIntent)
+        // Google Play Services silently reuses the last-signed-in account for this app and skips
+        // the account picker unless the client's cached session is cleared first — without this,
+        // adding a second Google account is impossible; every sign-in silently returns the same
+        // one already connected. signOut() only clears the local cached session (not the user's
+        // Google login elsewhere), so it's safe to call every time regardless of whether an
+        // account was already connected.
+        client.signOut().addOnCompleteListener {
+            googleSignInLauncher.launch(client.signInIntent)
+        }
     }
 
     val providerColor = remember(selectedProvider) {

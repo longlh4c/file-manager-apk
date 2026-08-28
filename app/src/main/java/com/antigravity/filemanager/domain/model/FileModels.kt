@@ -10,6 +10,7 @@ enum class FolderBadgeType {
     DOWNLOAD,    // Download
     MOVIES,      // Movies
     MUSIC,       // Music
+    TRASH,       // Cloud provider's own Trash/Rubbish Bin (Google Drive, MEGA)
     STANDARD     // Other folders
 }
 

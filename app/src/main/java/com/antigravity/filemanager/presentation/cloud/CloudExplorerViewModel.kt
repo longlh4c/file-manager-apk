@@ -52,7 +52,14 @@ data class CloudExplorerUiState(
     val clipboardItemSizes: Map<String, Long> = emptyMap(),
     val overwriteConflicts: List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList(),
     val downloadProgress: CloudTransferProgress? = null
-)
+) {
+    /** True when browsing inside a provider's real trash/rubbish bin (Google Drive's "/Trash" or
+     * MEGA's "/Rubbish Bin" virtual root entries, or any folder nested under them) — the
+     * selection action bar swaps Copy/Move/Delete for Restore/Delete Permanently in this case. */
+    val isInsideTrashView: Boolean
+        get() = currentPath == "/Trash" || currentPath.startsWith("/Trash/") ||
+            currentPath == "/Rubbish Bin" || currentPath.startsWith("/Rubbish Bin/")
+}
 
 @HiltViewModel
 class CloudExplorerViewModel @Inject constructor(
@@ -898,7 +905,7 @@ class CloudExplorerViewModel @Inject constructor(
         }
     }
 
-    fun deleteSelected() {
+    fun deleteSelected(moveToTrash: Boolean = true) {
         viewModelScope.launch {
             val pathsToDelete = _uiState.value.selectedPaths.toSet()
             val remainingFiles = _uiState.value.files.filterNot { it.path in pathsToDelete || it.id in pathsToDelete }
@@ -910,7 +917,7 @@ class CloudExplorerViewModel @Inject constructor(
                 isSelectionMode = false
             )
             pathsToDelete.forEach { path ->
-                cloudUseCase.deleteItem(accountId, path)
+                cloudUseCase.deleteItem(accountId, path, moveToTrash)
             }
             refresh()
         }
@@ -918,6 +925,24 @@ class CloudExplorerViewModel @Inject constructor(
 
     fun setShowDeleteDialog(show: Boolean) {
         _uiState.value = _uiState.value.copy(showDeleteDialog = show)
+    }
+
+    /** Restores the current selection out of the trash/rubbish bin view back to the account root. */
+    fun restoreSelected() {
+        viewModelScope.launch {
+            val pathsToRestore = _uiState.value.selectedPaths.toSet()
+            val remainingFiles = _uiState.value.files.filterNot { it.path in pathsToRestore || it.id in pathsToRestore }
+            _uiState.value = _uiState.value.copy(
+                isLoading = true,
+                files = remainingFiles,
+                selectedPaths = emptySet(),
+                isSelectionMode = false
+            )
+            pathsToRestore.forEach { path ->
+                cloudUseCase.restoreItem(accountId, path)
+            }
+            refresh()
+        }
     }
 
     private var pendingOverwriteAction: (suspend (overwriteNames: Set<String>, skipNames: Set<String>) -> Unit)? = null

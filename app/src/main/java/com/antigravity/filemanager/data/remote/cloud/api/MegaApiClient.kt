@@ -200,7 +200,8 @@ class MegaApiClient @Inject constructor(
                 return@withContext Result.failure(it)
             }
 
-            val targetParent = if (parentHandle.isNullOrBlank() || parentHandle == "root" || parentHandle == "/") {
+            val isRootRequest = parentHandle.isNullOrBlank() || parentHandle == "root" || parentHandle == "/"
+            val targetParent = if (isRootRequest) {
                 rootHandle.ifEmpty { allNodes.firstOrNull { it.type == 2 }?.handle ?: "" }
             } else {
                 parentHandle
@@ -233,7 +234,30 @@ class MegaApiClient @Inject constructor(
                 )
             }.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase(Locale.getDefault()) }))
 
-            Result.success(result)
+            // The Rubbish Bin is a real node (type 4) already in the tree, but excluded from the
+            // filter above like any other special node — surface it as a normal-looking folder
+            // pinned at the end of the root listing (not part of the alphabetical sort) so it
+            // behaves exactly like navigating into any other folder from here on.
+            val withRubbish = if (isRootRequest) {
+                val rubbish = allNodes.firstOrNull { it.type == 4 }
+                if (rubbish != null) {
+                    val rubbishChildren = childrenByParent[rubbish.handle]
+                    val subfolders = rubbishChildren?.count { it.type == 1 } ?: 0
+                    val childFiles = rubbishChildren?.count { it.type == 0 } ?: 0
+                    result + FileItem(
+                        id = rubbish.handle,
+                        name = "Rubbish Bin",
+                        path = rubbish.handle,
+                        isDirectory = true,
+                        itemCount = subfolders + childFiles,
+                        subfolderCount = subfolders,
+                        fileChildCount = childFiles,
+                        folderBadgeType = com.antigravity.filemanager.domain.model.FolderBadgeType.TRASH
+                    )
+                } else result
+            } else result
+
+            Result.success(withRubbish)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -792,6 +816,55 @@ class MegaApiClient @Inject constructor(
         }
     }
 
+    /**
+     * Renames a node via MEGA's "a":"a" (setattr) command — the node's encrypted attribute block
+     * ("MEGA" + JSON, AES-CBC with the node's own content key, zero IV) is entirely replaced, so
+     * this only sets `{"n": newName}` rather than trying to preserve/merge other attributes
+     * (fingerprint "c" etc. aren't required for the node to keep working). The node's key itself
+     * doesn't change on a plain rename, so it isn't resent.
+     */
+    suspend fun renameNode(account: CloudAccount, nodeHandle: String, newName: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val masterKeyOrNull = if (!account.refreshToken.isNullOrBlank()) {
+                try { base64UrlDecode(account.refreshToken) } catch (e: Exception) { null }
+            } else null
+            val masterKey = masterKeyOrNull ?: return@withContext Result.failure(Exception("No master key available"))
+
+            val treeResult = getOrFetchNodeTree(account)
+            val allNodes = treeResult.getOrElse { return@withContext Result.failure(it) }.first
+            val node = allNodes.firstOrNull { it.handle == nodeHandle }
+                ?: return@withContext Result.failure(Exception("Node not found in cached tree"))
+            val nodeKeyBytes = deriveNodeKeyBytes(node.keyStr, masterKey)
+                ?: return@withContext Result.failure(Exception("Could not resolve a decryption key for node $nodeHandle"))
+
+            val attrJson = JSONObject().apply { put("n", newName) }.toString()
+            val attrBytes = padTo16("MEGA$attrJson".toByteArray(StandardCharsets.UTF_8))
+            val encodedAttr = base64UrlEncode(aesCbcEncrypt(attrBytes, nodeKeyBytes, ByteArray(16)))
+
+            val session = account.sessionHandle ?: account.accessToken ?: ""
+            val sidParam = if (session.isNotBlank()) "?sid=$session" else ""
+            val url = "$megaApiUrl$sidParam"
+
+            val commandJson = JSONArray().apply {
+                put(JSONObject().apply {
+                    put("a", "a")
+                    put("n", nodeHandle)
+                    put("at", encodedAttr)
+                })
+            }.toString()
+
+            val response = sendMegaPost(url, commandJson)
+            val bodyStr = (response.getOrNull() ?: "[]").trim()
+            if (bodyStr.startsWith("-")) {
+                return@withContext Result.failure(Exception("MEGA rename failed: $bodyStr"))
+            }
+            invalidateNodeCache(account.id)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun deleteNode(account: CloudAccount, nodeHandle: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val session = account.sessionHandle ?: account.accessToken ?: ""
@@ -811,6 +884,58 @@ class MegaApiClient @Inject constructor(
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    /**
+     * MEGA's node-key encryption doesn't depend on the parent folder (unlike a shared folder's
+     * re-keying), so moving a node within one's own account tree is a plain "a":"m" move command,
+     * no re-encryption needed. Shared by [moveToRubbishBin] and [restoreFromRubbishBin].
+     */
+    private suspend fun moveNode(account: CloudAccount, nodeHandle: String, newParentHandle: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val session = account.sessionHandle ?: account.accessToken ?: ""
+            val sidParam = if (session.isNotBlank()) "?sid=$session" else ""
+            val url = "$megaApiUrl$sidParam"
+
+            val commandJson = JSONArray().apply {
+                put(JSONObject().apply {
+                    put("a", "m")
+                    put("n", nodeHandle)
+                    put("t", newParentHandle)
+                })
+            }.toString()
+
+            val response = sendMegaPost(url, commandJson)
+            val bodyStr = (response.getOrNull() ?: "[]").trim()
+            if (bodyStr.startsWith("-")) {
+                return@withContext Result.failure(Exception("MEGA move failed: $bodyStr"))
+            }
+            invalidateNodeCache(account.id)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Real "move to Rubbish Bin" — the Rubbish Bin is just another top-level node (type 4)
+     * already present in the cached tree, no separate lookup/API call needed to find its handle. */
+    suspend fun moveToRubbishBin(account: CloudAccount, nodeHandle: String): Result<Unit> {
+        val treeResult = getOrFetchNodeTree(account)
+        val allNodes = treeResult.getOrElse { return Result.failure(it) }.first
+        val rubbishHandle = allNodes.firstOrNull { it.type == 4 }?.handle
+            ?: return Result.failure(Exception("Could not resolve Rubbish Bin handle"))
+        return moveNode(account, nodeHandle, rubbishHandle)
+    }
+
+    /** Restores a node out of the Rubbish Bin back to the Cloud Drive root — MEGA doesn't track
+     * "original location" once a node is moved, so restore always lands at the account root,
+     * same simplification most third-party clients make. */
+    suspend fun restoreFromRubbishBin(account: CloudAccount, nodeHandle: String): Result<Unit> {
+        val treeResult = getOrFetchNodeTree(account)
+        val (allNodes, rootHandle) = treeResult.getOrElse { return Result.failure(it) }
+        val targetRoot = rootHandle.ifEmpty { allNodes.firstOrNull { it.type == 2 }?.handle ?: "" }
+        if (targetRoot.isBlank()) return Result.failure(Exception("Could not resolve Cloud Drive root handle"))
+        return moveNode(account, nodeHandle, targetRoot)
     }
 
     /**

@@ -164,7 +164,8 @@ class CloudManager @Inject constructor(
                             FileItem(id = "root", name = "My Drive", path = "/My Drive", isDirectory = true, mimeType = "application/vnd.google-apps.folder"),
                             FileItem(id = "__starred__", name = "Starred", path = "/Starred", isDirectory = true, mimeType = "application/vnd.google-apps.folder"),
                             FileItem(id = "__shared_with_me__", name = "Shared with me", path = "/Shared with me", isDirectory = true, mimeType = "application/vnd.google-apps.folder"),
-                            FileItem(id = "__shared_drives__", name = "Shared Drives", path = "/Shared Drives", isDirectory = true, mimeType = "application/vnd.google-apps.folder")
+                            FileItem(id = "__shared_drives__", name = "Shared Drives", path = "/Shared Drives", isDirectory = true, mimeType = "application/vnd.google-apps.folder"),
+                            FileItem(id = "__trash__", name = "Trash", path = "/Trash", isDirectory = true, mimeType = "application/vnd.google-apps.folder", folderBadgeType = FolderBadgeType.TRASH)
                         )
                         virtualItems.forEach { item ->
                             folderIdCache[item.path] = item.id
@@ -177,6 +178,7 @@ class CloudManager @Inject constructor(
                             "__starred__" -> googleDriveApi.listStarred(account)
                             "__shared_with_me__" -> googleDriveApi.listSharedWithMe(account)
                             "__shared_drives__" -> googleDriveApi.listSharedDrives(account)
+                            "__trash__" -> googleDriveApi.listTrash(account)
                             else -> googleDriveApi.listFiles(account, resolvedId)
                         }
                         if (result.isSuccess) {
@@ -1065,7 +1067,7 @@ class CloudManager @Inject constructor(
         }
     }
 
-    suspend fun deleteItem(account: CloudAccount, remotePathOrId: String): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun deleteItem(account: CloudAccount, remotePathOrId: String, moveToTrash: Boolean = true): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val targetId = folderIdCache[remotePathOrId] ?: folderIdCache[remotePathOrId.trimStart('/')] ?: remotePathOrId
             val fileName = remotePathOrId.substringAfterLast('/')
@@ -1094,12 +1096,17 @@ class CloudManager @Inject constructor(
             folderIdCache.remove(remotePathOrId.trimStart('/'))
             folderIdCache.remove(targetId)
 
-            // 4. Remote API deletion
+            // 4. Remote API deletion — moveToTrash routes to each provider's real trash/rubbish
+            // bin where one exists (Google Drive, MEGA); Dropbox has no distinct trash API call
+            // to make since Dropbox itself already keeps deleted files recoverable from its own
+            // web UI for ~30 days regardless of which delete call is used.
             try {
                 when (account.provider) {
-                    CloudProvider.GOOGLE_DRIVE -> googleDriveApi.deleteFile(account, targetId)
+                    CloudProvider.GOOGLE_DRIVE ->
+                        if (moveToTrash) googleDriveApi.trashFile(account, targetId) else googleDriveApi.deleteFile(account, targetId)
                     CloudProvider.DROPBOX -> dropboxApi.delete(account, if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId").also { dropboxApi.invalidateTree(account.id) }
-                    CloudProvider.MEGA -> megaApi.deleteNode(account, targetId)
+                    CloudProvider.MEGA ->
+                        if (moveToTrash) megaApi.moveToRubbishBin(account, targetId) else megaApi.deleteNode(account, targetId)
                 }
             } catch (e: Exception) {
                 // Ignore
@@ -1111,11 +1118,29 @@ class CloudManager @Inject constructor(
         }
     }
 
+    /** Restores an item out of the provider's real trash/rubbish bin. Google Drive and MEGA only
+     * — Dropbox never routes deletes through a distinct trash API to begin with (see
+     * [deleteItem]), so there's nothing here to restore from. */
+    suspend fun restoreItem(account: CloudAccount, remotePathOrId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val targetId = folderIdCache[remotePathOrId] ?: folderIdCache[remotePathOrId.trimStart('/')] ?: remotePathOrId
+        when (account.provider) {
+            CloudProvider.GOOGLE_DRIVE -> googleDriveApi.restoreFromTrash(account, targetId)
+            CloudProvider.MEGA -> megaApi.restoreFromRubbishBin(account, targetId)
+            CloudProvider.DROPBOX -> Result.failure(Exception("Restore not supported for Dropbox"))
+        }
+    }
+
     suspend fun renameItem(account: CloudAccount, remotePath: String, newName: String): Result<FileItem> = withContext(Dispatchers.IO) {
         when (account.provider) {
             CloudProvider.DROPBOX -> dropboxApi.renameFile(account, remotePath, newName).also { dropboxApi.invalidateTree(account.id) }
-            CloudProvider.GOOGLE_DRIVE -> Result.failure(Exception("Rename is not supported yet for Google Drive"))
-            CloudProvider.MEGA -> Result.failure(Exception("Rename is not supported yet for MEGA"))
+            CloudProvider.GOOGLE_DRIVE -> {
+                val targetId = folderIdCache[remotePath] ?: folderIdCache[remotePath.trimStart('/')] ?: remotePath
+                googleDriveApi.renameFile(account, targetId, newName).map { FileItem(id = targetId, name = newName, path = remotePath) }
+            }
+            CloudProvider.MEGA -> {
+                val targetId = folderIdCache[remotePath] ?: folderIdCache[remotePath.trimStart('/')] ?: remotePath
+                megaApi.renameNode(account, targetId, newName).map { FileItem(id = targetId, name = newName, path = remotePath) }
+            }
         }
     }
 }

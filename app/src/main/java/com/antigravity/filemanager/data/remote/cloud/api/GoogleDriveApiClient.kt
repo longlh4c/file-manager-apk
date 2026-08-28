@@ -199,6 +199,33 @@ class GoogleDriveApiClient @Inject constructor(
         }
     }
 
+    /** Items currently in this account's Drive Trash (see [trashFile]) — the mirror image of
+     * every other listing query here, which all exclude `trashed = true`. */
+    suspend fun listTrash(account: CloudAccount): Result<List<FileItem>> = withContext(Dispatchers.IO) {
+        try {
+            val drive = buildDrive(account)
+            val files = mutableListOf<DriveFile>()
+            var pageToken: String? = null
+            do {
+                val result = drive.files().list()
+                    .setQ("trashed = true")
+                    .setFields("nextPageToken, files(id,name,mimeType,size,modifiedTime)")
+                    .setPageSize(200)
+                    .setPageToken(pageToken)
+                    .setIncludeItemsFromAllDrives(true)
+                    .setSupportsAllDrives(true)
+                    .execute()
+                files.addAll(result.files ?: emptyList())
+                pageToken = result.nextPageToken
+            } while (pageToken != null)
+
+            Result.success(files.map { toFileItem(it) })
+        } catch (e: Exception) {
+            android.util.Log.e("GoogleDriveApiClient", "listTrash failed: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
     /** Items other people have shared directly with this account (not the user's own tree). */
     suspend fun listSharedWithMe(account: CloudAccount): Result<List<FileItem>> = withContext(Dispatchers.IO) {
         try {
@@ -459,6 +486,40 @@ class GoogleDriveApiClient @Inject constructor(
         try {
             val drive = buildDrive(account)
             drive.files().delete(fileId).execute()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Real "move to trash" — Drive's own Trash, restorable from drive.google.com for 30 days,
+     * unlike [deleteFile] which is permanent. */
+    suspend fun trashFile(account: CloudAccount, fileId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val drive = buildDrive(account)
+            drive.files().update(fileId, DriveFile().apply { trashed = true }).execute()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Restores a file out of Drive's Trash back to wherever it lived (Drive remembers the
+     * original parent(s) itself — untrashing doesn't need us to track/restore a location). */
+    suspend fun restoreFromTrash(account: CloudAccount, fileId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val drive = buildDrive(account)
+            drive.files().update(fileId, DriveFile().apply { trashed = false }).execute()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun renameFile(account: CloudAccount, fileId: String, newName: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val drive = buildDrive(account)
+            drive.files().update(fileId, DriveFile().apply { name = newName }).execute()
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)

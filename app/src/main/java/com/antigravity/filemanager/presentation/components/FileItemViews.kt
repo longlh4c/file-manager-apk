@@ -408,6 +408,18 @@ fun FolderIconWithBadge(badgeType: FolderBadgeType) {
                     Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color(0xFF26A69A), modifier = Modifier.size(13.dp))
                 }
             }
+            FolderBadgeType.TRASH -> {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(top = 4.dp)
+                        .size(18.dp)
+                        .background(Color.White, RoundedCornerShape(2.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFF757575), modifier = Modifier.size(13.dp))
+                }
+            }
             FolderBadgeType.STANDARD -> {}
         }
     }

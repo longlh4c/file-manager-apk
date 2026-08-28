@@ -118,8 +118,14 @@ fun CloudExplorerScreen(
     if (uiState.showDeleteDialog) {
         DeleteConfirmDialog(
             itemCount = uiState.selectedPaths.size,
-            onConfirm = { viewModel.deleteSelected() },
-            onDismiss = { viewModel.setShowDeleteDialog(false) }
+            onConfirm = { moveToTrash -> viewModel.deleteSelected(moveToTrash) },
+            onDismiss = { viewModel.setShowDeleteDialog(false) },
+            showMoveToTrashOption = !uiState.isInsideTrashView,
+            title = if (uiState.isInsideTrashView) "Delete Permanently" else "Delete",
+            message = if (uiState.isInsideTrashView)
+                "Permanently delete ${uiState.selectedPaths.size} item(s)? This cannot be undone."
+            else
+                "Are you sure you want to delete ${uiState.selectedPaths.size} item(s)?"
         )
     }
 
@@ -269,60 +275,84 @@ fun CloudExplorerScreen(
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        BottomBarActionItem(
-                            icon = Icons.Default.ContentCopy,
-                            label = "Copy",
-                            tint = TextPrimary,
-                            onClick = { viewModel.copySelected() },
-                            modifier = Modifier.weight(1f)
-                        )
-                        BottomBarActionItem(
-                            icon = Icons.Default.DriveFileMove,
-                            label = "Move",
-                            tint = TextPrimary,
-                            onClick = { viewModel.cutSelected() },
-                            modifier = Modifier.weight(1f)
-                        )
-                        if (uiState.selectedPaths.size == 1) {
+                        if (uiState.isInsideTrashView) {
                             BottomBarActionItem(
-                                icon = Icons.Default.Edit,
-                                label = "Rename",
+                                icon = Icons.Default.RestoreFromTrash,
+                                label = "Restore",
                                 tint = TextPrimary,
-                                onClick = {
-                                    val firstPath = uiState.selectedPaths.firstOrNull()
-                                    val item = uiState.files.find { it.path == firstPath }
-                                    viewModel.setShowRenameDialog(item)
-                                },
+                                onClick = { viewModel.restoreSelected() },
+                                modifier = Modifier.weight(1f)
+                            )
+                            BottomBarActionItem(
+                                icon = Icons.Default.DeleteForever,
+                                label = "Delete Permanently",
+                                tint = Color(0xFFEF5350),
+                                onClick = { viewModel.setShowDeleteDialog(true) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            BottomBarActionItem(
+                                icon = Icons.Default.Close,
+                                label = "Cancel",
+                                tint = TextSecondary,
+                                onClick = { viewModel.clearSelection() },
+                                modifier = Modifier.weight(1f)
+                            )
+                        } else {
+                            BottomBarActionItem(
+                                icon = Icons.Default.ContentCopy,
+                                label = "Copy",
+                                tint = TextPrimary,
+                                onClick = { viewModel.copySelected() },
+                                modifier = Modifier.weight(1f)
+                            )
+                            BottomBarActionItem(
+                                icon = Icons.Default.DriveFileMove,
+                                label = "Move",
+                                tint = TextPrimary,
+                                onClick = { viewModel.cutSelected() },
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (uiState.selectedPaths.size == 1) {
+                                BottomBarActionItem(
+                                    icon = Icons.Default.Edit,
+                                    label = "Rename",
+                                    tint = TextPrimary,
+                                    onClick = {
+                                        val firstPath = uiState.selectedPaths.firstOrNull()
+                                        val item = uiState.files.find { it.path == firstPath }
+                                        viewModel.setShowRenameDialog(item)
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            BottomBarActionItem(
+                                icon = Icons.Default.Delete,
+                                label = "Delete",
+                                tint = Color(0xFFEF5350),
+                                onClick = { viewModel.setShowDeleteDialog(true) },
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (uiState.selectedPaths.size == 1) {
+                                BottomBarActionItem(
+                                    icon = Icons.Default.Info,
+                                    label = "Properties",
+                                    tint = TextPrimary,
+                                    onClick = {
+                                        val firstPath = uiState.selectedPaths.firstOrNull()
+                                        val item = uiState.files.find { it.path == firstPath }
+                                        viewModel.showProperties(item)
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            BottomBarActionItem(
+                                icon = Icons.Default.Close,
+                                label = "Cancel",
+                                tint = TextSecondary,
+                                onClick = { viewModel.clearSelection() },
                                 modifier = Modifier.weight(1f)
                             )
                         }
-                        BottomBarActionItem(
-                            icon = Icons.Default.Delete,
-                            label = "Delete",
-                            tint = Color(0xFFEF5350),
-                            onClick = { viewModel.setShowDeleteDialog(true) },
-                            modifier = Modifier.weight(1f)
-                        )
-                        if (uiState.selectedPaths.size == 1) {
-                            BottomBarActionItem(
-                                icon = Icons.Default.Info,
-                                label = "Properties",
-                                tint = TextPrimary,
-                                onClick = {
-                                    val firstPath = uiState.selectedPaths.firstOrNull()
-                                    val item = uiState.files.find { it.path == firstPath }
-                                    viewModel.showProperties(item)
-                                },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                        BottomBarActionItem(
-                            icon = Icons.Default.Close,
-                            label = "Cancel",
-                            tint = TextSecondary,
-                            onClick = { viewModel.clearSelection() },
-                            modifier = Modifier.weight(1f)
-                        )
                     }
                 }
             } else if (uiState.clipboardPaths.isNotEmpty()) {

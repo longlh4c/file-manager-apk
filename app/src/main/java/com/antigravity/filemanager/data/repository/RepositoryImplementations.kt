@@ -556,11 +556,18 @@ class CloudRepositoryImpl @Inject constructor(
 
     override suspend fun deleteCloudFile(
         accountId: String,
-        remotePath: String
+        remotePath: String,
+        moveToTrash: Boolean
     ): Result<Unit> = withContext(Dispatchers.IO) {
         val account = database.cloudDao().getById(accountId)?.toDomain()
             ?: return@withContext Result.failure(Exception("Account not found"))
-        cloudManager.deleteItem(account, remotePath)
+        cloudManager.deleteItem(account, remotePath, moveToTrash)
+    }
+
+    override suspend fun restoreCloudFile(accountId: String, remotePath: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val account = database.cloudDao().getById(accountId)?.toDomain()
+            ?: return@withContext Result.failure(Exception("Account not found"))
+        cloudManager.restoreItem(account, remotePath)
     }
 
     override suspend fun getCloudQuota(accountId: String): Result<Pair<Long, Long>> = withContext(Dispatchers.IO) {

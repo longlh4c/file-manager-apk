@@ -152,8 +152,12 @@ class CloudStorageUseCase @Inject constructor(
     suspend fun createFolder(accountId: String, folderName: String, parentPath: String): Result<FileItem> =
         cloudRepository.createFolder(accountId, folderName, parentPath)
 
-    suspend fun deleteItem(accountId: String, remotePath: String): Result<Unit> =
-        cloudRepository.deleteCloudFile(accountId, remotePath)
+    suspend fun deleteItem(accountId: String, remotePath: String, moveToTrash: Boolean = true): Result<Unit> =
+        cloudRepository.deleteCloudFile(accountId, remotePath, moveToTrash)
+
+    /** Restores an item from the provider's real trash — Google Drive and MEGA only. */
+    suspend fun restoreItem(accountId: String, remotePath: String): Result<Unit> =
+        cloudRepository.restoreCloudFile(accountId, remotePath)
 
     suspend fun renameItem(accountId: String, remotePath: String, newName: String): Result<FileItem> =
         cloudRepository.renameCloudFile(accountId, remotePath, newName)
