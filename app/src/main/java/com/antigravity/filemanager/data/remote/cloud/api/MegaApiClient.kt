@@ -216,7 +216,9 @@ class MegaApiClient @Inject constructor(
             val result = filtered.map { node ->
                 val isDir = node.type == 1
                 val ext = if (!isDir) node.name.substringAfterLast(".", "") else ""
-                val count = if (isDir) childrenByParent[node.handle]?.count { it.type == 0 || it.type == 1 } ?: 0 else 0
+                val children = if (isDir) childrenByParent[node.handle] else null
+                val subfolders = children?.count { it.type == 1 } ?: 0
+                val childFiles = children?.count { it.type == 0 } ?: 0
                 FileItem(
                     id = node.handle,
                     name = node.name,
@@ -224,7 +226,9 @@ class MegaApiClient @Inject constructor(
                     size = node.size,
                     lastModified = node.timestamp,
                     isDirectory = isDir,
-                    itemCount = count,
+                    itemCount = subfolders + childFiles,
+                    subfolderCount = subfolders,
+                    fileChildCount = childFiles,
                     extension = ext
                 )
             }.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase(Locale.getDefault()) }))
@@ -594,6 +598,151 @@ class MegaApiClient @Inject constructor(
         }
     }
 
+    /**
+     * Downloads only the first [maxBytes] of a file's ciphertext (via an HTTP Range request) and
+     * decrypts them in place. Fallback for [openThumbnailDataSource] when the on-demand path
+     * fails for some reason — AES-CTR is a keystream cipher, so decrypting bytes [0, maxBytes)
+     * doesn't require the rest of the file. Best-effort only: fails gracefully (Result.failure)
+     * if key resolution fails or the server ignores the Range header.
+     */
+    suspend fun downloadFilePartial(
+        account: CloudAccount,
+        nodeHandle: String,
+        localTargetFile: File,
+        maxBytes: Long
+    ): Result<File> = withContext(Dispatchers.IO) {
+        try {
+            val sid = resolveSid(account)
+            val sidParam = if (sid.isNotBlank()) "?sid=$sid" else ""
+            val url = "$megaApiUrl$sidParam"
+
+            val commandJson = JSONArray().apply {
+                put(JSONObject().apply {
+                    put("a", "g")
+                    put("g", 1)
+                    put("n", nodeHandle)
+                })
+            }.toString()
+
+            val response = sendMegaPost(url, commandJson)
+            val bodyStr = response.getOrNull() ?: "[]"
+            val jsonArray = JSONArray(bodyStr)
+            val obj = jsonArray.optJSONObject(0) ?: JSONObject()
+            val downloadUrl = obj.optString("g")
+            if (downloadUrl.isBlank()) {
+                return@withContext Result.failure(Exception("Download URL not found in Mega response: $bodyStr"))
+            }
+
+            val masterKeyOrNull = if (!account.refreshToken.isNullOrBlank()) {
+                try { base64UrlDecode(account.refreshToken) } catch (e: Exception) { null }
+            } else null
+            val masterKey = masterKeyOrNull
+                ?: return@withContext Result.failure(Exception("No master key available"))
+
+            val treeResult = getOrFetchNodeTree(account)
+            val node = treeResult.getOrNull()?.first?.find { it.handle == nodeHandle }
+                ?: return@withContext Result.failure(Exception("Node not found in cached tree"))
+            val (aesKey, nonce) = deriveNodeContentKeyAndNonce(node.keyStr, masterKey)
+                ?: return@withContext Result.failure(Exception("Could not resolve a decryption key for node $nodeHandle"))
+
+            val rangeEnd = ((maxBytes + 15) / 16) * 16 - 1
+
+            val dlRequest = Request.Builder()
+                .url(downloadUrl)
+                .header("Range", "bytes=0-$rangeEnd")
+                .get()
+                .build()
+            val dlResponse = okHttpClient.newCall(dlRequest).execute()
+            if (!dlResponse.isSuccessful) {
+                dlResponse.close()
+                return@withContext Result.failure(Exception("Failed to stream partial Mega file: ${dlResponse.code}"))
+            }
+
+            val ivBytes = ByteArray(16)
+            nonce.copyInto(ivBytes, 0)
+            val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(aesKey, "AES"), IvParameterSpec(ivBytes))
+
+            localTargetFile.parentFile?.mkdirs()
+            if (localTargetFile.exists()) localTargetFile.delete()
+
+            val body = dlResponse.body ?: return@withContext Result.failure(Exception("Empty response body"))
+            body.byteStream().use { input ->
+                CipherInputStream(input, cipher).use { cipherIn ->
+                    FileOutputStream(localTargetFile).use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        var totalRead = 0L
+                        var read = 0
+                        while (totalRead < maxBytes && cipherIn.read(buffer).also { read = it } != -1) {
+                            currentCoroutineContext().ensureActive()
+                            val toWrite = minOf(read.toLong(), maxBytes - totalRead).toInt()
+                            output.write(buffer, 0, toWrite)
+                            totalRead += toWrite
+                        }
+                    }
+                }
+            }
+
+            Result.success(localTargetFile)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Resolves everything needed to read a node's ciphertext on demand — the temporary download
+     * URL, content key/nonce, and total size — without downloading anything. Feeds
+     * [MegaDecryptingDataSource], which fetches+decrypts only the byte ranges actually requested
+     * (e.g. by MediaMetadataRetriever while probing for a thumbnail frame), instead of eagerly
+     * pulling a fixed-size prefix. Typically far cheaper: a retriever probing a well-formed video
+     * usually only touches a small header region plus one keyframe — tens/hundreds of KB, not a
+     * flat multi-MB block.
+     */
+    suspend fun openThumbnailDataSource(account: CloudAccount, nodeHandle: String): Result<android.media.MediaDataSource> =
+        withContext(Dispatchers.IO) {
+            try {
+                val sid = resolveSid(account)
+                val sidParam = if (sid.isNotBlank()) "?sid=$sid" else ""
+                val url = "$megaApiUrl$sidParam"
+
+                val commandJson = JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("a", "g")
+                        put("g", 1)
+                        put("n", nodeHandle)
+                    })
+                }.toString()
+
+                val response = sendMegaPost(url, commandJson)
+                val bodyStr = response.getOrNull() ?: "[]"
+                val jsonArray = JSONArray(bodyStr)
+                val obj = jsonArray.optJSONObject(0) ?: JSONObject()
+                val downloadUrl = obj.optString("g")
+                val totalSize = obj.optLong("s", 0L)
+                if (downloadUrl.isBlank() || totalSize <= 0L) {
+                    return@withContext Result.failure(Exception("Download URL/size not found in Mega response: $bodyStr"))
+                }
+
+                val masterKeyOrNull = if (!account.refreshToken.isNullOrBlank()) {
+                    try { base64UrlDecode(account.refreshToken) } catch (e: Exception) { null }
+                } else null
+                val masterKey = masterKeyOrNull
+                    ?: return@withContext Result.failure(Exception("No master key available"))
+
+                val treeResult = getOrFetchNodeTree(account)
+                val node = treeResult.getOrNull()?.first?.find { it.handle == nodeHandle }
+                    ?: return@withContext Result.failure(Exception("Node not found in cached tree"))
+                val (aesKey, nonce) = deriveNodeContentKeyAndNonce(node.keyStr, masterKey)
+                    ?: return@withContext Result.failure(Exception("Could not resolve a decryption key for node $nodeHandle"))
+
+                Result.success(MegaDecryptingDataSource(downloadUrl, aesKey, nonce, totalSize, okHttpClient))
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Result.failure(e)
+            }
+        }
+
     suspend fun createFolder(account: CloudAccount, name: String, parentHandle: String): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
             val session = account.sessionHandle ?: account.accessToken ?: ""
@@ -664,14 +813,26 @@ class MegaApiClient @Inject constructor(
         }
     }
 
-    private fun sendMegaPost(url: String, json: String): Result<String> {
+    /**
+     * MEGA's API returns "-3" (EAGAIN) when it's temporarily rate-limiting/congested — expected
+     * under normal concurrent use (e.g. several thumbnail fetches at once), NOT a real error. But
+     * callers up the stack (fetchNodeTreeFromNetwork etc.) treat ANY body starting with "-" as a
+     * hard failure, which — without a retry here — can wipe out an already-displayed file list
+     * the moment MEGA returns one -3 under load. Retry with backoff at this lowest layer so every
+     * caller gets a real response instead.
+     */
+    private fun sendMegaPost(url: String, json: String, retriesLeft: Int = 4): Result<String> {
         return try {
             val request = Request.Builder()
                 .url(url)
                 .post(json.toRequestBody("application/json".toMediaTypeOrNull()))
                 .build()
             val response = okHttpClient.newCall(request).execute()
-            val body = response.body?.string() ?: "[]"
+            val body = (response.body?.string() ?: "[]").trim()
+            if (retriesLeft > 0 && (body == "-3" || body == "[-3]")) {
+                Thread.sleep((500L * (5 - retriesLeft)).coerceAtMost(3000L))
+                return sendMegaPost(url, json, retriesLeft - 1)
+            }
             Result.success(body)
         } catch (e: Exception) {
             Result.failure(e)
@@ -1416,4 +1577,94 @@ class MegaApiClient @Inject constructor(
         val keyStr: String = "",
         val fileAttrStr: String = ""
     )
+}
+
+/**
+ * A [android.media.MediaDataSource] that lazily fetches+decrypts only the byte ranges a reader
+ * (MediaMetadataRetriever) actually asks for, via HTTP Range requests against a MEGA temporary
+ * download URL. AES-CTR is a keystream cipher, so any 16-byte-aligned range can be decrypted
+ * independently given the right counter (see [MegaApiClient.openThumbnailDataSource]) — this is
+ * what lets a video-frame probe cost tens/hundreds of KB instead of a flat multi-MB prefix
+ * download, matching how Dropbox's real HTTP-Range streamable link already behaves.
+ */
+class MegaDecryptingDataSource(
+    private val downloadUrl: String,
+    private val aesKey: ByteArray,
+    private val nonce: ByteArray,
+    private val totalSize: Long,
+    private val okHttpClient: OkHttpClient
+) : android.media.MediaDataSource() {
+
+    // Single-slot window cache: MediaMetadataRetriever tends to re-read overlapping/nearby
+    // regions (header parsing, then the frame itself) — avoids a fresh HTTP round-trip per call.
+    private var cacheStart = -1L
+    private var cacheBytes: ByteArray? = null
+
+    override fun close() {}
+
+    override fun getSize(): Long = totalSize
+
+    @Synchronized
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+        if (position < 0 || position >= totalSize || size <= 0) return -1
+        val wantEnd = minOf(position + size, totalSize)
+
+        val cStart = cacheStart
+        val cData = cacheBytes
+        if (cStart >= 0 && cData != null && position >= cStart && wantEnd <= cStart + cData.size) {
+            val srcOffset = (position - cStart).toInt()
+            val toCopy = (wantEnd - position).toInt()
+            System.arraycopy(cData, srcOffset, buffer, offset, toCopy)
+            return toCopy
+        }
+
+        val alignedStart = (position / 16) * 16
+        // Fetch a slightly bigger window than requested (min 256KB) so nearby follow-up reads
+        // hit the cache instead of firing another round-trip each time.
+        val fetchEnd = minOf(maxOf(alignedStart + MIN_FETCH_WINDOW, wantEnd), totalSize)
+        val rangeEndInclusive = minOf(((fetchEnd + 15) / 16) * 16 - 1, totalSize - 1)
+
+        val plain = try {
+            fetchAndDecrypt(alignedStart, rangeEndInclusive)
+        } catch (t: Throwable) {
+            null
+        } ?: return -1
+
+        cacheStart = alignedStart
+        cacheBytes = plain
+
+        val srcOffset = (position - alignedStart).toInt()
+        if (srcOffset < 0 || srcOffset >= plain.size) return -1
+        val toCopy = minOf(size, plain.size - srcOffset)
+        System.arraycopy(plain, srcOffset, buffer, offset, toCopy)
+        return toCopy
+    }
+
+    private fun fetchAndDecrypt(alignedStart: Long, rangeEndInclusive: Long): ByteArray? {
+        val request = Request.Builder()
+            .url(downloadUrl)
+            .header("Range", "bytes=$alignedStart-$rangeEndInclusive")
+            .get()
+            .build()
+        val response = okHttpClient.newCall(request).execute()
+        if (!response.isSuccessful) {
+            response.close()
+            return null
+        }
+        val cipherBytes = response.body?.bytes() ?: return null
+
+        val counterBlock = alignedStart / 16
+        val iv = ByteArray(16)
+        nonce.copyInto(iv, 0)
+        for (i in 0 until 8) {
+            iv[15 - i] = ((counterBlock shr (8 * i)) and 0xFF).toByte()
+        }
+        val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(aesKey, "AES"), IvParameterSpec(iv))
+        return cipher.doFinal(cipherBytes)
+    }
+
+    companion object {
+        private const val MIN_FETCH_WINDOW = 256L * 1024
+    }
 }

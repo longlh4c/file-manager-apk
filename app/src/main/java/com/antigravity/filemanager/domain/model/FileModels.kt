@@ -69,6 +69,10 @@ data class FileItem(
     val mimeType: String = "*/*",
     val extension: String = "",
     val itemCount: Int = 0,
+    // Direct-child breakdown of itemCount — currently only populated for MEGA folders (see
+    // MegaApiClient.listFiles), where it's free to compute from the already-grouped children.
+    val subfolderCount: Int = 0,
+    val fileChildCount: Int = 0,
     val thumbnailUri: String? = null,
     val appSourceBadge: AppSourceBadge = AppSourceBadge.NONE,
     val folderBadgeType: FolderBadgeType = FolderBadgeType.STANDARD,

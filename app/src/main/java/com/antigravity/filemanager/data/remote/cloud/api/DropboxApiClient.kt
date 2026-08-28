@@ -137,6 +137,9 @@ class DropboxApiClient @Inject constructor() {
             val childrenByParent = entries.groupBy { it.parentPath }
             val direct = childrenByParent[normalizedPath] ?: emptyList()
             val items = direct.map { entry ->
+                val children = if (entry.isDirectory) childrenByParent[entry.path] else null
+                val subfolders = children?.count { it.isDirectory } ?: 0
+                val childFiles = children?.count { !it.isDirectory } ?: 0
                 FileItem(
                     id = entry.id,
                     name = entry.name,
@@ -144,7 +147,9 @@ class DropboxApiClient @Inject constructor() {
                     size = entry.size,
                     lastModified = entry.lastModified,
                     isDirectory = entry.isDirectory,
-                    itemCount = if (entry.isDirectory) childrenByParent[entry.path]?.size ?: 0 else 0,
+                    itemCount = subfolders + childFiles,
+                    subfolderCount = subfolders,
+                    fileChildCount = childFiles,
                     extension = if (!entry.isDirectory) entry.name.substringAfterLast(".", "") else ""
                 )
             }
