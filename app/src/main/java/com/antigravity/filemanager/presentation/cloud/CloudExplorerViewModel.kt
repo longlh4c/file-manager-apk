@@ -812,13 +812,15 @@ class CloudExplorerViewModel @Inject constructor(
     fun refresh(isManual: Boolean = false) {
         val currentPath = _uiState.value.currentPath
         val isRoot = currentPath.isBlank() || currentPath == "/"
-        // A whole-account tree refresh (list_folder(recursive=true) across everything, ~thousands
-        // of items on a large Dropbox account) is expensive — only pay for it when the user
-        // explicitly asked to refresh from the account root. Every other refresh (automatic, after
-        // paste/delete/rename/createFolder, or a manual refresh while inside a subfolder) just
-        // re-lists that one folder.
+        // A whole-account tree refresh (list_folder(recursive=true) on Dropbox, or MEGA's only
+        // "f" endpoint which always returns every node) is expensive — only pay for it when the
+        // user explicitly asked to refresh from the account root. Every other refresh (automatic,
+        // after paste/delete/rename/createFolder, or a manual refresh while inside a subfolder)
+        // just re-lists that one folder / reuses the still-cached MEGA tree.
+        val provider = _uiState.value.account?.provider
         val forceFullRefresh = isManual && isRoot &&
-            _uiState.value.account?.provider == com.antigravity.filemanager.domain.model.CloudProvider.DROPBOX
+            (provider == com.antigravity.filemanager.domain.model.CloudProvider.DROPBOX ||
+                provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA)
         folderCacheManager.invalidateCloud(accountId, currentPath)
         loadAccountAndFiles(currentPath, _uiState.value.pathStack, forceFullRefresh)
     }

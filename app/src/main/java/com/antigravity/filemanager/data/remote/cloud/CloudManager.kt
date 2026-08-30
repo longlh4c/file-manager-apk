@@ -203,7 +203,17 @@ class CloudManager @Inject constructor(
                 }
                 CloudProvider.DROPBOX -> {
                     val path = if (remotePath == "/" || remotePath.isBlank()) "" else remotePath
-                    val result = dropboxApi.listFolderCached(account, path, allowFullTreeFetch = forceFullRefresh)
+                    if (forceFullRefresh) {
+                        dropboxApi.invalidateTree(account.id)
+                    }
+                    // Always build/reuse the cached whole-account tree, same as MEGA — now that
+                    // the tree cache never expires on its own (only an explicit invalidateTree()
+                    // from a manual root refresh or a mutation drops it), paying for one full
+                    // recursive fetch is worth it: every navigation after that (including the
+                    // "copy/move to Dropbox" destination picker, and revisiting a folder right
+                    // after a transfer) is served from memory instead of a fresh network call
+                    // that looked like the folder was "reloading" every time.
+                    val result = dropboxApi.listFolderCached(account, path, allowFullTreeFetch = true)
                     if (result.isSuccess) {
                         val list = result.getOrNull() ?: emptyList()
                         list.forEach { item ->
@@ -221,6 +231,9 @@ class CloudManager @Inject constructor(
                     }
                 }
                 CloudProvider.MEGA -> {
+                    if (forceFullRefresh) {
+                        megaApi.invalidateNodeTreeCache(account.id)
+                    }
                     val masterKeyFromSession = masterKeyCache[account.id] ?: try {
                         val sessionJson = getSessionPayload(account.id, account.sessionHandle)
                         if (sessionJson.isNotBlank()) org.json.JSONObject(sessionJson).optString("masterKey", "") else ""

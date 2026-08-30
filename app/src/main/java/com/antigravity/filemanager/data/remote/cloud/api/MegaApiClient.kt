@@ -47,13 +47,19 @@ class MegaApiClient @Inject constructor(
 
     // The MEGA "f" command always returns the ENTIRE account node tree (there is no
     // "children of X" endpoint), so every listFiles() call pays a full download + AES
-    // decrypt of every node name. Cache the parsed tree per account for a short window
-    // so repeated navigation (and the N+1 folder-item-count lookups) reuse it instead of
-    // re-fetching/re-decrypting the whole account on every call.
+    // decrypt of every node name. Cache the parsed tree per account indefinitely so
+    // repeated navigation (and the N+1 folder-item-count lookups) reuse it instead of
+    // re-fetching/re-decrypting the whole account on every call. The cache is only
+    // dropped when the caller explicitly asks for a refresh (see [invalidateNodeTreeCache]),
+    // typically a manual pull-to-refresh at the account root.
     private data class NodeTreeCache(val allNodes: List<MegaNode>, val rootHandle: String, val timestamp: Long)
     private val nodeTreeCache = ConcurrentHashMap<String, NodeTreeCache>()
     private val nodeTreeMutexes = ConcurrentHashMap<String, Mutex>()
-    private val nodeTreeTtlMs = 45_000L
+
+    /** Drops the cached node tree for this account so the next [listFiles] re-fetches from network. */
+    fun invalidateNodeTreeCache(accountId: String) {
+        nodeTreeCache.remove(accountId)
+    }
 
     private fun nodeTreeMutexFor(accountId: String): Mutex =
         nodeTreeMutexes.getOrPut(accountId) { Mutex() }
@@ -284,19 +290,17 @@ class MegaApiClient @Inject constructor(
         return currentHandle
     }
 
-    /** Returns the cached (parsed, decrypted) node tree for this account if still fresh, otherwise fetches it. */
+    /** Returns the cached (parsed, decrypted) node tree for this account, fetching it only on a
+     * cold cache — the cache never expires on its own, callers must [invalidateNodeTreeCache]
+     * (a manual refresh at the account root) to force a re-fetch. */
     private suspend fun getOrFetchNodeTree(account: CloudAccount): Result<Pair<List<MegaNode>, String>> {
-        val now = System.currentTimeMillis()
         nodeTreeCache[account.id]?.let { cached ->
-            if (now - cached.timestamp < nodeTreeTtlMs) {
-                return Result.success(cached.allNodes to cached.rootHandle)
-            }
+            return Result.success(cached.allNodes to cached.rootHandle)
         }
         // Serialize concurrent misses for the same account (e.g. N+1 folder-count lookups)
         // so they share one network fetch instead of each re-downloading the whole tree.
         return nodeTreeMutexFor(account.id).withLock {
-            val recheck = nodeTreeCache[account.id]
-            if (recheck != null && System.currentTimeMillis() - recheck.timestamp < nodeTreeTtlMs) {
+            nodeTreeCache[account.id]?.let { recheck ->
                 return@withLock Result.success(recheck.allNodes to recheck.rootHandle)
             }
             val fetched = fetchNodeTreeFromNetwork(account)

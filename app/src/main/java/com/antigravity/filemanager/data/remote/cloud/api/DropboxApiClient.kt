@@ -30,7 +30,8 @@ class DropboxApiClient @Inject constructor() {
     // Dropbox's list_folder has no "children of X with descendant counts" mode — like MEGA,
     // the only way to avoid an N+1 fan-out (one API call per subfolder just to get its item
     // count) is to fetch the WHOLE account tree once via recursive=true and slice it in memory.
-    // Cached briefly per account so repeat navigation within the window is instant.
+    // Cached per account indefinitely — it never expires on its own, only [invalidateTree] (a
+    // manual refresh at the account root, or after a mutation) forces the next call to re-fetch.
     private data class DropboxEntry(
         val path: String,
         val parentPath: String,
@@ -43,7 +44,6 @@ class DropboxApiClient @Inject constructor() {
     private data class TreeCache(val entries: List<DropboxEntry>, val timestamp: Long)
     private val treeCache = ConcurrentHashMap<String, TreeCache>()
     private val treeMutexes = ConcurrentHashMap<String, Mutex>()
-    private val treeTtlMs = 45_000L
 
     private fun treeMutexFor(accountId: String): Mutex = treeMutexes.getOrPut(accountId) { Mutex() }
 
@@ -73,13 +73,11 @@ class DropboxApiClient @Inject constructor() {
     }
 
     private suspend fun getOrFetchTree(account: CloudAccount): Result<List<DropboxEntry>> {
-        val now = System.currentTimeMillis()
         treeCache[account.id]?.let { cached ->
-            if (now - cached.timestamp < treeTtlMs) return Result.success(cached.entries)
+            return Result.success(cached.entries)
         }
         return treeMutexFor(account.id).withLock {
-            val recheck = treeCache[account.id]
-            if (recheck != null && System.currentTimeMillis() - recheck.timestamp < treeTtlMs) {
+            treeCache[account.id]?.let { recheck ->
                 return@withLock Result.success(recheck.entries)
             }
             val fetched = fetchTreeFromNetwork(account)
@@ -127,8 +125,7 @@ class DropboxApiClient @Inject constructor() {
      * Callers should only pass true for an explicit user-triggered refresh at the account root. */
     suspend fun listFolderCached(account: CloudAccount, path: String = "", allowFullTreeFetch: Boolean = false): Result<List<FileItem>> = withContext(Dispatchers.IO) {
         try {
-            val cachedNow = treeCache[account.id]
-            val isFresh = cachedNow != null && System.currentTimeMillis() - cachedNow.timestamp < treeTtlMs
+            val isFresh = treeCache[account.id] != null
             if (!isFresh && !allowFullTreeFetch) {
                 return@withContext listFolder(account, path)
             }
