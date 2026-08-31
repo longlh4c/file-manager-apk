@@ -282,12 +282,20 @@ class DropboxApiClient @Inject constructor() {
         remoteDirPath: String,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val parentJob = coroutineContext[Job]
-            val client = buildClient(account)
-            val targetPath = if (remoteDirPath == "/" || remoteDirPath.isBlank()) "/${localFile.name}" else "${remoteDirPath.trimEnd('/')}/${localFile.name}"
-            android.util.Log.d("DropboxApiClient", "uploadFile: remoteDirPath='$remoteDirPath' -> targetPath='$targetPath', size=${localFile.length()}")
-            val totalBytes = localFile.length()
+        val parentJob = coroutineContext[Job]
+        val client = buildClient(account)
+        val targetPath = if (remoteDirPath == "/" || remoteDirPath.isBlank()) "/${localFile.name}" else "${remoteDirPath.trimEnd('/')}/${localFile.name}"
+        val totalBytes = localFile.length()
+
+        // Dropbox rate-limits bursts of parallel requests (429 RateLimitException) — expected
+        // when several files upload concurrently (see the paste-flow's Semaphore(8)). Its response
+        // tells us exactly how long to back off, so retry instead of counting a throttled request
+        // as a real failure; a genuine error (auth, network, quota) still fails immediately since
+        // it's a different exception type.
+        var attempt = 0
+        while (true) {
+            attempt++
+            android.util.Log.d("DropboxApiClient", "uploadFile: remoteDirPath='$remoteDirPath' -> targetPath='$targetPath', size=$totalBytes, attempt=$attempt")
             val progressStream = object : java.io.FilterInputStream(FileInputStream(localFile)) {
                 var bytesSent = 0L
                 override fun read(): Int {
@@ -309,22 +317,32 @@ class DropboxApiClient @Inject constructor() {
                     return read
                 }
             }
-            val metadata = progressStream.use { input ->
-                client.files().uploadBuilder(targetPath)
-                    .withMode(WriteMode.OVERWRITE)
-                    .withAutorename(false)
-                    .withMute(false)
-                    .uploadAndFinish(input)
+            try {
+                val metadata = progressStream.use { input ->
+                    client.files().uploadBuilder(targetPath)
+                        .withMode(WriteMode.OVERWRITE)
+                        .withAutorename(false)
+                        .withMute(false)
+                        .uploadAndFinish(input)
+                }
+                onProgress?.invoke(totalBytes, totalBytes)
+                android.util.Log.d("DropboxApiClient", "uploadFile: success, pathDisplay=${metadata.pathDisplay}")
+                patchTreeAfterUpload(account.id, metadata)
+                return@withContext Result.success(metadata.pathDisplay ?: targetPath)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (e is com.dropbox.core.RateLimitException && attempt < 4) {
+                    val backoffMs = (e.backoffMillis).coerceIn(1000L, 30_000L)
+                    android.util.Log.d("DropboxApiClient", "uploadFile: rate-limited for '${localFile.name}', retrying in ${backoffMs}ms (attempt $attempt)")
+                    kotlinx.coroutines.delay(backoffMs)
+                    continue
+                }
+                android.util.Log.e("DropboxApiClient", "uploadFile: FAILED for remoteDirPath='$remoteDirPath', file='${localFile.name}'", e)
+                return@withContext Result.failure(e)
             }
-            onProgress?.invoke(totalBytes, totalBytes)
-            android.util.Log.d("DropboxApiClient", "uploadFile: success, pathDisplay=${metadata.pathDisplay}")
-            patchTreeAfterUpload(account.id, metadata)
-            Result.success(metadata.pathDisplay ?: targetPath)
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            android.util.Log.e("DropboxApiClient", "uploadFile: FAILED for remoteDirPath='$remoteDirPath', file='${localFile.name}'", e)
-            Result.failure(e)
         }
+        @Suppress("UNREACHABLE_CODE")
+        Result.failure(Exception("unreachable"))
     }
 
     suspend fun createFolder(account: CloudAccount, path: String): Result<FileItem> = withContext(Dispatchers.IO) {

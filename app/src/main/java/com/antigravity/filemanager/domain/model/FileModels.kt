@@ -288,7 +288,11 @@ data class Bookmark(
 data class OverwriteConflict(
     val name: String,
     val existingSize: Long,
-    val newSize: Long
+    val newSize: Long,
+    /** True when the conflicting item is a folder — its "size" is always 0 in this app's model
+     * (folders don't track aggregate content size), so the UI shouldn't show a misleading
+     * "0 B -> 0 B" size comparison for it the way it does for an actual file conflict. */
+    val isDirectory: Boolean = false
 )
 
 /** A direct, playable/decodable URL for a cloud media file, plus any HTTP headers the request

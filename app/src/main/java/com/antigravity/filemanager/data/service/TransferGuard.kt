@@ -9,10 +9,26 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
+
+/** Snapshot of the currently running transfer, shown as a progress bar on [TransferService]'s
+ * notification. `null` means no progress info is available yet (service falls back to its static
+ * "Transfer running" text) — callers update this from the same throttled callback they already
+ * use to drive their own in-app progress UI, so it costs nothing extra to keep it current. */
+data class TransferProgressInfo(
+    val currentFileName: String,
+    val currentIndex: Int,
+    val totalFiles: Int,
+    val bytesTransferred: Long,
+    val totalBytes: Long,
+    val isUpload: Boolean
+)
 
 /**
  * Reference-counts in-flight copy/move/upload/download operations and keeps [TransferService]
@@ -26,6 +42,15 @@ class TransferGuard @Inject constructor(
     private val activeCount = AtomicInteger(0)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var pendingStop: Job? = null
+
+    private val _progress = MutableStateFlow<TransferProgressInfo?>(null)
+    val progress: StateFlow<TransferProgressInfo?> = _progress.asStateFlow()
+
+    /** Reports current-file progress for the notification's progress bar. Safe to call from any
+     * throttled progress callback — this is just a StateFlow write, no I/O. */
+    fun updateProgress(info: TransferProgressInfo) {
+        _progress.value = info
+    }
 
     // Without this grace period, back-to-back operations (paste a batch, then immediately paste
     // another) each tear the service down and start a new one — and if a fresh begin() lands
@@ -55,6 +80,7 @@ class TransferGuard @Inject constructor(
             pendingStop = scope.launch {
                 delay(stopGraceMs)
                 if (activeCount.get() <= 0) {
+                    _progress.value = null
                     val intent = Intent(context, TransferService::class.java).apply {
                         action = TransferService.ACTION_STOP
                     }

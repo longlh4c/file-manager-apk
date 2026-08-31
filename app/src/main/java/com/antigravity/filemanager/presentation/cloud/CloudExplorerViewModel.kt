@@ -50,6 +50,7 @@ data class CloudExplorerUiState(
     val isCutOperation: Boolean = false,
     val clipboardSourceCloudAccountId: String? = null,
     val clipboardItemSizes: Map<String, Long> = emptyMap(),
+    val clipboardItemIsDirectory: Map<String, Boolean> = emptyMap(),
     val overwriteConflicts: List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList(),
     val downloadProgress: CloudTransferProgress? = null
 ) {
@@ -69,6 +70,7 @@ class CloudExplorerViewModel @Inject constructor(
     private val globalClipboardManager: GlobalClipboardManager,
     private val folderCacheManager: FolderCacheManager,
     private val folderPreferencesRepository: com.antigravity.filemanager.data.repository.FolderPreferencesRepository,
+    private val transferGuard: com.antigravity.filemanager.data.service.TransferGuard,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
@@ -138,7 +140,8 @@ class CloudExplorerViewModel @Inject constructor(
                     clipboardPaths = clip.paths,
                     isCutOperation = clip.isCut,
                     clipboardSourceCloudAccountId = clip.sourceCloudAccountId,
-                    clipboardItemSizes = clip.itemSizes
+                    clipboardItemSizes = clip.itemSizes,
+                    clipboardItemIsDirectory = clip.itemIsDirectory
                 )
             }
         }
@@ -811,14 +814,17 @@ class CloudExplorerViewModel @Inject constructor(
 
     fun refresh(isManual: Boolean = false) {
         val currentPath = _uiState.value.currentPath
-        val isRoot = currentPath.isBlank() || currentPath == "/"
         // A whole-account tree refresh (list_folder(recursive=true) on Dropbox, or MEGA's only
         // "f" endpoint which always returns every node) is expensive — only pay for it when the
-        // user explicitly asked to refresh from the account root. Every other refresh (automatic,
-        // after paste/delete/rename/createFolder, or a manual refresh while inside a subfolder)
-        // just re-lists that one folder / reuses the still-cached MEGA tree.
+        // user explicitly asked to refresh (pull-to-refresh), not on every automatic refresh
+        // (after paste/delete/rename/createFolder). It used to also require being at the account
+        // root, back when the underlying tree cache expired on its own after 45s — now that the
+        // cache is kept forever until explicitly invalidated (see MegaApiClient/DropboxApiClient),
+        // that restriction just meant pull-to-refresh silently did nothing while inside a
+        // subfolder, since there was no other trigger to ever drop the stale cache. A manual pull
+        // now always forces the full refetch, wherever you are.
         val provider = _uiState.value.account?.provider
-        val forceFullRefresh = isManual && isRoot &&
+        val forceFullRefresh = isManual &&
             (provider == com.antigravity.filemanager.domain.model.CloudProvider.DROPBOX ||
                 provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA)
         folderCacheManager.invalidateCloud(accountId, currentPath)
@@ -961,6 +967,10 @@ class CloudExplorerViewModel @Inject constructor(
                 _uiState.value = _uiState.value.copy(isLoading = true)
                 var failures = 0
                 var lastErrorMessage: String? = null
+                // Defaults to the clipboard's top-level item count; the cloud-to-cloud branch
+                // below overwrites this with the actual flattened file count once known, so
+                // pasting one folder with 438 files inside reports "438 item(s)", not "1".
+                var transferredCount = sources.size
                 if (sourceCloudAccountId == null) {
                     // Local files -> this cloud folder
                     val uploadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
@@ -983,6 +993,16 @@ class CloudExplorerViewModel @Inject constructor(
                                     isUpload = true
                                 )
                             )
+                            transferGuard.updateProgress(
+                                com.antigravity.filemanager.data.service.TransferProgressInfo(
+                                    currentFileName = currentFile,
+                                    currentIndex = currentIndex,
+                                    totalFiles = totalFiles,
+                                    bytesTransferred = bytesSent,
+                                    totalBytes = totalBytes,
+                                    isUpload = true
+                                )
+                            )
                         }
                     }
                     _uiState.value = _uiState.value.copy(downloadProgress = null)
@@ -994,63 +1014,181 @@ class CloudExplorerViewModel @Inject constructor(
                         fileOperationsUseCase.delete(sources, moveToRecycleBin = false)
                     }
                 } else {
-                    // Cloud file(s) (possibly a different account/provider) -> this cloud folder,
-                    // via a local temp round-trip since there is no cross-provider server-side move/copy.
+                    // Cloud file(s)/folder(s) (possibly a different account/provider) -> this
+                    // cloud folder, via a local temp round-trip since there is no cross-provider
+                    // server-side move/copy. A source folder has no single "download" call, so
+                    // first flatten it: recreate the matching folder tree at the destination and
+                    // collect every real file underneath (recursively) into (remoteFilePath,
+                    // itsResolvedTargetDir) pairs, same strategy FileUseCases.uploadFiles already
+                    // uses for local folders. Without this, a folder in the clipboard was handed
+                    // straight to downloadFile() as if it were a single file, which always failed
+                    // and silently dropped every file inside it.
                     val tempDir = File(context.cacheDir, "clipboard_transfer").apply { mkdirs() }
-                    val totalCount = sources.size
-                    val downloadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
-                    val uploadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
-                    sources.forEachIndexed { index, remotePath ->
+                    val isDirectoryByPath = _uiState.value.clipboardItemIsDirectory
+                    data class FlatEntry(val remoteFilePath: String, val targetDir: String, val topSource: String)
+                    val flat = mutableListOf<FlatEntry>()
+                    // Tracks whether every file under a given top-level source transferred
+                    // successfully, so a move only deletes that source once nothing was lost.
+                    val topLevelSucceeded = sources.associateWith { true }.toMutableMap()
+
+                    suspend fun flatten(remotePath: String, isDir: Boolean, targetDir: String, topSource: String) {
                         kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                        if (File(remotePath).name in skipNames) return@forEachIndexed
-                        val dlResult = cloudUseCase.downloadFile(sourceCloudAccountId, remotePath, tempDir.absolutePath) { bytesRead, totalBytes ->
-                            if (downloadThrottler.shouldEmit(bytesRead, totalBytes)) {
-                                _uiState.value = _uiState.value.copy(
-                                    downloadProgress = CloudTransferProgress(
-                                        currentFileName = File(remotePath).name,
-                                        currentIndex = index + 1,
-                                        totalFiles = totalCount,
-                                        bytesTransferred = bytesRead,
-                                        totalBytes = totalBytes,
-                                        isIndeterminate = totalBytes <= 0,
-                                        isUpload = false
-                                    )
-                                )
+                        val name = File(remotePath).name
+                        if (isDir) {
+                            // Reuse an existing same-name folder at the destination instead of
+                            // always creating a new one — MEGA in particular has no problem
+                            // creating a second folder with an identical name (it dedupes nothing),
+                            // so blindly calling createFolder on every retry/overwrite left
+                            // duplicate "same name" folders behind instead of merging into the one
+                            // already there.
+                            val existingFolder = cloudUseCase.getFiles(accountId, targetDir).getOrDefault(emptyList())
+                                .find { it.isDirectory && it.name == name }
+                            if (existingFolder == null) {
+                                val createResult = cloudUseCase.createFolder(accountId, name, targetDir)
+                                if (createResult.isFailure) {
+                                    // Real failure — still try to copy its children; any file that
+                                    // can't actually land will fail on its own upload below.
+                                }
                             }
-                        }
-                        val localFile = dlResult.getOrNull()
-                        if (localFile != null) {
-                            val upResult = cloudUseCase.uploadFiles(
-                                accountId = accountId,
-                                localPaths = listOf(localFile.absolutePath),
-                                remoteDir = targetPath,
-                                overwriteNames = overwriteNames,
-                                skipNames = emptySet()
-                            ) { currentFile, _, _, bytesSent, totalBytes ->
-                              if (uploadThrottler.shouldEmit(bytesSent, totalBytes)) {
-                                _uiState.value = _uiState.value.copy(
-                                    downloadProgress = CloudTransferProgress(
-                                        currentFileName = currentFile,
-                                        currentIndex = index + 1,
-                                        totalFiles = totalCount,
-                                        bytesTransferred = bytesSent,
-                                        totalBytes = totalBytes,
-                                        isIndeterminate = totalBytes <= 0,
-                                        isUpload = true
-                                    )
-                                )
-                              }
+                            val childTargetDir = if (targetDir == "/" || targetDir.isBlank()) "/$name" else "${targetDir.trimEnd('/')}/$name"
+                            val children = cloudUseCase.getFiles(sourceCloudAccountId, remotePath).getOrElse {
+                                topLevelSucceeded[topSource] = false
+                                lastErrorMessage = it.message
+                                emptyList()
                             }
-                            localFile.delete()
-                            if (upResult.isSuccess && isMove) {
-                                cloudUseCase.deleteItem(sourceCloudAccountId, remotePath)
-                            } else if (upResult.isFailure) {
-                                failures++
-                                lastErrorMessage = upResult.exceptionOrNull()?.message
+                            for (child in children) {
+                                flatten(child.path, child.isDirectory, childTargetDir, topSource)
                             }
                         } else {
-                            failures++
+                            flat.add(FlatEntry(remotePath, targetDir, topSource))
                         }
+                    }
+                    for (remotePath in sources) {
+                        if (File(remotePath).name in skipNames) continue
+                        flatten(remotePath, isDirectoryByPath[remotePath] == true, targetPath, remotePath)
+                    }
+
+                    val totalCount = flat.size
+                    transferredCount = totalCount
+                    val downloadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
+                    val uploadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
+                    // Each file's round trip (download then upload) is dominated by per-request
+                    // network latency, not local CPU/bandwidth — doing them one at a time is why
+                    // 438 small files felt like it crawled. Running several in flight at once
+                    // overlaps that latency instead of paying it 438 times in a row. Concurrency
+                    // is capped (not unbounded) because MEGA in particular rate-limits bursts of
+                    // parallel requests (see the comment on listCloudFiles' offline fallback).
+                    val failuresCounter = java.util.concurrent.atomic.AtomicInteger(0)
+                    val lastErrorRef = java.util.concurrent.atomic.AtomicReference<String?>(null)
+                    val completedCounter = java.util.concurrent.atomic.AtomicInteger(0)
+                    val semaphore = kotlinx.coroutines.sync.Semaphore(8)
+                    kotlinx.coroutines.coroutineScope {
+                        flat.forEachIndexed { index, entry ->
+                            launch {
+                                semaphore.withPermit {
+                                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                                    val remotePath = entry.remoteFilePath
+                                    // Unique per-entry download dir — concurrent downloads can
+                                    // otherwise collide when two source files share a name (e.g.
+                                    // "readme.txt" in two different subfolders).
+                                    val entryDir = File(tempDir, index.toString()).apply { mkdirs() }
+                                    val dlResult = cloudUseCase.downloadFile(sourceCloudAccountId, remotePath, entryDir.absolutePath) { bytesRead, totalBytes ->
+                                        if (downloadThrottler.shouldEmit(bytesRead, totalBytes)) {
+                                            _uiState.value = _uiState.value.copy(
+                                                downloadProgress = CloudTransferProgress(
+                                                    currentFileName = File(remotePath).name,
+                                                    currentIndex = completedCounter.get() + 1,
+                                                    totalFiles = totalCount,
+                                                    bytesTransferred = bytesRead,
+                                                    totalBytes = totalBytes,
+                                                    isIndeterminate = totalBytes <= 0,
+                                                    isUpload = false
+                                                )
+                                            )
+                                            transferGuard.updateProgress(
+                                                com.antigravity.filemanager.data.service.TransferProgressInfo(
+                                                    currentFileName = File(remotePath).name,
+                                                    currentIndex = completedCounter.get() + 1,
+                                                    totalFiles = totalCount,
+                                                    bytesTransferred = bytesRead,
+                                                    totalBytes = totalBytes,
+                                                    isUpload = false
+                                                )
+                                            )
+                                        }
+                                    }
+                                    val localFile = dlResult.getOrNull()
+                                    if (localFile != null) {
+                                        // overwriteNames/skipNames here are TOP-LEVEL clipboard
+                                        // item names (e.g. the folder "MP3 Tones" itself), decided
+                                        // once by the user in the conflict dialog — they were never
+                                        // going to match a nested file's own name (e.g.
+                                        // "Urgent2.mp3"). Passing them through unchanged meant every
+                                        // file inside an "Overwrite"-d folder found no name match at
+                                        // its own upload call and fell back to "keep both" (a "(1)"
+                                        // suffix), instead of actually overwriting. Propagate the
+                                        // top-level folder's decision down to each file under it.
+                                        val topName = File(entry.topSource).name
+                                        val effectiveOverwriteNames = if (topName in overwriteNames) {
+                                            setOf(localFile.name)
+                                        } else {
+                                            emptySet()
+                                        }
+                                        val upResult = cloudUseCase.uploadFiles(
+                                            accountId = accountId,
+                                            localPaths = listOf(localFile.absolutePath),
+                                            remoteDir = entry.targetDir,
+                                            overwriteNames = effectiveOverwriteNames,
+                                            skipNames = emptySet()
+                                        ) { currentFile, _, _, bytesSent, totalBytes ->
+                                          if (uploadThrottler.shouldEmit(bytesSent, totalBytes)) {
+                                            _uiState.value = _uiState.value.copy(
+                                                downloadProgress = CloudTransferProgress(
+                                                    currentFileName = currentFile,
+                                                    currentIndex = completedCounter.get() + 1,
+                                                    totalFiles = totalCount,
+                                                    bytesTransferred = bytesSent,
+                                                    totalBytes = totalBytes,
+                                                    isIndeterminate = totalBytes <= 0,
+                                                    isUpload = true
+                                                )
+                                            )
+                                            transferGuard.updateProgress(
+                                                com.antigravity.filemanager.data.service.TransferProgressInfo(
+                                                    currentFileName = currentFile,
+                                                    currentIndex = completedCounter.get() + 1,
+                                                    totalFiles = totalCount,
+                                                    bytesTransferred = bytesSent,
+                                                    totalBytes = totalBytes,
+                                                    isUpload = true
+                                                )
+                                            )
+                                          }
+                                        }
+                                        entryDir.deleteRecursively()
+                                        if (upResult.isFailure) {
+                                            failuresCounter.incrementAndGet()
+                                            lastErrorRef.set(upResult.exceptionOrNull()?.message)
+                                            topLevelSucceeded[entry.topSource] = false
+                                        }
+                                    } else {
+                                        entryDir.deleteRecursively()
+                                        failuresCounter.incrementAndGet()
+                                        topLevelSucceeded[entry.topSource] = false
+                                    }
+                                    completedCounter.incrementAndGet()
+                                }
+                            }
+                        }
+                    }
+                    failures += failuresCounter.get()
+                    lastErrorRef.get()?.let { lastErrorMessage = it }
+                    if (isMove) {
+                        // Delete each top-level source (file or folder) as one unit once its whole
+                        // subtree copied cleanly — deleting the folder node removes everything
+                        // under it remotely, so there's no need to delete descendants one by one.
+                        sources.filter { topLevelSucceeded[it] == true && File(it).name !in skipNames }
+                            .forEach { cloudUseCase.deleteItem(sourceCloudAccountId, it) }
                     }
                     _uiState.value = _uiState.value.copy(downloadProgress = null)
                     tempDir.deleteRecursively()
@@ -1059,7 +1197,7 @@ class CloudExplorerViewModel @Inject constructor(
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
                     toastMessage = if (failures == 0) {
-                        "Pasted ${sources.size} item(s)"
+                        "Pasted $transferredCount item(s)"
                     } else {
                         "Pasted with $failures failure(s)" + (lastErrorMessage?.let { ": $it" } ?: "")
                     }
@@ -1118,7 +1256,8 @@ class CloudExplorerViewModel @Inject constructor(
         val matching = _uiState.value.files.filter { it.path in _uiState.value.selectedPaths || it.id in _uiState.value.selectedPaths }
         val sizes = matching.associate { it.path to it.size }
         val ids = matching.associate { it.path to it.id }
-        globalClipboardManager.copyFromCloud(accountId, selected, sizes, ids)
+        val isDirectory = matching.associate { it.path to it.isDirectory }
+        globalClipboardManager.copyFromCloud(accountId, selected, sizes, ids, isDirectory)
         clearSelection()
     }
 
@@ -1127,7 +1266,8 @@ class CloudExplorerViewModel @Inject constructor(
         val matching = _uiState.value.files.filter { it.path in _uiState.value.selectedPaths || it.id in _uiState.value.selectedPaths }
         val sizes = matching.associate { it.path to it.size }
         val ids = matching.associate { it.path to it.id }
-        globalClipboardManager.cutFromCloud(accountId, selected, sizes, ids)
+        val isDirectory = matching.associate { it.path to it.isDirectory }
+        globalClipboardManager.cutFromCloud(accountId, selected, sizes, ids, isDirectory)
         clearSelection()
     }
 

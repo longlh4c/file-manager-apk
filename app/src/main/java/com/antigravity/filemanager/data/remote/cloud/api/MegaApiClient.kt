@@ -61,6 +61,15 @@ class MegaApiClient @Inject constructor(
         nodeTreeCache.remove(accountId)
     }
 
+    // MEGA's "p" command (create-node — used by both createFolder and uploadFile's finalize
+    // step) is NOT safe to send concurrently on the same session: firing several "p" requests
+    // in parallel (e.g. a multi-file paste running with several files in flight at once) made
+    // every single one come back with error -11 (EACCESS), even though the raw byte-upload "u"
+    // step right before it is perfectly fine to parallelize. Serializing just this one command
+    // per account keeps the actual data transfer concurrent while avoiding that failure.
+    private val nodeCreationMutexes = ConcurrentHashMap<String, Mutex>()
+    private fun nodeCreationMutexFor(accountId: String): Mutex = nodeCreationMutexes.getOrPut(accountId) { Mutex() }
+
     private fun nodeTreeMutexFor(accountId: String): Mutex =
         nodeTreeMutexes.getOrPut(accountId) { Mutex() }
 
@@ -295,14 +304,17 @@ class MegaApiClient @Inject constructor(
      * (a manual refresh at the account root) to force a re-fetch. */
     private suspend fun getOrFetchNodeTree(account: CloudAccount): Result<Pair<List<MegaNode>, String>> {
         nodeTreeCache[account.id]?.let { cached ->
+            android.util.Log.d("MegaApiClient", "getOrFetchNodeTree: cache HIT (${cached.allNodes.size} nodes) for ${account.id}")
             return Result.success(cached.allNodes to cached.rootHandle)
         }
         // Serialize concurrent misses for the same account (e.g. N+1 folder-count lookups)
         // so they share one network fetch instead of each re-downloading the whole tree.
         return nodeTreeMutexFor(account.id).withLock {
             nodeTreeCache[account.id]?.let { recheck ->
+                android.util.Log.d("MegaApiClient", "getOrFetchNodeTree: cache HIT after lock (${recheck.allNodes.size} nodes) for ${account.id}")
                 return@withLock Result.success(recheck.allNodes to recheck.rootHandle)
             }
+            android.util.Log.d("MegaApiClient", "getOrFetchNodeTree: cache MISS — fetching fresh tree from network for ${account.id}")
             val fetched = fetchNodeTreeFromNetwork(account)
             fetched.onSuccess { (nodes, root) ->
                 nodeTreeCache[account.id] = NodeTreeCache(nodes, root, System.currentTimeMillis())
@@ -771,16 +783,33 @@ class MegaApiClient @Inject constructor(
             }
         }
 
-    suspend fun createFolder(account: CloudAccount, name: String, parentHandle: String): Result<FileItem> = withContext(Dispatchers.IO) {
+    suspend fun createFolder(account: CloudAccount, name: String, parentHandle: String?): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
             val session = account.sessionHandle ?: account.accessToken ?: ""
             val sidParam = if (session.isNotBlank()) "?sid=$session" else ""
             val url = "$megaApiUrl$sidParam"
 
+            // Same root-fallback as uploadFile(): a blank/"/" parentHandle means "account root",
+            // which is a real handle from the node tree, never the literal string "/" — sending
+            // that raw string as "t" targets a node that doesn't exist, so MEGA rejects the whole
+            // command (this was silently producing folders whose real parent was garbage, and
+            // every file uploaded into "them" afterwards then failed with -11 EACCESS).
+            val resolvedParentHandle = if (parentHandle.isNullOrBlank() || parentHandle == "root" || parentHandle == "/") {
+                val (_, rootHandle) = getOrFetchNodeTree(account).getOrElse {
+                    return@withContext Result.failure(it)
+                }
+                rootHandle
+            } else {
+                parentHandle
+            }
+            if (resolvedParentHandle.isBlank()) {
+                return@withContext Result.failure(Exception("Could not resolve MEGA parent folder"))
+            }
+
             val commandJson = JSONArray().apply {
                 put(JSONObject().apply {
                     put("a", "p")
-                    put("t", parentHandle)
+                    put("t", resolvedParentHandle)
                     put("n", JSONArray().apply {
                         put(JSONObject().apply {
                             put("h", "NEW_${System.currentTimeMillis()}")
@@ -791,18 +820,21 @@ class MegaApiClient @Inject constructor(
                 })
             }.toString()
 
-            val respBody = sendMegaPost(url, commandJson).getOrNull() ?: "[]"
-            if (respBody.startsWith("-") || respBody.contains("[-")) {
-                return@withContext Result.failure(Exception("MEGA create folder failed: $respBody"))
-            }
+            val realHandle = nodeCreationMutexFor(account.id).withLock {
+                val respBody = sendMegaPost(url, commandJson).getOrNull() ?: "[]"
+                if (respBody.startsWith("-") || respBody.contains("[-")) {
+                    return@withContext Result.failure(Exception("MEGA create folder failed: $respBody"))
+                }
 
-            // The server assigns the real handle; it's only available in the "p" response body
-            // (response[0].f[0].h) — a client-fabricated id would be unusable as a parentHandle
-            // for any node created inside this folder afterwards (e.g. recursive folder upload).
-            val respArr = JSONArray(respBody)
-            val fArr = respArr.optJSONObject(0)?.optJSONArray("f")
-            val realHandle = fArr?.optJSONObject(0)?.optString("h") ?: ""
-            invalidateNodeCache(account.id)
+                // The server assigns the real handle; it's only available in the "p" response body
+                // (response[0].f[0].h) — a client-fabricated id would be unusable as a parentHandle
+                // for any node created inside this folder afterwards (e.g. recursive folder upload).
+                val respArr = JSONArray(respBody)
+                val fArr = respArr.optJSONObject(0)?.optJSONArray("f")
+                val handle = fArr?.optJSONObject(0)?.optString("h") ?: ""
+                invalidateNodeCache(account.id)
+                handle
+            }
             if (realHandle.isBlank()) {
                 return@withContext Result.failure(Exception("MEGA did not return a folder handle"))
             }
@@ -1300,14 +1332,16 @@ class MegaApiClient @Inject constructor(
                 })
             }.toString()
 
-            val createNodeResp = sendMegaPost(url, createNodeCommand)
-            val createNodeBody = createNodeResp.getOrNull() ?: "[]"
-            android.util.Log.d("MegaApiClient", "uploadFile: 'p' response = $createNodeBody")
-            if (createNodeBody.startsWith("-") || createNodeBody.contains("[-")) {
-                return@withContext Result.failure(Exception("MEGA node creation failed: $createNodeBody"))
+            val createNodeBody = nodeCreationMutexFor(account.id).withLock {
+                val createNodeResp = sendMegaPost(url, createNodeCommand)
+                val body = createNodeResp.getOrNull() ?: "[]"
+                android.util.Log.d("MegaApiClient", "uploadFile: 'p' response = $body")
+                if (body.startsWith("-") || body.contains("[-")) {
+                    return@withContext Result.failure(Exception("MEGA node creation failed: $body"))
+                }
+                invalidateNodeCache(account.id)
+                body
             }
-
-            invalidateNodeCache(account.id)
             onProgress?.invoke(totalBytes, totalBytes)
 
             Result.success(

@@ -14,6 +14,14 @@ import androidx.core.app.NotificationCompat
 import com.antigravity.filemanager.MainActivity
 import com.antigravity.filemanager.R
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import javax.inject.Inject
 
 /**
  * Foreground service that keeps the app process alive while a copy/move/upload/download is in
@@ -23,7 +31,12 @@ import dagger.hilt.android.AndroidEntryPoint
 @AndroidEntryPoint
 class TransferService : Service() {
 
+    @Inject
+    lateinit var transferGuard: TransferGuard
+
     private var wakeLock: PowerManager.WakeLock? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var progressCollectJob: Job? = null
 
     companion object {
         const val ACTION_START = "ACTION_START_TRANSFER"
@@ -47,9 +60,20 @@ class TransferService : Service() {
                 if (wakeLock?.isHeld != true) {
                     wakeLock?.acquire(6 * 60 * 60 * 1000L) // 6h safety cap
                 }
-                startForegroundNotification()
+                startForegroundNotification(null)
+                // Reflect live per-file progress (set by whichever ViewModel is driving the
+                // transfer, via TransferGuard.updateProgress) onto the notification's progress
+                // bar — this is what makes the notification useful once the app is backgrounded
+                // or the screen navigated away, instead of just a static "running" message.
+                progressCollectJob?.cancel()
+                progressCollectJob = serviceScope.launch {
+                    transferGuard.progress.collectLatest { info ->
+                        startForegroundNotification(info)
+                    }
+                }
             }
             ACTION_STOP -> {
+                progressCollectJob?.cancel()
                 if (wakeLock?.isHeld == true) wakeLock?.release()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -58,21 +82,32 @@ class TransferService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun startForegroundNotification() {
+    private fun startForegroundNotification(info: TransferProgressInfo?) {
         val pendingIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle(getString(R.string.transfer_running_notification))
-            .setContentText(getString(R.string.transfer_running_notification_text))
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+        val builder = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(if (info?.isUpload == false) android.R.drawable.stat_sys_download else android.R.drawable.stat_sys_upload)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
-            .build()
 
+        if (info == null) {
+            builder
+                .setContentTitle(getString(R.string.transfer_running_notification))
+                .setContentText(getString(R.string.transfer_running_notification_text))
+        } else {
+            val verb = if (info.isUpload) "Uploading" else "Downloading"
+            val percent = if (info.totalBytes > 0) (info.bytesTransferred * 100 / info.totalBytes).toInt() else 0
+            builder
+                .setContentTitle("$verb ${info.currentIndex}/${info.totalFiles} — $percent%")
+                .setContentText(info.currentFileName)
+                .setProgress(100, percent, info.totalBytes <= 0)
+        }
+
+        val notification = builder.build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         } else {
@@ -95,6 +130,8 @@ class TransferService : Service() {
     }
 
     override fun onDestroy() {
+        progressCollectJob?.cancel()
+        serviceScope.cancel()
         if (wakeLock?.isHeld == true) wakeLock?.release()
         super.onDestroy()
     }

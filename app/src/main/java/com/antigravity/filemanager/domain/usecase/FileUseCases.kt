@@ -168,7 +168,12 @@ class CloudStorageUseCase @Inject constructor(
         return items.mapNotNull { (name, size) ->
             val match = existing.find { it.name == name }
             if (match != null) {
-                com.antigravity.filemanager.domain.model.OverwriteConflict(name = name, existingSize = match.size, newSize = size)
+                com.antigravity.filemanager.domain.model.OverwriteConflict(
+                    name = name,
+                    existingSize = match.size,
+                    newSize = size,
+                    isDirectory = match.isDirectory
+                )
             } else null
         }
     }

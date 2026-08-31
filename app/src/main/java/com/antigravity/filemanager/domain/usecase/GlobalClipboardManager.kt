@@ -14,7 +14,10 @@ data class GlobalClipboardState(
     /** Item sizes by path, known at copy/cut time — used to show old-vs-new size in overwrite prompts. */
     val itemSizes: Map<String, Long> = emptyMap(),
     /** Remote file IDs for cloud items (path -> fileId/nodeHandle) */
-    val cloudFileIds: Map<String, String> = emptyMap()
+    val cloudFileIds: Map<String, String> = emptyMap(),
+    /** Whether each cloud path is a folder — needed so a cross-account paste knows to recurse
+     * into it instead of trying to download it as a single file. */
+    val itemIsDirectory: Map<String, Boolean> = emptyMap()
 ) {
     val hasItems: Boolean get() = paths.isNotEmpty()
     val itemCount: Int get() = paths.size
@@ -37,14 +40,16 @@ class GlobalClipboardManager @Inject constructor() {
         accountId: String,
         paths: List<String>,
         itemSizes: Map<String, Long> = emptyMap(),
-        cloudFileIds: Map<String, String> = emptyMap()
+        cloudFileIds: Map<String, String> = emptyMap(),
+        itemIsDirectory: Map<String, Boolean> = emptyMap()
     ) {
         _state.value = GlobalClipboardState(
             paths = paths,
             isCut = false,
             sourceCloudAccountId = accountId,
             itemSizes = itemSizes,
-            cloudFileIds = cloudFileIds
+            cloudFileIds = cloudFileIds,
+            itemIsDirectory = itemIsDirectory
         )
     }
 
@@ -52,14 +57,16 @@ class GlobalClipboardManager @Inject constructor() {
         accountId: String,
         paths: List<String>,
         itemSizes: Map<String, Long> = emptyMap(),
-        cloudFileIds: Map<String, String> = emptyMap()
+        cloudFileIds: Map<String, String> = emptyMap(),
+        itemIsDirectory: Map<String, Boolean> = emptyMap()
     ) {
         _state.value = GlobalClipboardState(
             paths = paths,
             isCut = true,
             sourceCloudAccountId = accountId,
             itemSizes = itemSizes,
-            cloudFileIds = cloudFileIds
+            cloudFileIds = cloudFileIds,
+            itemIsDirectory = itemIsDirectory
         )
     }
 

@@ -177,7 +177,11 @@ fun OverwriteConflictDialog(
                         ) {
                             Text(text = conflict.name, color = TextPrimary, fontSize = 14.sp)
                             Text(
-                                text = "Existing: ${FileItem.formatBytes(conflict.existingSize)}  →  New: ${FileItem.formatBytes(conflict.newSize)}",
+                                text = if (conflict.isDirectory) {
+                                    "A folder with this name already exists"
+                                } else {
+                                    "Existing: ${FileItem.formatBytes(conflict.existingSize)}  →  New: ${FileItem.formatBytes(conflict.newSize)}"
+                                },
                                 color = TextSecondary,
                                 fontSize = 12.sp
                             )

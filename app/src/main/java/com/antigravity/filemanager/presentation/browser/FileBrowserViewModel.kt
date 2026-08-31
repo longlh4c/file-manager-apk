@@ -79,6 +79,7 @@ class FileBrowserViewModel @Inject constructor(
     private val bookmarkUseCase: com.antigravity.filemanager.domain.usecase.BookmarkUseCase,
     private val getDashboardDataUseCase: com.antigravity.filemanager.domain.usecase.GetDashboardDataUseCase,
     private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
+    private val transferGuard: com.antigravity.filemanager.data.service.TransferGuard,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
@@ -701,6 +702,16 @@ class FileBrowserViewModel @Inject constructor(
                                 bytesTransferred = bytesSent,
                                 totalBytes = totalBytes,
                                 isIndeterminate = totalBytes <= 0,
+                                isUpload = true
+                            )
+                        )
+                        transferGuard.updateProgress(
+                            com.antigravity.filemanager.data.service.TransferProgressInfo(
+                                currentFileName = currentFile,
+                                currentIndex = currentIndex,
+                                totalFiles = totalFiles,
+                                bytesTransferred = bytesSent,
+                                totalBytes = totalBytes,
                                 isUpload = true
                             )
                         )

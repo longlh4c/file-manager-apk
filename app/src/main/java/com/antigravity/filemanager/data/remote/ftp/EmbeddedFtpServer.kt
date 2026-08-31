@@ -43,7 +43,18 @@ class EmbeddedFtpServer @Inject constructor() {
                 maxAnonymousLogins = 100
                 maxLoginFailures = 100
                 loginFailureDelay = 0
-                maxThreads = 32
+                // NOT a perf knob to raise carelessly: apache-ftpserver 1.2.0 (unmaintained since
+                // 2011) shares a single CharsetEncoder across MINA's IO worker threads when
+                // encoding responses (e.g. "227 Entering Passive Mode ..." for PASV).
+                // CharsetEncoder is NOT thread-safe, so >1 thread means two connections (or
+                // parallel data-connection requests from one client) can encode a response at the
+                // same time, corrupt the shared encoder's internal state, and trigger a native
+                // ICU NullPointerException that JNI escalates into an uncatchable process abort
+                // (SIGABRT) — killing the app mid-transfer. maxThreads=1 serializes all response
+                // encoding so this race can't happen; it only limits how many FTP protocol events
+                // are processed at once, not file transfer throughput (each connection's data
+                // socket still moves bytes independently of this pool).
+                maxThreads = 1
                 isAnonymousLoginEnabled = true
             }
             serverFactory.connectionConfig = connectionConfigFactory.createConnectionConfig()

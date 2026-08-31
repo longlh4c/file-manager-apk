@@ -894,22 +894,72 @@ class CloudManager @Inject constructor(
 
             val itemPath = if (parentPath == "/" || parentPath.isBlank()) "/$folderName" else "${parentPath.trimEnd('/')}/$folderName"
 
-            // Also attempt remote creation
+            // Also attempt remote creation. A failure here must be reported, not swallowed — the
+            // caller (e.g. a recursive cloud-to-cloud folder copy) relies on this to actually
+            // exist server-side before it starts uploading files into it; silently keeping only
+            // the local mirror on failure is what let every "created" MEGA folder look fine here
+            // while every upload into it failed downstream.
+            var remoteId: String? = null
+            var remoteFailure: Exception? = null
             try {
                 when (account.provider) {
-                    CloudProvider.GOOGLE_DRIVE -> googleDriveApi.createFolder(account, folderName, parentPath)
-                    CloudProvider.DROPBOX -> dropboxApi.createFolder(account, itemPath).also { dropboxApi.invalidateTree(account.id) }
-                    CloudProvider.MEGA -> megaApi.createFolder(account, folderName, parentPath)
+                    CloudProvider.GOOGLE_DRIVE -> {
+                        // Same class of bug as MEGA below: parentPath is a display path, not a
+                        // real Drive folder ID — resolve it via the cache first.
+                        val resolvedParentId = if (parentPath == "/" || parentPath.isBlank()) {
+                            "root"
+                        } else {
+                            folderIdCache[parentPath] ?: folderIdCache[parentPath.trimStart('/')] ?: parentPath
+                        }
+                        googleDriveApi.createFolder(account, folderName, resolvedParentId).onSuccess { item ->
+                            remoteId = item.id
+                            folderIdCache[itemPath] = item.id
+                            folderIdCache[item.id] = item.id
+                        }.onFailure {
+                            remoteFailure = it as? Exception ?: Exception(it.message ?: "Google Drive create folder failed")
+                        }
+                    }
+                    CloudProvider.DROPBOX -> {
+                        dropboxApi.createFolder(account, itemPath).also { dropboxApi.invalidateTree(account.id) }
+                    }
+                    CloudProvider.MEGA -> {
+                        // MEGA identifies folders by handle, not path — resolve the display path
+                        // the same way listCloudFiles/uploadFile do (cache hit, else walk the tree),
+                        // instead of handing the raw path string to megaApi.createFolder as if it
+                        // were already a handle.
+                        val resolvedParentHandle = if (parentPath == "/" || parentPath.isBlank()) {
+                            null
+                        } else {
+                            folderIdCache[parentPath] ?: megaApi.resolveHandleForDisplayPath(account, parentPath) ?: parentPath
+                        }
+                        val createResult = megaApi.createFolder(account, folderName, resolvedParentHandle)
+                        createResult.onSuccess { item ->
+                            remoteId = item.id
+                            folderIdCache[itemPath] = item.id
+                            folderIdCache[item.id] = item.id
+                        }.onFailure {
+                            remoteFailure = it as? Exception ?: Exception(it.message ?: "MEGA create folder failed")
+                        }
+                    }
                 }
             } catch (e: Exception) {
-                // Keep local
+                remoteFailure = e
+            }
+            if (remoteFailure != null) {
+                return@withContext Result.failure(remoteFailure!!)
             }
 
+            // fileId here ends up in folderIdCache[itemPath] too (see addOrUpdateSessionPayload
+            // below) — passing the local mirror path unconditionally, like this used to, clobbered
+            // the correct remote handle/ID this function just resolved above with a path that is
+            // meaningless to the actual provider API. Only fall back to the local path when there
+            // truly is no remote id (Dropbox, which addresses everything by path anyway, or a
+            // provider create that only partially succeeded).
             addOrUpdateSessionPayload(
                 accountId = account.id,
                 name = folderName,
                 remotePath = itemPath,
-                fileId = newFolder.absolutePath,
+                fileId = remoteId ?: newFolder.absolutePath,
                 parentPath = parentPath,
                 size = 0L,
                 lastModified = System.currentTimeMillis(),
@@ -918,7 +968,7 @@ class CloudManager @Inject constructor(
 
             Result.success(
                 FileItem(
-                    id = newFolder.absolutePath,
+                    id = remoteId ?: newFolder.absolutePath,
                     name = folderName,
                     path = itemPath,
                     isDirectory = true,
@@ -1119,7 +1169,8 @@ class CloudManager @Inject constructor(
                         if (moveToTrash) googleDriveApi.trashFile(account, targetId) else googleDriveApi.deleteFile(account, targetId)
                     CloudProvider.DROPBOX -> dropboxApi.delete(account, if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId").also { dropboxApi.invalidateTree(account.id) }
                     CloudProvider.MEGA ->
-                        if (moveToTrash) megaApi.moveToRubbishBin(account, targetId) else megaApi.deleteNode(account, targetId)
+                        (if (moveToTrash) megaApi.moveToRubbishBin(account, targetId) else megaApi.deleteNode(account, targetId))
+                            .also { megaApi.invalidateNodeTreeCache(account.id) }
                 }
             } catch (e: Exception) {
                 // Ignore
@@ -1138,7 +1189,7 @@ class CloudManager @Inject constructor(
         val targetId = folderIdCache[remotePathOrId] ?: folderIdCache[remotePathOrId.trimStart('/')] ?: remotePathOrId
         when (account.provider) {
             CloudProvider.GOOGLE_DRIVE -> googleDriveApi.restoreFromTrash(account, targetId)
-            CloudProvider.MEGA -> megaApi.restoreFromRubbishBin(account, targetId)
+            CloudProvider.MEGA -> megaApi.restoreFromRubbishBin(account, targetId).also { megaApi.invalidateNodeTreeCache(account.id) }
             CloudProvider.DROPBOX -> Result.failure(Exception("Restore not supported for Dropbox"))
         }
     }
@@ -1152,7 +1203,9 @@ class CloudManager @Inject constructor(
             }
             CloudProvider.MEGA -> {
                 val targetId = folderIdCache[remotePath] ?: folderIdCache[remotePath.trimStart('/')] ?: remotePath
-                megaApi.renameNode(account, targetId, newName).map { FileItem(id = targetId, name = newName, path = remotePath) }
+                megaApi.renameNode(account, targetId, newName)
+                    .also { megaApi.invalidateNodeTreeCache(account.id) }
+                    .map { FileItem(id = targetId, name = newName, path = remotePath) }
             }
         }
     }
