@@ -5,8 +5,10 @@ import com.antigravity.filemanager.domain.model.FileItem
 import com.dropbox.core.DbxRequestConfig
 import com.dropbox.core.oauth.DbxCredential
 import com.dropbox.core.v2.DbxClientV2
+import com.dropbox.core.v2.files.DeletedMetadata
 import com.dropbox.core.v2.files.FileMetadata
 import com.dropbox.core.v2.files.FolderMetadata
+import com.dropbox.core.v2.files.ListRevisionsMode
 import com.dropbox.core.v2.files.Metadata
 import com.dropbox.core.v2.files.WriteMode
 import kotlinx.coroutines.Dispatchers
@@ -110,15 +112,28 @@ class DropboxApiClient @Inject constructor() {
 
     private suspend fun getOrFetchTree(account: CloudAccount): Result<List<DropboxEntry>> {
         treeCache[account.id]?.let { cached ->
-            return Result.success(cached.entries)
+            // A tree that was ever successfully cached as EMPTY (e.g. one bad fetch mid-account-
+            // migration, or a token that was valid but scoped to zero content at that instant) used
+            // to get served back silently forever after — no log, no retry, indistinguishable from
+            // a genuinely empty Dropbox account. Treat an empty cached tree as not-actually-cached
+            // so it gets one real re-fetch instead of being trusted permanently.
+            if (cached.entries.isNotEmpty()) {
+                return Result.success(cached.entries)
+            }
+            android.util.Log.d("DropboxApiClient", "getOrFetchTree: cached tree for ${account.id} is EMPTY — treating as stale, re-fetching")
         }
         return treeMutexFor(account.id).withLock {
             treeCache[account.id]?.let { recheck ->
-                return@withLock Result.success(recheck.entries)
+                if (recheck.entries.isNotEmpty()) {
+                    return@withLock Result.success(recheck.entries)
+                }
             }
             android.util.Log.d("DropboxApiClient", "getOrFetchTree: cache MISS — fetching fresh tree from network for ${account.id}")
             val fetched = fetchTreeFromNetwork(account)
-            fetched.onSuccess { entries -> treeCache[account.id] = TreeCache(entries, System.currentTimeMillis()) }
+            fetched.onSuccess { entries ->
+                android.util.Log.d("DropboxApiClient", "getOrFetchTree: fetch completed with ${entries.size} entries for ${account.id}")
+                treeCache[account.id] = TreeCache(entries, System.currentTimeMillis())
+            }
             fetched
         }
     }
@@ -430,6 +445,108 @@ class DropboxApiClient @Inject constructor() {
     }
 
     suspend fun delete(account: CloudAccount, path: String): Result<Unit> = deleteFile(account, path)
+
+    /** Every deleted item Dropbox is still holding a recoverable copy of, account-wide — unlike
+     * MEGA/Drive, Dropbox has no distinct "Trash" location; a deleted item just gets flagged
+     * ".tag":"deleted" wherever it used to live, so finding all of them means walking the whole
+     * account with recursive+includeDeleted, the same shape as the existing whole-tree fetch used
+     * for the normal listing cache. Dropbox itself expires these automatically after ~30 days
+     * (or per the account's own retention setting) — this only surfaces what Dropbox is still
+     * holding right now, nothing this app controls. */
+    suspend fun listTrash(account: CloudAccount): Result<List<FileItem>> = withContext(Dispatchers.IO) {
+        try {
+            val client = buildClient(account)
+            val deleted = mutableListOf<DeletedMetadata>()
+            var result = client.files().listFolderBuilder("").withRecursive(true).withIncludeDeleted(true).start()
+            fun collect(metas: List<Metadata>) {
+                for (meta in metas) {
+                    if (meta is DeletedMetadata) deleted.add(meta)
+                }
+            }
+            collect(result.entries)
+            android.util.Log.d("DropboxApiClient", "listTrash: page 0 -> ${result.entries.size} entries, hasMore=${result.hasMore}")
+            // recursive+includeDeleted pagination for a `hasMore` that never actually clears was
+            // seen hanging indefinitely on-device — no request ever fails, no exception is ever
+            // thrown, it just keeps paging into what looks like the same tail of results forever
+            // (allocating a full page of metadata each time, which showed up as a nonstop GC storm
+            // with the screen stuck on a spinner). A hard page cap turns a real Dropbox API/SDK
+            // pagination bug into "this account has an unusually large trash, showing what's
+            // findable" instead of hanging the UI and burning memory with no way out.
+            var page = 0
+            val maxPages = 200
+            while (result.hasMore) {
+                currentCoroutineContext().ensureActive()
+                page++
+                if (page > maxPages) {
+                    android.util.Log.e("DropboxApiClient", "listTrash: hit $maxPages page cap, stopping early with ${deleted.size} entries so far — hasMore never cleared")
+                    break
+                }
+                result = client.files().listFolderContinue(result.cursor)
+                collect(result.entries)
+                android.util.Log.d("DropboxApiClient", "listTrash: page $page -> ${result.entries.size} entries (total deleted=${deleted.size}), hasMore=${result.hasMore}")
+            }
+            Result.success(
+                deleted.map { meta ->
+                    val path = meta.pathDisplay ?: "/${meta.name}"
+                    FileItem(
+                        id = path,
+                        name = meta.name,
+                        path = path,
+                        // DeletedMetadata carries no type/size info at all — Dropbox doesn't say
+                        // whether a deleted entry was a file or folder, or how big it was.
+                        isDirectory = false,
+                        extension = meta.name.substringAfterLast(".", "")
+                    )
+                }
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("DropboxApiClient", "listTrash failed: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    /** Restores the most recently deleted revision at [path] back to that same path. Dropbox's
+     * restore API needs a specific revision id, not just a path — DeletedMetadata (what listTrash
+     * returns) doesn't carry one, so this looks it up via list_revisions first. */
+    suspend fun restoreFile(account: CloudAccount, path: String): Result<FileItem> = withContext(Dispatchers.IO) {
+        try {
+            val client = buildClient(account)
+            val targetPath = if (path.startsWith("/")) path else "/$path"
+            val revisions = client.files().listRevisionsBuilder(targetPath).withMode(ListRevisionsMode.PATH).start()
+            val latestRev = revisions.entries.firstOrNull()?.rev
+                ?: return@withContext Result.failure(Exception("No recoverable revision found for '$targetPath'"))
+            val metadata = client.files().restore(targetPath, latestRev)
+            Result.success(
+                FileItem(
+                    id = metadata.id,
+                    name = metadata.name,
+                    path = metadata.pathDisplay ?: targetPath,
+                    isDirectory = false,
+                    size = metadata.size,
+                    extension = metadata.name.substringAfterLast(".", "")
+                )
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("DropboxApiClient", "restoreFile failed for '$path': ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    /** Purges a deleted item immediately instead of waiting out Dropbox's own retention window.
+     * Note: Dropbox's permanently_delete endpoint requires the account to have extended-deletion
+     * capability (Business/Team accounts with the right admin setting) — on a plain personal
+     * account this call itself fails; there is no app-side workaround for that. */
+    suspend fun permanentlyDelete(account: CloudAccount, path: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val client = buildClient(account)
+            val targetPath = if (path.startsWith("/")) path else "/$path"
+            client.files().permanentlyDelete(targetPath)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            android.util.Log.e("DropboxApiClient", "permanentlyDelete failed for '$path': ${e.message}", e)
+            Result.failure(e)
+        }
+    }
 
     /** Relocates an item to a different folder in the SAME account entirely server-side — no
      * data ever passes through this device, unlike the generic cloud-to-cloud paste flow's

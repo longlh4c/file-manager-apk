@@ -19,8 +19,11 @@ import androidx.compose.runtime.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -58,6 +61,15 @@ fun FileBrowserScreen(
         uiState.toastMessage?.let {
             Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
             viewModel.clearToast()
+        }
+    }
+
+    val searchFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    LaunchedEffect(uiState.isSearchActive) {
+        if (uiState.isSearchActive) {
+            searchFocusRequester.requestFocus()
+            keyboardController?.show()
         }
     }
 
@@ -231,10 +243,9 @@ fun FileBrowserScreen(
     val relativePath = uiState.currentPath.removePrefix(boundary).trimStart('/')
     val pathSegments = if (relativePath.isEmpty()) emptyList() else relativePath.split('/')
 
-    val filteredFiles = remember(uiState.files, uiState.searchQuery) {
-        if (uiState.searchQuery.isBlank()) uiState.files
-        else uiState.files.filter { it.name.contains(uiState.searchQuery, ignoreCase = true) }
-    }
+    // Search results come recursively from the ViewModel (this folder + every subfolder), not a
+    // plain filter of the current listing — see FileBrowserViewModel.onSearchQueryChanged.
+    val filteredFiles = if (uiState.searchQuery.isBlank()) uiState.files else uiState.searchResults
 
     Scaffold(
         topBar = {
@@ -283,7 +294,9 @@ fun FileBrowserScreen(
                                 focusedIndicatorColor = Color.Transparent,
                                 unfocusedIndicatorColor = Color.Transparent
                             ),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(searchFocusRequester)
                         )
                     },
                     navigationIcon = {
@@ -380,7 +393,7 @@ fun FileBrowserScreen(
                                 tint = TextPrimary,
                                 onClick = {
                                     val firstPath = uiState.selectedPaths.firstOrNull()
-                                    val item = uiState.files.find { it.path == firstPath }
+                                    val item = filteredFiles.find { it.path == firstPath }
                                     viewModel.setShowRenameDialog(item)
                                 },
                                 modifier = Modifier.weight(1f)
@@ -431,7 +444,7 @@ fun FileBrowserScreen(
                                 // Add/Remove Bookmark (only when exactly one folder is selected)
                                 run {
                                     val firstPath = uiState.selectedPaths.firstOrNull()
-                                    val selectedItem = uiState.files.find { it.path == firstPath }
+                                    val selectedItem = filteredFiles.find { it.path == firstPath }
                                     if (uiState.selectedPaths.size == 1 && selectedItem?.isDirectory == true) {
                                         val isBookmarked = uiState.bookmarks.any { it.path == selectedItem.path }
                                         DropdownMenuItem(
@@ -494,7 +507,7 @@ fun FileBrowserScreen(
                                     onClick = {
                                         showMoreMenu = false
                                         val firstPath = uiState.selectedPaths.firstOrNull()
-                                        val file = uiState.files.find { it.path == firstPath }
+                                        val file = filteredFiles.find { it.path == firstPath }
                                         if (file != null) FileOpener.openWith(context, file)
                                     }
                                 )
@@ -505,7 +518,7 @@ fun FileBrowserScreen(
                                     onClick = {
                                         showMoreMenu = false
                                         val firstPath = uiState.selectedPaths.firstOrNull()
-                                        val file = uiState.files.find { it.path == firstPath }
+                                        val file = filteredFiles.find { it.path == firstPath }
                                         viewModel.setShowPropertiesDialog(file)
                                     }
                                 )
@@ -552,7 +565,7 @@ fun FileBrowserScreen(
                 onRefresh = { viewModel.refresh() },
                 modifier = Modifier.fillMaxSize()
             ) {
-            if (!uiState.isLoading && filteredFiles.isEmpty()) {
+            if (!uiState.isLoading && !uiState.isSearching && filteredFiles.isEmpty()) {
                 EmptyFolderState()
             } else {
             when (viewMode) {
@@ -608,7 +621,8 @@ fun FileBrowserScreen(
                                 },
                                 onLongClick = {
                                     viewModel.toggleFileSelection(file.path)
-                                }
+                                },
+                                showPath = uiState.searchQuery.isNotBlank()
                             )
                             HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
                         }
@@ -635,7 +649,8 @@ fun FileBrowserScreen(
                                 },
                                 onLongClick = {
                                     viewModel.toggleFileSelection(file.path)
-                                }
+                                },
+                                showPath = uiState.searchQuery.isNotBlank()
                             )
                             HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
                         }

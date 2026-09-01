@@ -1019,6 +1019,62 @@ class MegaApiClient @Inject constructor(
         }
     }
 
+    /** Deletes many nodes in as few HTTP round trips as possible — MEGA's command endpoint takes
+     * an array of commands and executes all of them server-side per request, so batching many
+     * "a":"d" commands into one POST turns what would be N sequential round trips (the original
+     * per-node [deleteNode] loop, unusable for a large Rubbish Bin — 800+ items took over an hour)
+     * into roughly N/batchSize. Chunked rather than one giant array so a single oversized request
+     * doesn't risk a timeout or a server-side response-size limit. Returns a per-handle Result so
+     * one bad node (e.g. a stale/orphaned handle) doesn't hide the outcome of the rest of the
+     * batch it shipped with. */
+    suspend fun deleteNodesBatch(account: CloudAccount, nodeHandles: List<String>): Map<String, Result<Unit>> = withContext(Dispatchers.IO) {
+        val results = LinkedHashMap<String, Result<Unit>>()
+        val (validHandles, invalidHandles) = nodeHandles.partition { !it.startsWith("/") }
+        // Same "never send a raw display path as if it were a handle" guard as deleteNode.
+        invalidHandles.forEach { results[it] = Result.failure(Exception("Could not resolve a MEGA handle for '$it'")) }
+        if (validHandles.isEmpty()) return@withContext results
+
+        val session = account.sessionHandle ?: account.accessToken ?: ""
+        val sidParam = if (session.isNotBlank()) "?sid=$session" else ""
+        val url = "$megaApiUrl$sidParam"
+
+        validHandles.chunked(25).forEach { batch ->
+            val commandJson = JSONArray().apply {
+                batch.forEach { handle ->
+                    put(JSONObject().apply {
+                        put("a", "d")
+                        put("n", handle)
+                    })
+                }
+            }.toString()
+            val response = sendMegaPost(url, commandJson)
+            if (response.isFailure) {
+                val error = response.exceptionOrNull() ?: Exception("MEGA batch delete request failed")
+                batch.forEach { results[it] = Result.failure(error) }
+                return@forEach
+            }
+            try {
+                val jsonArray = JSONArray(response.getOrNull() ?: "[]")
+                batch.forEachIndexed { index, handle ->
+                    // A success entry is 0 (or occasionally another non-negative value); MEGA
+                    // reports a per-command failure as a negative error code at that same index.
+                    val code = if (index < jsonArray.length()) jsonArray.optDouble(index, 0.0) else -1.0
+                    results[handle] = if (code < 0) {
+                        Result.failure(Exception("MEGA delete failed: $code"))
+                    } else {
+                        Result.success(Unit)
+                    }
+                }
+            } catch (e: Exception) {
+                // Response wasn't the expected array shape at all — treat the whole batch as
+                // failed rather than guessing.
+                batch.forEach { results[it] = Result.failure(e) }
+            }
+        }
+        invalidateNodeCache(account.id)
+        results
+    }
+
     /**
      * MEGA's node-key encryption doesn't depend on the parent folder (unlike a shared folder's
      * re-keying), so moving a node within one's own account tree is a plain "a":"m" move command,

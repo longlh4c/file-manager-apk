@@ -92,6 +92,10 @@ interface ICloudRepository {
     ): Result<Unit>
     suspend fun createFolder(accountId: String, folderName: String, parentPath: String): Result<FileItem>
     suspend fun deleteCloudFile(accountId: String, remotePath: String, moveToTrash: Boolean = true): Result<Unit>
+    /** Permanently deletes many MEGA items in as few HTTP round trips as possible instead of one
+     * request per item — see CloudManager.deletePermanentlyBatchMega. MEGA only; other providers
+     * return an empty map so callers know to fall back to their own per-item loop. */
+    suspend fun deletePermanentlyBatchMega(accountId: String, remotePaths: List<String>): Map<String, Result<Unit>>
     suspend fun restoreCloudFile(accountId: String, remotePath: String): Result<Unit>
     suspend fun renameCloudFile(accountId: String, remotePath: String, newName: String): Result<FileItem>
     /** Relocates an item to a different folder within the SAME cloud account, entirely
