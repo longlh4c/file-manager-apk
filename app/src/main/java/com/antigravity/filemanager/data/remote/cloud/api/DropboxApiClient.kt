@@ -431,6 +431,39 @@ class DropboxApiClient @Inject constructor() {
 
     suspend fun delete(account: CloudAccount, path: String): Result<Unit> = deleteFile(account, path)
 
+    /** Relocates an item to a different folder in the SAME account entirely server-side — no
+     * data ever passes through this device, unlike the generic cloud-to-cloud paste flow's
+     * download-then-upload round trip (which exists only because there's no such API when the
+     * source and destination are different providers/accounts). Dropbox's path-based moveV2 does
+     * this identically to a rename; only the target path's directory differs. */
+    suspend fun moveItem(account: CloudAccount, fromPath: String, toDir: String): Result<FileItem> = withContext(Dispatchers.IO) {
+        try {
+            val client = buildClient(account)
+            val normalizedFrom = if (fromPath.startsWith("/")) fromPath else "/$fromPath"
+            val name = normalizedFrom.substringAfterLast("/")
+            val normalizedToDir = if (toDir == "/" || toDir.isBlank()) "" else if (toDir.startsWith("/")) toDir.trimEnd('/') else "/${toDir.trimEnd('/')}"
+            val toPath = "$normalizedToDir/$name"
+            val metadata = client.files().moveV2(normalizedFrom, toPath).metadata
+            val id = when (metadata) {
+                is FolderMetadata -> metadata.id
+                is FileMetadata -> metadata.id
+                else -> metadata.name
+            }
+            Result.success(
+                FileItem(
+                    id = id,
+                    name = metadata.name,
+                    path = metadata.pathDisplay ?: toPath,
+                    isDirectory = metadata is FolderMetadata,
+                    size = (metadata as? FileMetadata)?.size ?: 0L,
+                    extension = if (metadata is FileMetadata) metadata.name.substringAfterLast(".", "") else ""
+                )
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun renameFile(account: CloudAccount, path: String, newName: String): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
             val client = buildClient(account)

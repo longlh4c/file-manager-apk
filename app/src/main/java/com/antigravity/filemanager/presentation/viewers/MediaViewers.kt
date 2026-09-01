@@ -16,10 +16,12 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -168,6 +170,42 @@ fun ImageViewerScreen(
     val currentLocalFile: File? = (currentMedia as? ResolvedImageMedia.LocalFile)?.file
     val currentName = currentEntry?.entryName ?: initialDisplayName
 
+    val coroutineScope = rememberCoroutineScope()
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var isDeleting by remember { mutableStateOf(false) }
+
+    if (showDeleteConfirm && currentEntry != null) {
+        AlertDialog(
+            onDismissRequest = { if (!isDeleting) showDeleteConfirm = false },
+            title = { Text("Delete") },
+            text = { Text("Delete \"$currentName\"?" + if (currentEntry is ViewerEntry.Local) " It will be moved to the recycle bin." else "") },
+            confirmButton = {
+                TextButton(
+                    enabled = !isDeleting,
+                    onClick = {
+                        isDeleting = true
+                        coroutineScope.launch {
+                            val result = when (currentEntry) {
+                                is ViewerEntry.Local -> cloudMediaViewerViewModel.deleteLocalFile(currentEntry.file.absolutePath)
+                                is ViewerEntry.Cloud -> cloudMediaViewerViewModel.deleteCloudFile(cloudAccountId ?: "", currentEntry.item.path)
+                            }
+                            isDeleting = false
+                            showDeleteConfirm = false
+                            // Deleting mid-pager without reworking imageEntries into mutable state
+                            // to reflow the remaining siblings isn't worth the complexity here —
+                            // just back out to the folder, which reloads fresh (without the file)
+                            // on its own.
+                            if (result.isSuccess) onNavigateBack()
+                        }
+                    }
+                ) { Text(if (isDeleting) "Deleting…" else "Delete", color = Color(0xFFEF5350)) }
+            },
+            dismissButton = {
+                TextButton(enabled = !isDeleting, onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             AnimatedVisibility(
@@ -228,6 +266,12 @@ fun ImageViewerScreen(
                             }
                         ) {
                             Icon(Icons.Default.OpenWith, contentDescription = "Open with", tint = TextPrimary)
+                        }
+                        IconButton(
+                            enabled = currentEntry != null,
+                            onClick = { showDeleteConfirm = true }
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = TextPrimary)
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xCC000000))
@@ -438,6 +482,38 @@ fun VideoPlayerScreen(
     val currentLocalFile: File? = (currentMedia as? ResolvedVideoMedia.LocalFile)?.file
     val currentName = currentEntry?.entryName ?: initialDisplayName
 
+    val coroutineScope = rememberCoroutineScope()
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var isDeleting by remember { mutableStateOf(false) }
+
+    if (showDeleteConfirm && currentEntry != null) {
+        AlertDialog(
+            onDismissRequest = { if (!isDeleting) showDeleteConfirm = false },
+            title = { Text("Delete") },
+            text = { Text("Delete \"$currentName\"?" + if (currentEntry is ViewerEntry.Local) " It will be moved to the recycle bin." else "") },
+            confirmButton = {
+                TextButton(
+                    enabled = !isDeleting,
+                    onClick = {
+                        isDeleting = true
+                        coroutineScope.launch {
+                            val result = when (currentEntry) {
+                                is ViewerEntry.Local -> cloudMediaViewerViewModel.deleteLocalFile(currentEntry.file.absolutePath)
+                                is ViewerEntry.Cloud -> cloudMediaViewerViewModel.deleteCloudFile(cloudAccountId ?: "", currentEntry.item.path)
+                            }
+                            isDeleting = false
+                            showDeleteConfirm = false
+                            if (result.isSuccess) onNavigateBack()
+                        }
+                    }
+                ) { Text(if (isDeleting) "Deleting…" else "Delete", color = Color(0xFFEF5350)) }
+            },
+            dismissButton = {
+                TextButton(enabled = !isDeleting, onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -493,6 +569,12 @@ fun VideoPlayerScreen(
                         }
                     ) {
                         Icon(Icons.Default.OpenWith, contentDescription = "Open with", tint = TextPrimary)
+                    }
+                    IconButton(
+                        enabled = currentEntry != null,
+                        onClick = { showDeleteConfirm = true }
+                    ) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = TextPrimary)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xCC000000))

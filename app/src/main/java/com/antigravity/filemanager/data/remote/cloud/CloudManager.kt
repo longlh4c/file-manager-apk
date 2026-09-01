@@ -173,7 +173,9 @@ class CloudManager @Inject constructor(
                         }
                         Result.success(virtualItems)
                     } else {
-                        val resolvedId = folderIdCache[remotePath] ?: remotePath.trimStart('/')
+                        val resolvedId = folderIdCache[remotePath]
+                            ?: googleDriveApi.resolveIdForDisplayPath(account, remotePath)
+                            ?: remotePath.trimStart('/')
                         val result = when (resolvedId) {
                             "__starred__" -> googleDriveApi.listStarred(account)
                             "__shared_with_me__" -> googleDriveApi.listSharedWithMe(account)
@@ -689,6 +691,7 @@ class CloudManager @Inject constructor(
                         ?: folderIdCache[remotePath.trimStart('/')]
                         ?: folderIdCache[fileName]
                         ?: folderIdCache["/$fileName"]
+                        ?: googleDriveApi.resolveIdForDisplayPath(account, remotePath)
                         ?: remotePath
                     googleDriveApi.downloadFile(account, fileId, localTargetDir, fileName, onProgress)
                 }
@@ -809,7 +812,14 @@ class CloudManager @Inject constructor(
             try {
                 when (account.provider) {
                     CloudProvider.GOOGLE_DRIVE -> {
-                        val parentId = folderIdCache[remoteTargetDir] ?: folderIdCache[remoteTargetDir.trimStart('/')] ?: if (remoteTargetDir == "/" || remoteTargetDir.isBlank()) "root" else remoteTargetDir
+                        val parentId = if (remoteTargetDir == "/" || remoteTargetDir.isBlank()) {
+                            "root"
+                        } else {
+                            folderIdCache[remoteTargetDir]
+                                ?: folderIdCache[remoteTargetDir.trimStart('/')]
+                                ?: googleDriveApi.resolveIdForDisplayPath(account, remoteTargetDir)
+                                ?: remoteTargetDir
+                        }
                         val driveRes = googleDriveApi.uploadFile(account, srcFile, parentId, onProgress)
                         if (driveRes.isSuccess) {
                             remoteFileId = driveRes.getOrNull() ?: ""
@@ -906,11 +916,16 @@ class CloudManager @Inject constructor(
                 when (account.provider) {
                     CloudProvider.GOOGLE_DRIVE -> {
                         // Same class of bug as MEGA below: parentPath is a display path, not a
-                        // real Drive folder ID — resolve it via the cache first.
+                        // real Drive folder ID — resolve it via the cache first, walking the tree
+                        // on a miss instead of falling back to the raw path string (Drive's API
+                        // 404s on that — "File not found: .").
                         val resolvedParentId = if (parentPath == "/" || parentPath.isBlank()) {
                             "root"
                         } else {
-                            folderIdCache[parentPath] ?: folderIdCache[parentPath.trimStart('/')] ?: parentPath
+                            folderIdCache[parentPath]
+                                ?: folderIdCache[parentPath.trimStart('/')]
+                                ?: googleDriveApi.resolveIdForDisplayPath(account, parentPath)
+                                ?: parentPath
                         }
                         googleDriveApi.createFolder(account, folderName, resolvedParentId).onSuccess { item ->
                             remoteId = item.id
@@ -1184,8 +1199,15 @@ class CloudManager @Inject constructor(
             // "moved" folder still sitting on the source account with no error shown anywhere.
             val remoteResult = try {
                 when (account.provider) {
-                    CloudProvider.GOOGLE_DRIVE ->
-                        if (moveToTrash) googleDriveApi.trashFile(account, targetId) else googleDriveApi.deleteFile(account, targetId)
+                    CloudProvider.GOOGLE_DRIVE -> {
+                        // Same targetId-fell-back-to-a-raw-path risk as MEGA above.
+                        val resolvedTargetId = if (targetId.startsWith("/")) {
+                            googleDriveApi.resolveIdForDisplayPath(account, targetId) ?: targetId
+                        } else {
+                            targetId
+                        }
+                        if (moveToTrash) googleDriveApi.trashFile(account, resolvedTargetId) else googleDriveApi.deleteFile(account, resolvedTargetId)
+                    }
                     CloudProvider.DROPBOX -> {
                         val dropboxPath = if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId"
                         dropboxApi.delete(account, dropboxPath).also { dropboxApi.patchTreeAfterDelete(account.id, dropboxPath) }
@@ -1229,7 +1251,14 @@ class CloudManager @Inject constructor(
     suspend fun restoreItem(account: CloudAccount, remotePathOrId: String): Result<Unit> = withContext(Dispatchers.IO) {
         val targetId = folderIdCache[remotePathOrId] ?: folderIdCache[remotePathOrId.trimStart('/')] ?: remotePathOrId
         when (account.provider) {
-            CloudProvider.GOOGLE_DRIVE -> googleDriveApi.restoreFromTrash(account, targetId)
+            CloudProvider.GOOGLE_DRIVE -> {
+                val resolvedTargetId = if (targetId.startsWith("/")) {
+                    googleDriveApi.resolveIdForDisplayPath(account, targetId) ?: targetId
+                } else {
+                    targetId
+                }
+                googleDriveApi.restoreFromTrash(account, resolvedTargetId)
+            }
             CloudProvider.MEGA -> megaApi.restoreFromRubbishBin(account, targetId).also { megaApi.invalidateNodeTreeCache(account.id) }
             CloudProvider.DROPBOX -> Result.failure(Exception("Restore not supported for Dropbox"))
         }
@@ -1239,7 +1268,10 @@ class CloudManager @Inject constructor(
         when (account.provider) {
             CloudProvider.DROPBOX -> dropboxApi.renameFile(account, remotePath, newName).also { dropboxApi.invalidateTree(account.id) }
             CloudProvider.GOOGLE_DRIVE -> {
-                val targetId = folderIdCache[remotePath] ?: folderIdCache[remotePath.trimStart('/')] ?: remotePath
+                val targetId = folderIdCache[remotePath]
+                    ?: folderIdCache[remotePath.trimStart('/')]
+                    ?: googleDriveApi.resolveIdForDisplayPath(account, remotePath)
+                    ?: remotePath
                 googleDriveApi.renameFile(account, targetId, newName).map { FileItem(id = targetId, name = newName, path = remotePath) }
             }
             CloudProvider.MEGA -> {
@@ -1248,6 +1280,56 @@ class CloudManager @Inject constructor(
                     .also { megaApi.invalidateNodeTreeCache(account.id) }
                     .map { FileItem(id = targetId, name = newName, path = remotePath) }
             }
+        }
+    }
+
+    /** Relocates an item to a different folder within the SAME cloud account, entirely
+     * server-side — no download+reupload round trip. The generic cloud-to-cloud paste flow
+     * (paste() in CloudExplorerViewModel) only needs that round trip because there's no API that
+     * spans two different providers/accounts; within one account, every provider has a real
+     * move primitive, so a same-account "Move" should use this instead of pretending it's a
+     * cross-provider transfer. Copy is not handled here — Dropbox/Drive do have a native
+     * server-side copy, but MEGA doesn't (no simple "duplicate this subtree" command), so a
+     * same-account Copy still goes through the round trip for now. */
+    suspend fun moveItemWithinAccount(account: CloudAccount, sourcePath: String, targetDir: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            when (account.provider) {
+                CloudProvider.DROPBOX -> {
+                    dropboxApi.moveItem(account, sourcePath, targetDir).map { }
+                        .also { if (it.isSuccess) dropboxApi.invalidateTree(account.id) }
+                }
+                CloudProvider.MEGA -> {
+                    val nodeHandle = folderIdCache[sourcePath]
+                        ?: megaApi.resolveHandleForDisplayPath(account, sourcePath)
+                        ?: return@withContext Result.failure(Exception("Could not resolve MEGA handle for '$sourcePath'"))
+                    val newParentHandle = if (targetDir == "/" || targetDir.isBlank()) {
+                        megaApi.resolveRootHandle(account)
+                    } else {
+                        folderIdCache[targetDir] ?: megaApi.resolveHandleForDisplayPath(account, targetDir)
+                    } ?: return@withContext Result.failure(Exception("Could not resolve MEGA target folder"))
+                    megaApi.moveNode(account, nodeHandle, newParentHandle)
+                }
+                CloudProvider.GOOGLE_DRIVE -> {
+                    val fileId = folderIdCache[sourcePath]
+                        ?: googleDriveApi.resolveIdForDisplayPath(account, sourcePath)
+                        ?: return@withContext Result.failure(Exception("Could not resolve Drive file id for '$sourcePath'"))
+                    val oldParentPath = sourcePath.substringBeforeLast('/', "")
+                    val oldParentId = if (oldParentPath.isEmpty() || oldParentPath == "/My Drive") {
+                        "root"
+                    } else {
+                        folderIdCache[oldParentPath] ?: googleDriveApi.resolveIdForDisplayPath(account, oldParentPath) ?: "root"
+                    }
+                    val newParentId = if (targetDir == "/" || targetDir.isBlank() || targetDir == "/My Drive") {
+                        "root"
+                    } else {
+                        folderIdCache[targetDir] ?: googleDriveApi.resolveIdForDisplayPath(account, targetDir) ?: targetDir
+                    }
+                    googleDriveApi.moveFile(account, fileId, oldParentId, newParentId)
+                }
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Result.failure(e)
         }
     }
 }

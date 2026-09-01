@@ -94,6 +94,9 @@ interface ICloudRepository {
     suspend fun deleteCloudFile(accountId: String, remotePath: String, moveToTrash: Boolean = true): Result<Unit>
     suspend fun restoreCloudFile(accountId: String, remotePath: String): Result<Unit>
     suspend fun renameCloudFile(accountId: String, remotePath: String, newName: String): Result<FileItem>
+    /** Relocates an item to a different folder within the SAME cloud account, entirely
+     * server-side (no download+reupload round trip). See CloudManager.moveItemWithinAccount. */
+    suspend fun moveCloudFileWithinAccount(accountId: String, sourcePath: String, targetDir: String): Result<Unit>
     suspend fun getCloudQuota(accountId: String): Result<Pair<Long, Long>>
     suspend fun downloadCloudThumbnail(accountId: String, nodeId: String): Result<ByteArray>
     suspend fun downloadCloudFilePartial(accountId: String, nodeId: String, localTargetFile: java.io.File, maxBytes: Long): Result<java.io.File>

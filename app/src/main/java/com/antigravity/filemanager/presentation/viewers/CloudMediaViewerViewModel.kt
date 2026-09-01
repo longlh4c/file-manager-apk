@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.usecase.CloudStorageUseCase
+import com.antigravity.filemanager.domain.usecase.FileOperationsUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -28,8 +29,16 @@ sealed class ResolvedMedia {
 @HiltViewModel
 class CloudMediaViewerViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val cloudUseCase: CloudStorageUseCase
+    private val cloudUseCase: CloudStorageUseCase,
+    private val fileOperationsUseCase: FileOperationsUseCase
 ) : ViewModel() {
+
+    /** Deletes a local file straight to the recycle bin — used by the image/video viewer's
+     * Delete action, whether the file was already local or just got downloaded here for viewing. */
+    suspend fun deleteLocalFile(path: String): Result<Int> = fileOperationsUseCase.delete(listOf(path), moveToRecycleBin = true)
+
+    /** Deletes a cloud item straight from the viewer, same delete path as the folder browser uses. */
+    suspend fun deleteCloudFile(accountId: String, remotePath: String): Result<Unit> = cloudUseCase.deleteItem(accountId, remotePath)
 
     suspend fun resolveMedia(accountId: String, file: FileItem, allowStreaming: Boolean = true): Result<ResolvedMedia> = withContext(Dispatchers.IO) {
         val targetDir = File(context.cacheDir, "cloud_downloads/$accountId").apply { mkdirs() }

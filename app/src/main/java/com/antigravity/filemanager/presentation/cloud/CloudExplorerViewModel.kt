@@ -52,7 +52,13 @@ data class CloudExplorerUiState(
     val clipboardItemSizes: Map<String, Long> = emptyMap(),
     val clipboardItemIsDirectory: Map<String, Boolean> = emptyMap(),
     val overwriteConflicts: List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList(),
-    val downloadProgress: CloudTransferProgress? = null
+    val downloadProgress: CloudTransferProgress? = null,
+    // Set the moment the user taps Cancel, cleared the moment a new transfer actually starts.
+    // Needed because TransferGuard.progress is mirrored into downloadProgress (so it survives
+    // this ViewModel being recreated) — cancelling doesn't stop in-flight parallel workers
+    // instantly, so one of them can still emit a late progress update and resurrect the dialog
+    // right after it was dismissed. While this is true, that mirror is ignored.
+    val transferCancelledByUser: Boolean = false
 ) {
     /** True when browsing inside a provider's real trash/rubbish bin (Google Drive's "/Trash" or
      * MEGA's "/Rubbish Bin" virtual root entries, or any folder nested under them) — the
@@ -153,6 +159,11 @@ class CloudExplorerViewModel @Inject constructor(
         // in-app bar came back blank, since it only ever knew about its own local, now-reset state.
         viewModelScope.launch {
             transferGuard.progress.collect { info ->
+                if (info != null && _uiState.value.transferCancelledByUser) {
+                    // A late update from a not-yet-cancelled parallel worker — this operation was
+                    // already dismissed by the user, don't resurrect the dialog for it.
+                    return@collect
+                }
                 _uiState.value = _uiState.value.copy(
                     downloadProgress = info?.let {
                         CloudTransferProgress(
@@ -164,7 +175,10 @@ class CloudExplorerViewModel @Inject constructor(
                             isIndeterminate = it.totalBytes <= 0,
                             isUpload = it.isUpload
                         )
-                    }
+                    },
+                    // A fresh info==null means the whole operation truly ended (TransferGuard.end()
+                    // reached zero) — safe to arm the mirror again for the next transfer.
+                    transferCancelledByUser = if (info == null) false else _uiState.value.transferCancelledByUser
                 )
             }
         }
@@ -706,7 +720,8 @@ class CloudExplorerViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(
             downloadProgress = null,
             isLoading = false,
-            toastMessage = "Cancelled"
+            toastMessage = "Cancelled",
+            transferCancelledByUser = true
         )
     }
 
@@ -929,6 +944,24 @@ class CloudExplorerViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(selectedPaths = emptySet(), isSelectionMode = false)
     }
 
+    fun selectAll() {
+        val allIds = _uiState.value.files.map { it.id }.toSet()
+        _uiState.value = _uiState.value.copy(
+            selectedPaths = allIds,
+            isSelectionMode = true
+        )
+    }
+
+    fun invertSelection() {
+        val all = _uiState.value.files.map { it.id }.toSet()
+        val current = _uiState.value.selectedPaths
+        val inverted = all - current
+        _uiState.value = _uiState.value.copy(
+            selectedPaths = inverted,
+            isSelectionMode = inverted.isNotEmpty()
+        )
+    }
+
     fun showProperties(item: FileItem?) {
         _uiState.value = _uiState.value.copy(showPropertiesDialog = item != null, itemForProperties = item)
     }
@@ -944,8 +977,12 @@ class CloudExplorerViewModel @Inject constructor(
 
     fun deleteSelected(moveToTrash: Boolean = true) {
         viewModelScope.launch {
-            val pathsToDelete = _uiState.value.selectedPaths.toSet()
-            val remainingFiles = _uiState.value.files.filterNot { it.path in pathsToDelete || it.id in pathsToDelete }
+            val selectedIds = _uiState.value.selectedPaths
+            // selectedPaths actually holds item IDs now (see toggleSelection) — resolve back to
+            // the real FileItems so the API calls below always get a genuine remote path, not an
+            // opaque ID string that a path-addressed provider (Dropbox) can't do anything with.
+            val toDelete = _uiState.value.files.filter { it.path in selectedIds || it.id in selectedIds }
+            val remainingFiles = _uiState.value.files.filterNot { it.path in selectedIds || it.id in selectedIds }
             _uiState.value = _uiState.value.copy(
                 isLoading = true,
                 showDeleteDialog = false,
@@ -953,9 +990,9 @@ class CloudExplorerViewModel @Inject constructor(
                 selectedPaths = emptySet(),
                 isSelectionMode = false
             )
-            pathsToDelete.forEach { path ->
-                val result = cloudUseCase.deleteItem(accountId, path, moveToTrash)
-                android.util.Log.d("CloudExplorerViewModel", "deleteSelected: path='$path' isSuccess=${result.isSuccess} error=${result.exceptionOrNull()}")
+            toDelete.forEach { item ->
+                val result = cloudUseCase.deleteItem(accountId, item.path, moveToTrash)
+                android.util.Log.d("CloudExplorerViewModel", "deleteSelected: path='${item.path}' isSuccess=${result.isSuccess} error=${result.exceptionOrNull()}")
             }
             refresh()
         }
@@ -968,16 +1005,17 @@ class CloudExplorerViewModel @Inject constructor(
     /** Restores the current selection out of the trash/rubbish bin view back to the account root. */
     fun restoreSelected() {
         viewModelScope.launch {
-            val pathsToRestore = _uiState.value.selectedPaths.toSet()
-            val remainingFiles = _uiState.value.files.filterNot { it.path in pathsToRestore || it.id in pathsToRestore }
+            val selectedIds = _uiState.value.selectedPaths
+            val toRestore = _uiState.value.files.filter { it.path in selectedIds || it.id in selectedIds }
+            val remainingFiles = _uiState.value.files.filterNot { it.path in selectedIds || it.id in selectedIds }
             _uiState.value = _uiState.value.copy(
                 isLoading = true,
                 files = remainingFiles,
                 selectedPaths = emptySet(),
                 isSelectionMode = false
             )
-            pathsToRestore.forEach { path ->
-                cloudUseCase.restoreItem(accountId, path)
+            toRestore.forEach { item ->
+                cloudUseCase.restoreItem(accountId, item.path)
             }
             refresh()
         }
@@ -1043,6 +1081,41 @@ class CloudExplorerViewModel @Inject constructor(
                     if (isMove && result.isSuccess) {
                         fileOperationsUseCase.delete(sources, moveToRecycleBin = false)
                     }
+                } else if (isMove && sourceCloudAccountId == accountId) {
+                    // Same-account Move: every provider has a real server-side move (change
+                    // parent/path), so route through that instead of the generic cross-provider
+                    // round trip below — no data ever needs to leave the provider's own servers.
+                    // Items with an Overwrite decision still need the existing target cleared
+                    // first (a plain server-side move doesn't merge/replace on its own); anything
+                    // with no conflict just moves directly.
+                    var moved = 0
+                    for (sourcePath in sources) {
+                        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                        val name = File(sourcePath).name
+                        if (name in skipNames) continue
+                        if (name in overwriteNames) {
+                            val existingPath = if (targetPath == "/" || targetPath.isBlank()) "/$name" else "${targetPath.trimEnd('/')}/$name"
+                            cloudUseCase.deleteItem(accountId, existingPath)
+                        }
+                        _uiState.value = _uiState.value.copy(
+                            downloadProgress = CloudTransferProgress(
+                                currentFileName = name,
+                                currentIndex = moved + 1,
+                                totalFiles = sources.size,
+                                isIndeterminate = true,
+                                isUpload = true,
+                                operationLabel = "Moving"
+                            )
+                        )
+                        val moveResult = cloudUseCase.moveWithinAccount(accountId, sourcePath, targetPath)
+                        if (moveResult.isFailure) {
+                            failures++
+                            lastErrorMessage = moveResult.exceptionOrNull()?.message
+                        }
+                        moved++
+                    }
+                    transferredCount = moved
+                    _uiState.value = _uiState.value.copy(downloadProgress = null)
                 } else {
                     // Cloud file(s)/folder(s) (possibly a different account/provider) -> this
                     // cloud folder, via a local temp round-trip since there is no cross-provider
@@ -1217,8 +1290,36 @@ class CloudExplorerViewModel @Inject constructor(
                         // Delete each top-level source (file or folder) as one unit once its whole
                         // subtree copied cleanly — deleting the folder node removes everything
                         // under it remotely, so there's no need to delete descendants one by one.
-                        sources.filter { topLevelSucceeded[it] == true && File(it).name !in skipNames }
-                            .forEach { cloudUseCase.deleteItem(sourceCloudAccountId, it) }
+                        // Was a plain sequential forEach — each delete is its own network round
+                        // trip (~1-1.5s), so a multi-file selection (e.g. 26 individual files cut
+                        // at once, not a single folder) paid that one at a time with the progress
+                        // bar showing nothing for this phase, which looked exactly like a hang on
+                        // a large selection. Run it the same bounded-parallel way as the uploads
+                        // above, and keep the progress bar reporting during it.
+                        val toDelete = sources.filter { topLevelSucceeded[it] == true && File(it).name !in skipNames }
+                        val deleteCompleted = java.util.concurrent.atomic.AtomicInteger(0)
+                        val deleteSemaphore = kotlinx.coroutines.sync.Semaphore(8)
+                        kotlinx.coroutines.coroutineScope {
+                            toDelete.forEach { sourcePath ->
+                                launch {
+                                    deleteSemaphore.withPermit {
+                                        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                                        _uiState.value = _uiState.value.copy(
+                                            downloadProgress = CloudTransferProgress(
+                                                currentFileName = File(sourcePath).name,
+                                                currentIndex = deleteCompleted.get() + 1,
+                                                totalFiles = toDelete.size,
+                                                isIndeterminate = true,
+                                                isUpload = false,
+                                                operationLabel = "Removing source"
+                                            )
+                                        )
+                                        cloudUseCase.deleteItem(sourceCloudAccountId, sourcePath)
+                                        deleteCompleted.incrementAndGet()
+                                    }
+                                }
+                            }
+                        }
                     }
                     _uiState.value = _uiState.value.copy(downloadProgress = null)
                     tempDir.deleteRecursively()
@@ -1282,8 +1383,13 @@ class CloudExplorerViewModel @Inject constructor(
     }
 
     fun copySelected() {
-        val selected = _uiState.value.selectedPaths.toList()
+        // selectedPaths holds item IDs (see toggleSelection) — resolve back to the real FileItems
+        // so the clipboard always carries genuine remote paths. Passing raw IDs through here used
+        // to feed them straight into the whole path-addressed paste/flatten pipeline as if they
+        // were paths, which breaks for every provider, not just the MEGA duplicate-name case this
+        // was fixed for.
         val matching = _uiState.value.files.filter { it.path in _uiState.value.selectedPaths || it.id in _uiState.value.selectedPaths }
+        val selected = matching.map { it.path }
         val sizes = matching.associate { it.path to it.size }
         val ids = matching.associate { it.path to it.id }
         val isDirectory = matching.associate { it.path to it.isDirectory }
@@ -1292,8 +1398,8 @@ class CloudExplorerViewModel @Inject constructor(
     }
 
     fun cutSelected() {
-        val selected = _uiState.value.selectedPaths.toList()
         val matching = _uiState.value.files.filter { it.path in _uiState.value.selectedPaths || it.id in _uiState.value.selectedPaths }
+        val selected = matching.map { it.path }
         val sizes = matching.associate { it.path to it.size }
         val ids = matching.associate { it.path to it.id }
         val isDirectory = matching.associate { it.path to it.isDirectory }

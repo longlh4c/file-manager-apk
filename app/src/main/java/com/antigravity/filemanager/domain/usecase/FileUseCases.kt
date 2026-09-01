@@ -162,6 +162,12 @@ class CloudStorageUseCase @Inject constructor(
     suspend fun renameItem(accountId: String, remotePath: String, newName: String): Result<FileItem> =
         cloudRepository.renameCloudFile(accountId, remotePath, newName)
 
+    /** Relocates an item to a different folder within the SAME cloud account, entirely
+     * server-side — the fast path for a "Move" whose source and destination are the same
+     * account, instead of the generic cross-provider paste flow's download+reupload round trip. */
+    suspend fun moveWithinAccount(accountId: String, sourcePath: String, targetDir: String): Result<Unit> =
+        cloudRepository.moveCloudFileWithinAccount(accountId, sourcePath, targetDir)
+
     // Finds conflicting names in remoteDir on the given cloud account before upload.
     suspend fun findConflicts(accountId: String, remoteDir: String, items: List<Pair<String, Long>>): List<com.antigravity.filemanager.domain.model.OverwriteConflict> {
         val existing = cloudRepository.getCloudFiles(accountId, remoteDir).getOrDefault(emptyList())

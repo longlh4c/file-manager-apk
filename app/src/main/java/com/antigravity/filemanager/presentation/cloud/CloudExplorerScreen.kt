@@ -139,7 +139,32 @@ fun CloudExplorerScreen(
 
     Scaffold(
         topBar = {
-            if (uiState.isSearchActive) {
+            if (uiState.isSelectionMode) {
+                TopAppBar(
+                    title = {
+                        Text(
+                            text = "${uiState.selectedPaths.size}/${filteredFiles.size}",
+                            color = TextPrimary,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = { viewModel.clearSelection() }) {
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = TextPrimary)
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = { viewModel.selectAll() }) {
+                            Icon(Icons.Default.GridView, contentDescription = "Select All", tint = TextPrimary)
+                        }
+                        IconButton(onClick = { viewModel.invertSelection() }) {
+                            Icon(Icons.Default.SwapHoriz, contentDescription = "Invert Selection", tint = TextPrimary)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkCard)
+                )
+            } else if (uiState.isSearchActive) {
                 TopAppBar(
                     title = {
                         TextField(
@@ -318,8 +343,8 @@ fun CloudExplorerScreen(
                                     label = "Rename",
                                     tint = TextPrimary,
                                     onClick = {
-                                        val firstPath = uiState.selectedPaths.firstOrNull()
-                                        val item = uiState.files.find { it.path == firstPath }
+                                        val firstId = uiState.selectedPaths.firstOrNull()
+                                        val item = uiState.files.find { it.id == firstId || it.path == firstId }
                                         viewModel.setShowRenameDialog(item)
                                     },
                                     modifier = Modifier.weight(1f)
@@ -338,8 +363,8 @@ fun CloudExplorerScreen(
                                     label = "Properties",
                                     tint = TextPrimary,
                                     onClick = {
-                                        val firstPath = uiState.selectedPaths.firstOrNull()
-                                        val item = uiState.files.find { it.path == firstPath }
+                                        val firstId = uiState.selectedPaths.firstOrNull()
+                                        val item = uiState.files.find { it.id == firstId || it.path == firstId }
                                         viewModel.showProperties(item)
                                     },
                                     modifier = Modifier.weight(1f)
@@ -545,11 +570,16 @@ fun CloudExplorerScreen(
                         items(filteredFiles, key = { it.id }) { file ->
                             FileListItem(
                                 file = file,
-                                isSelected = uiState.selectedPaths.contains(file.path),
+                                // Keyed by id, not path: MEGA (and its Rubbish Bin in particular)
+                                // allows multiple siblings with the identical name, and this
+                                // app's display "path" for a cloud item is built from its name —
+                                // two same-named siblings compute the exact same path string, so
+                                // selecting one by path used to select both.
+                                isSelected = uiState.selectedPaths.contains(file.id),
                                 isSelectionMode = uiState.isSelectionMode,
                                 onClick = {
                                     if (uiState.isSelectionMode) {
-                                        viewModel.toggleSelection(file.path)
+                                        viewModel.toggleSelection(file.id)
                                     } else {
                                         if (file.isDirectory) {
                                             viewModel.openFolder(file)
@@ -564,7 +594,7 @@ fun CloudExplorerScreen(
                                     }
                                 },
                                 onLongClick = {
-                                    viewModel.toggleSelection(file.path)
+                                    viewModel.toggleSelection(file.id)
                                 },
                                 onVisible = { viewModel.requestThumbnail(it) }
                             )
