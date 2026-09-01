@@ -513,7 +513,10 @@ fun FileBrowserScreen(
                         }
                     }
                 }
-            } else if (uiState.clipboardPaths.isNotEmpty()) {
+            } else if (uiState.clipboardPaths.isNotEmpty() && uiState.downloadProgress == null) {
+                // See the matching comment in CloudExplorerScreen — clipboard only clears at the
+                // very end of paste(), so this stayed visible alongside the progress bar for the
+                // whole transfer without this check.
                 PasteBottomBar(
                     itemCount = uiState.clipboardPaths.size,
                     onPaste = { viewModel.paste() },

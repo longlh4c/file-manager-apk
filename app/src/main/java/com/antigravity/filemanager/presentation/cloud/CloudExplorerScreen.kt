@@ -355,7 +355,11 @@ fun CloudExplorerScreen(
                         }
                     }
                 }
-            } else if (uiState.clipboardPaths.isNotEmpty()) {
+            } else if (uiState.clipboardPaths.isNotEmpty() && uiState.downloadProgress == null) {
+                // Hidden while a transfer is actually running (downloadProgress != null) — the
+                // clipboard itself only clears at the very end of paste(), so without this check
+                // "Paste Here" sat there the whole time a copy/move was in flight, alongside the
+                // progress bar for that same operation, as if nothing had been tapped yet.
                 PasteBottomBar(
                     itemCount = uiState.clipboardPaths.size,
                     onPaste = { viewModel.paste() },

@@ -78,6 +78,58 @@ class MegaApiClient @Inject constructor(
         nodeTreeCache.remove(accountId)
     }
 
+    /** Adds a freshly created folder node into the cached tree in place, instead of the full
+     * [invalidateNodeCache] wipe createFolder used to always do. A recursive cloud-to-cloud
+     * folder copy/move calls createFolder once per subfolder — on an account with tens of
+     * thousands of nodes, invalidating on every single one meant every subfolder paid for a full
+     * re-fetch + re-decrypt of the WHOLE account tree (each took several seconds here), which is
+     * exactly what made "move a folder with nested subfolders" feel like it hung. No-ops if
+     * nothing is cached yet; the next listFiles() fetches fresh anyway. */
+    private fun patchNodeCacheAfterFolderCreate(accountId: String, handle: String, parentHandle: String, name: String) {
+        val cached = nodeTreeCache[accountId] ?: return
+        val newNode = MegaNode(
+            handle = handle,
+            parentHandle = parentHandle,
+            type = 1,
+            size = 0L,
+            timestamp = System.currentTimeMillis() / 1000,
+            name = name
+        )
+        val updated = cached.allNodes.filterNot { it.handle == handle } + newNode
+        nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, System.currentTimeMillis())
+    }
+
+    /** Same idea for a freshly uploaded file — this one matters even more than the folder-create
+     * patch above, since a folder copy/move usually contains far more files than subfolders, and
+     * this used to be an invalidateNodeCache() on every single file: uploading N files into a
+     * large MEGA account paid for N full account-tree re-fetches, which is what made "move a
+     * folder" feel like it hung on an account with tens of thousands of nodes. keyStr is kept
+     * functional (not left blank) — it's the encoded per-file key needed to decrypt this node's
+     * name/thumbnail/content on any read before a real re-fetch eventually happens. */
+    private fun patchNodeCacheAfterFileUpload(
+        accountId: String,
+        handle: String,
+        parentHandle: String,
+        name: String,
+        size: Long,
+        encodedKey: String,
+        fileAttrStr: String
+    ) {
+        val cached = nodeTreeCache[accountId] ?: return
+        val newNode = MegaNode(
+            handle = handle,
+            parentHandle = parentHandle,
+            type = 0,
+            size = size,
+            timestamp = System.currentTimeMillis() / 1000,
+            name = name,
+            keyStr = encodedKey,
+            fileAttrStr = fileAttrStr
+        )
+        val updated = cached.allNodes.filterNot { it.handle == handle } + newNode
+        nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, System.currentTimeMillis())
+    }
+
     fun resolveSid(account: CloudAccount): String {
         val session = account.sessionHandle ?: account.accessToken ?: ""
         if (session.isNotBlank() && session != "session_active" && !session.startsWith("{")) {
@@ -459,10 +511,38 @@ class MegaApiClient @Inject constructor(
         }
     }
 
+    // Downloading several files in parallel (the paste-flow's Semaphore(8)) occasionally hits
+    // "Unexpected status line: <garbage bytes>" — OkHttp misreading leftover body bytes from a
+    // reused connection as the start of a new HTTP response. It's transient (a fresh attempt
+    // reliably succeeds), so retry a couple of times instead of failing the file outright, same
+    // idea as the Dropbox rate-limit retry in DropboxApiClient.uploadFile.
     suspend fun downloadFile(
-        account: CloudAccount, 
-        nodeHandle: String, 
-        localTargetDir: String, 
+        account: CloudAccount,
+        nodeHandle: String,
+        localTargetDir: String,
+        fileName: String,
+        explicitNodeKey: String = "",
+        onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<File> {
+        var lastFailure: Result<File>? = null
+        repeat(3) { attempt ->
+            val result = downloadFileAttempt(account, nodeHandle, localTargetDir, fileName, explicitNodeKey, onProgress)
+            if (result.isSuccess) return result
+            val e = result.exceptionOrNull()
+            if (e is java.io.IOException) {
+                android.util.Log.d("MegaApiClient", "downloadFile: transient failure for '$fileName' (attempt ${attempt + 1}/3), retrying: ${e.message}")
+                lastFailure = result
+            } else {
+                return result
+            }
+        }
+        return lastFailure ?: Result.failure(Exception("downloadFile: exhausted retries for '$fileName'"))
+    }
+
+    private suspend fun downloadFileAttempt(
+        account: CloudAccount,
+        nodeHandle: String,
+        localTargetDir: String,
         fileName: String,
         explicitNodeKey: String = "",
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
@@ -488,12 +568,14 @@ class MegaApiClient @Inject constructor(
             val reportedSize = obj.optLong("s", 0L)
 
             if (downloadUrl.isBlank()) {
+                android.util.Log.e("MegaApiClient", "downloadFile: no download URL in response for node=$nodeHandle file='$fileName': $bodyStr")
                 return@withContext Result.failure(Exception("Download URL not found in Mega response: $bodyStr"))
             }
 
             val dlRequest = Request.Builder().url(downloadUrl).get().build()
             val dlResponse = okHttpClient.newCall(dlRequest).execute()
             if (!dlResponse.isSuccessful) {
+                android.util.Log.e("MegaApiClient", "downloadFile: HTTP ${dlResponse.code} streaming node=$nodeHandle file='$fileName'")
                 return@withContext Result.failure(Exception("Failed to stream Mega file: ${dlResponse.code}"))
             }
 
@@ -631,9 +713,11 @@ class MegaApiClient @Inject constructor(
             }
 
             dlResponse.close()
+            android.util.Log.e("MegaApiClient", "downloadFile: could not resolve a decryption key for node $nodeHandle (file='$fileName')")
             Result.failure(Exception("Could not resolve a decryption key for node $nodeHandle"))
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
+            android.util.Log.e("MegaApiClient", "downloadFile: FAILED for node=$nodeHandle file='$fileName'", e)
             Result.failure(e)
         }
     }
@@ -832,7 +916,9 @@ class MegaApiClient @Inject constructor(
                 val respArr = JSONArray(respBody)
                 val fArr = respArr.optJSONObject(0)?.optJSONArray("f")
                 val handle = fArr?.optJSONObject(0)?.optString("h") ?: ""
-                invalidateNodeCache(account.id)
+                if (handle.isNotBlank()) {
+                    patchNodeCacheAfterFolderCreate(account.id, handle, resolvedParentHandle, name)
+                }
                 handle
             }
             if (realHandle.isBlank()) {
@@ -903,6 +989,13 @@ class MegaApiClient @Inject constructor(
 
     suspend fun deleteNode(account: CloudAccount, nodeHandle: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
+            // A "/"-prefixed value here means the caller never resolved a real MEGA handle and
+            // fell back to the raw display path — sending that as "n" doesn't error out on MEGA's
+            // side, it silently no-ops, which is exactly what made "delete"/"move" look like they
+            // succeeded while the node was untouched. Fail loudly instead.
+            if (nodeHandle.startsWith("/")) {
+                return@withContext Result.failure(Exception("Could not resolve a MEGA handle for '$nodeHandle'"))
+            }
             val session = account.sessionHandle ?: account.accessToken ?: ""
             val sidParam = if (session.isNotBlank()) "?sid=$session" else ""
             val url = "$megaApiUrl$sidParam"
@@ -914,7 +1007,11 @@ class MegaApiClient @Inject constructor(
                 })
             }.toString()
 
-            sendMegaPost(url, commandJson)
+            val response = sendMegaPost(url, commandJson)
+            val bodyStr = (response.getOrNull() ?: "[]").trim()
+            if (bodyStr.startsWith("-")) {
+                return@withContext Result.failure(Exception("MEGA delete failed: $bodyStr"))
+            }
             invalidateNodeCache(account.id)
             Result.success(Unit)
         } catch (e: Exception) {
@@ -929,6 +1026,9 @@ class MegaApiClient @Inject constructor(
      */
     private suspend fun moveNode(account: CloudAccount, nodeHandle: String, newParentHandle: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
+            if (nodeHandle.startsWith("/")) {
+                return@withContext Result.failure(Exception("Could not resolve a MEGA handle for '$nodeHandle'"))
+            }
             val session = account.sessionHandle ?: account.accessToken ?: ""
             val sidParam = if (session.isNotBlank()) "?sid=$session" else ""
             val url = "$megaApiUrl$sidParam"
@@ -1339,7 +1439,15 @@ class MegaApiClient @Inject constructor(
                 if (body.startsWith("-") || body.contains("[-")) {
                     return@withContext Result.failure(Exception("MEGA node creation failed: $body"))
                 }
-                invalidateNodeCache(account.id)
+                patchNodeCacheAfterFileUpload(
+                    accountId = account.id,
+                    handle = fileHandleB64,
+                    parentHandle = resolvedParentHandle,
+                    name = localFile.name,
+                    size = totalBytes,
+                    encodedKey = encodedKey,
+                    fileAttrStr = faField ?: ""
+                )
                 body
             }
             onProgress?.invoke(totalBytes, totalBytes)

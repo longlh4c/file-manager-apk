@@ -145,6 +145,28 @@ class FileBrowserViewModel @Inject constructor(
                 )
             }
         }
+        // See the matching comment in CloudExplorerViewModel: TransferGuard.progress survives
+        // this ViewModel getting recreated (e.g. backgrounding the app mid-transfer and the OS
+        // reclaiming the Activity), unlike the local downloadProgress set by this screen's own
+        // throttled callbacks — so the notification kept showing progress while the in-app bar
+        // came back blank after reopening. Keep this in-app bar mirrored to that shared source too.
+        viewModelScope.launch {
+            transferGuard.progress.collect { info ->
+                _uiState.value = _uiState.value.copy(
+                    downloadProgress = info?.let {
+                        CloudTransferProgress(
+                            currentFileName = it.currentFileName,
+                            currentIndex = it.currentIndex,
+                            totalFiles = it.totalFiles,
+                            bytesTransferred = it.bytesTransferred,
+                            totalBytes = it.totalBytes,
+                            isIndeterminate = it.totalBytes <= 0,
+                            isUpload = it.isUpload
+                        )
+                    }
+                )
+            }
+        }
     }
 
     private fun loadCloudAccounts() {

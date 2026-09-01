@@ -76,11 +76,19 @@ class TransferGuard @Inject constructor(
         val remaining = activeCount.decrementAndGet()
         if (remaining <= 0) {
             activeCount.set(0)
+            // Clear progress the moment the last transfer actually ends — not after the
+            // service-stop grace delay below. That delay exists purely to avoid tearing down and
+            // restarting the foreground service on back-to-back transfers; it has nothing to do
+            // with whether stale progress should still be displayed. Leaving this on the delayed
+            // path meant cancelling a transfer (which calls end() for whatever was in flight) left
+            // the last-known progress sitting in this StateFlow for up to stopGraceMs — long enough
+            // for a screen that mirrors this flow into its own UI (see CloudExplorerViewModel/
+            // FileBrowserViewModel) to redraw the "cancelled" progress bar right back onto screen.
+            _progress.value = null
             pendingStop?.cancel()
             pendingStop = scope.launch {
                 delay(stopGraceMs)
                 if (activeCount.get() <= 0) {
-                    _progress.value = null
                     val intent = Intent(context, TransferService::class.java).apply {
                         action = TransferService.ACTION_STOP
                     }
