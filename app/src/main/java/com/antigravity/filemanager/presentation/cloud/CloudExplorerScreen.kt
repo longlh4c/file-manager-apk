@@ -587,20 +587,24 @@ fun CloudExplorerScreen(
                             )
                             Spacer(modifier = Modifier.height(16.dp))
                             Text(
-                                text = "This cloud folder is empty",
+                                text = if (uiState.isInsideTrashView) "Trash is empty" else "This cloud folder is empty",
                                 color = TextSecondary,
                                 fontSize = 16.sp,
                                 textAlign = TextAlign.Center
                             )
-                            Spacer(modifier = Modifier.height(20.dp))
-                            Button(
-                                onClick = { showCreateFolderDialog = true },
-                                colors = ButtonDefaults.buttonColors(containerColor = TealPrimary, contentColor = Color.Black),
-                                shape = RoundedCornerShape(8.dp)
-                            ) {
-                                Icon(Icons.Default.CreateNewFolder, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("+ CREATE NEW FOLDER", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            // Creating a folder inside Trash/Rubbish Bin makes no sense — it's not
+                            // a real destination, just a flat view of deleted items.
+                            if (!uiState.isInsideTrashView) {
+                                Spacer(modifier = Modifier.height(20.dp))
+                                Button(
+                                    onClick = { showCreateFolderDialog = true },
+                                    colors = ButtonDefaults.buttonColors(containerColor = TealPrimary, contentColor = Color.Black),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(Icons.Default.CreateNewFolder, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("+ CREATE NEW FOLDER", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
                             }
                         }
                     }

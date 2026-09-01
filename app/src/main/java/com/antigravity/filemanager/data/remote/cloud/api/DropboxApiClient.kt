@@ -465,25 +465,23 @@ class DropboxApiClient @Inject constructor() {
             }
             collect(result.entries)
             android.util.Log.d("DropboxApiClient", "listTrash: page 0 -> ${result.entries.size} entries, hasMore=${result.hasMore}")
-            // recursive+includeDeleted pagination for a `hasMore` that never actually clears was
-            // seen hanging indefinitely on-device — no request ever fails, no exception is ever
-            // thrown, it just keeps paging into what looks like the same tail of results forever
-            // (allocating a full page of metadata each time, which showed up as a nonstop GC storm
-            // with the screen stuck on a spinner). A hard page cap turns a real Dropbox API/SDK
-            // pagination bug into "this account has an unusually large trash, showing what's
-            // findable" instead of hanging the UI and burning memory with no way out.
+            // Some Dropbox accounts genuinely have tens of thousands of deleted entries piled up
+            // over years (one seen on-device hit 37,000+ and was still paging with hasMore=true) —
+            // walking all of it isn't a bug, it's real data, but it made Trash take minutes to open
+            // and burned a full page of metadata in memory per request the whole time. Capping at
+            // the most recent ~10k entries turns that into a handful of seconds while still easily
+            // covering "what did I just delete" — the actual reason anyone opens Trash.
             var page = 0
-            val maxPages = 200
-            while (result.hasMore) {
+            val maxDeletedEntries = 10_000
+            while (result.hasMore && deleted.size < maxDeletedEntries) {
                 currentCoroutineContext().ensureActive()
                 page++
-                if (page > maxPages) {
-                    android.util.Log.e("DropboxApiClient", "listTrash: hit $maxPages page cap, stopping early with ${deleted.size} entries so far — hasMore never cleared")
-                    break
-                }
                 result = client.files().listFolderContinue(result.cursor)
                 collect(result.entries)
                 android.util.Log.d("DropboxApiClient", "listTrash: page $page -> ${result.entries.size} entries (total deleted=${deleted.size}), hasMore=${result.hasMore}")
+            }
+            if (result.hasMore) {
+                android.util.Log.d("DropboxApiClient", "listTrash: stopped at ${deleted.size} entries (cap $maxDeletedEntries) — account has more, not fetching the rest")
             }
             Result.success(
                 deleted.map { meta ->
