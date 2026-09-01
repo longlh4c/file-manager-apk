@@ -225,7 +225,23 @@ fun AudioListItem(
  * when it sums back to itemCount, so an unpopulated 0/0 on a provider that hasn't split its
  * count doesn't get misread as "this folder is empty".
  */
+/** The folder a search result actually lives in, shown as a second line so a result found deep
+ * in some subfolder isn't just a bare filename with no context for where it is. */
+private fun parentPathLabel(path: String): String {
+    val trimmed = path.trimEnd('/')
+    val parent = trimmed.substringBeforeLast('/', "")
+    return parent.ifEmpty { "/" }
+}
+
 private fun folderItemCountLabel(file: FileItem): String {
+    // The Trash/Rubbish Bin badge is a synthetic, flat listing of deleted entries scattered
+    // across the whole account (see DropboxApiClient.listTrash / GoogleDriveApiClient.listTrash)
+    // — it never gets its own real itemCount the way an actual folder does, so showing "0
+    // folders, 0 items" here isn't a stale placeholder, it's simply always wrong. MEGA's Rubbish
+    // Bin is a real node in its tree with an accurate itemCount and is unaffected by this.
+    if (file.folderBadgeType == com.antigravity.filemanager.domain.model.FolderBadgeType.TRASH && file.id == "__trash__") {
+        return "Recently deleted"
+    }
     val hasSplit = file.subfolderCount + file.fileChildCount == file.itemCount
     return if (hasSplit) {
         "${file.subfolderCount} folders, ${file.fileChildCount} items"
@@ -243,7 +259,11 @@ fun FileListItem(
     onClick: () -> Unit,
     onLongClick: () -> Unit = {},
     modifier: Modifier = Modifier,
-    onVisible: ((FileItem) -> Unit)? = null
+    onVisible: ((FileItem) -> Unit)? = null,
+    // Recursive search results can span many different folders, so the name alone doesn't say
+    // where a match actually lives — pass true (only meaningful while showing search results) to
+    // show its parent folder path as a second line under the name/size row.
+    showPath: Boolean = false
 ) {
     if (onVisible != null && !file.isDirectory && file.thumbnailUri == null) {
         // Debounced: a row that only flashes past during a fast scroll gets cancelled here
@@ -319,6 +339,15 @@ fun FileListItem(
                 color = TextSecondary,
                 fontSize = 13.sp
             )
+            if (showPath) {
+                Text(
+                    text = parentPathLabel(file.path),
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
 
         // Modified Date on the right (matching Screenshot 000552)
@@ -557,7 +586,7 @@ fun FileGridCard(
         Spacer(modifier = Modifier.height(2.dp))
 
         Text(
-            text = if (file.isDirectory) "${file.itemCount} items" else file.formattedSize,
+            text = if (file.isDirectory) folderItemCountLabel(file) else file.formattedSize,
             color = TextSecondary,
             fontSize = 11.sp,
             textAlign = TextAlign.Center,
@@ -574,7 +603,9 @@ fun FileDetailedListItem(
     isSelected: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit = {},
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // See FileListItem's showPath for why this exists.
+    showPath: Boolean = false
 ) {
     val rowBg = if (isSelected) Color(0xFF00695C) else Color.Transparent
 
@@ -632,7 +663,7 @@ fun FileDetailedListItem(
             Spacer(modifier = Modifier.height(3.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = if (file.isDirectory) "Directory • ${file.itemCount} items" else "${file.extension.uppercase()} • ${file.formattedSize}",
+                    text = if (file.isDirectory) "Directory • ${folderItemCountLabel(file)}" else "${file.extension.uppercase()} • ${file.formattedSize}",
                     color = TextSecondary,
                     fontSize = 12.sp
                 )
@@ -643,6 +674,15 @@ fun FileDetailedListItem(
                         fontSize = 12.sp
                     )
                 }
+            }
+            if (showPath) {
+                Text(
+                    text = parentPathLabel(file.path),
+                    color = TextSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }

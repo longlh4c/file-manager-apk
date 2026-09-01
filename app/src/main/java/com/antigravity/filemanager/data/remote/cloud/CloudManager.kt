@@ -204,32 +204,60 @@ class CloudManager @Inject constructor(
                     }
                 }
                 CloudProvider.DROPBOX -> {
-                    val path = if (remotePath == "/" || remotePath.isBlank()) "" else remotePath
-                    if (forceFullRefresh) {
-                        dropboxApi.invalidateTree(account.id)
-                    }
-                    // Always build/reuse the cached whole-account tree, same as MEGA — now that
-                    // the tree cache never expires on its own (only an explicit invalidateTree()
-                    // from a manual root refresh or a mutation drops it), paying for one full
-                    // recursive fetch is worth it: every navigation after that (including the
-                    // "copy/move to Dropbox" destination picker, and revisiting a folder right
-                    // after a transfer) is served from memory instead of a fresh network call
-                    // that looked like the folder was "reloading" every time.
-                    val result = dropboxApi.listFolderCached(account, path, allowFullTreeFetch = true)
-                    if (result.isSuccess) {
-                        val list = result.getOrNull() ?: emptyList()
-                        list.forEach { item ->
-                            val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
-                            folderIdCache[itemDisplayPath] = item.id
-                            folderIdCache[item.id] = item.id
-                            folderIdCache[item.name] = item.id
-                        }
-                        Result.success(list.map { item ->
-                            val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
-                            item.copy(path = itemDisplayPath, folderBadgeType = if (item.isDirectory) detectFolderBadge(item.name) else FolderBadgeType.STANDARD)
-                        })
+                    if (remotePath == "/Trash" || remotePath.startsWith("/Trash/")) {
+                        // Dropbox has no distinct trash location the way MEGA/Drive do — every
+                        // deleted item is found by walking the WHOLE account with
+                        // includeDeleted=true (see listTrash), so "/Trash" and any path nested
+                        // under it all resolve to that same flat account-wide list; there's no
+                        // real subfolder structure to descend into here.
+                        dropboxApi.listTrash(account)
                     } else {
-                        result
+                        val path = if (remotePath == "/" || remotePath.isBlank()) "" else remotePath
+                        if (forceFullRefresh) {
+                            dropboxApi.invalidateTree(account.id)
+                        }
+                        // Always build/reuse the cached whole-account tree, same as MEGA — now that
+                        // the tree cache never expires on its own (only an explicit invalidateTree()
+                        // from a manual root refresh or a mutation drops it), paying for one full
+                        // recursive fetch is worth it: every navigation after that (including the
+                        // "copy/move to Dropbox" destination picker, and revisiting a folder right
+                        // after a transfer) is served from memory instead of a fresh network call
+                        // that looked like the folder was "reloading" every time.
+                        val result = dropboxApi.listFolderCached(account, path, allowFullTreeFetch = true)
+                        if (result.isSuccess) {
+                            val list = result.getOrNull() ?: emptyList()
+                            list.forEach { item ->
+                                val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
+                                folderIdCache[itemDisplayPath] = item.id
+                                folderIdCache[item.id] = item.id
+                                folderIdCache[item.name] = item.id
+                            }
+                            val withTrash = if (remotePath == "/" || remotePath.isBlank()) {
+                                // A pinned virtual folder, same treatment as MEGA's Rubbish Bin —
+                                // not part of the real Dropbox tree, so it's appended here rather
+                                // than coming back from listFolderCached itself.
+                                list + FileItem(
+                                    id = "__trash__",
+                                    name = "Trash",
+                                    path = "/Trash",
+                                    isDirectory = true,
+                                    folderBadgeType = FolderBadgeType.TRASH
+                                ).also {
+                                    folderIdCache["/Trash"] = "__trash__"
+                                    folderIdCache["Trash"] = "__trash__"
+                                    folderIdCache["__trash__"] = "__trash__"
+                                }
+                            } else {
+                                list
+                            }
+                            Result.success(withTrash.map { item ->
+                                if (item.id == "__trash__") return@map item
+                                val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
+                                item.copy(path = itemDisplayPath, folderBadgeType = if (item.isDirectory) detectFolderBadge(item.name) else FolderBadgeType.STANDARD)
+                            })
+                        } else {
+                            result
+                        }
                     }
                 }
                 CloudProvider.MEGA -> {
@@ -1210,7 +1238,16 @@ class CloudManager @Inject constructor(
                     }
                     CloudProvider.DROPBOX -> {
                         val dropboxPath = if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId"
-                        dropboxApi.delete(account, dropboxPath).also { dropboxApi.patchTreeAfterDelete(account.id, dropboxPath) }
+                        if (moveToTrash) {
+                            dropboxApi.delete(account, dropboxPath).also { dropboxApi.patchTreeAfterDelete(account.id, dropboxPath) }
+                        } else {
+                            // moveToTrash=false means this delete came from inside the Trash view
+                            // itself (see CloudExplorerUiState.isInsideTrashView) — the item is
+                            // already gone from the normal tree, so there's nothing to patch out
+                            // of the regular listing cache; purge it from Dropbox's own retained
+                            // copy instead.
+                            dropboxApi.permanentlyDelete(account, dropboxPath)
+                        }
                     }
                     CloudProvider.MEGA -> {
                         // targetId falls back to the raw display-path STRING on a folderIdCache
@@ -1245,9 +1282,34 @@ class CloudManager @Inject constructor(
         }
     }
 
-    /** Restores an item out of the provider's real trash/rubbish bin. Google Drive and MEGA only
-     * — Dropbox never routes deletes through a distinct trash API to begin with (see
-     * [deleteItem]), so there's nothing here to restore from. */
+    /** Permanently deletes many MEGA items in as few HTTP round trips as possible — see
+     * MegaApiClient.deleteNodesBatch. Only MEGA gets this fast path today: Dropbox/Google Drive
+     * items instead fall back to the caller doing its own bounded-parallel per-item deletes (see
+     * CloudExplorerViewModel.deleteSelected), which is why this is scoped to the exact case that
+     * was actually unusable — emptying a MEGA Rubbish Bin with hundreds of items sequentially
+     * could take over an hour; this cuts it to roughly (item count / 25) requests. Returns results
+     * keyed by the ORIGINAL remotePathOrId strings passed in, not MEGA handles, so callers can
+     * match failures back to what the user actually selected. */
+    suspend fun deletePermanentlyBatchMega(account: CloudAccount, remotePathsOrIds: List<String>): Map<String, Result<Unit>> = withContext(Dispatchers.IO) {
+        val pathToHandle = remotePathsOrIds.associateWith { remotePathOrId ->
+            val targetId = folderIdCache[remotePathOrId] ?: folderIdCache[remotePathOrId.trimStart('/')] ?: remotePathOrId
+            if (targetId.startsWith("/")) megaApi.resolveHandleForDisplayPath(account, targetId) ?: targetId else targetId
+        }
+        val handleResults = megaApi.deleteNodesBatch(account, pathToHandle.values.toList())
+        remotePathsOrIds.associateWith { remotePathOrId ->
+            val handle = pathToHandle.getValue(remotePathOrId)
+            val result = handleResults[handle] ?: Result.failure(Exception("No result for '$remotePathOrId'"))
+            if (result.isSuccess) {
+                deleteFromSessionPayload(account.id, remotePathOrId)
+                folderIdCache.remove(remotePathOrId)
+                folderIdCache.remove(remotePathOrId.trimStart('/'))
+                folderIdCache.remove(handle)
+            }
+            result
+        }
+    }
+
+    /** Restores an item out of the provider's real trash/rubbish bin. */
     suspend fun restoreItem(account: CloudAccount, remotePathOrId: String): Result<Unit> = withContext(Dispatchers.IO) {
         val targetId = folderIdCache[remotePathOrId] ?: folderIdCache[remotePathOrId.trimStart('/')] ?: remotePathOrId
         when (account.provider) {
@@ -1260,7 +1322,10 @@ class CloudManager @Inject constructor(
                 googleDriveApi.restoreFromTrash(account, resolvedTargetId)
             }
             CloudProvider.MEGA -> megaApi.restoreFromRubbishBin(account, targetId).also { megaApi.invalidateNodeTreeCache(account.id) }
-            CloudProvider.DROPBOX -> Result.failure(Exception("Restore not supported for Dropbox"))
+            CloudProvider.DROPBOX -> {
+                val dropboxPath = if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId"
+                dropboxApi.restoreFile(account, dropboxPath).map { }.also { dropboxApi.invalidateTree(account.id) }
+            }
         }
     }
 

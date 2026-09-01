@@ -564,6 +564,13 @@ class CloudRepositoryImpl @Inject constructor(
         cloudManager.deleteItem(account, remotePath, moveToTrash)
     }
 
+    override suspend fun deletePermanentlyBatchMega(accountId: String, remotePaths: List<String>): Map<String, Result<Unit>> = withContext(Dispatchers.IO) {
+        val account = database.cloudDao().getById(accountId)?.toDomain()
+            ?: return@withContext remotePaths.associateWith { Result.failure(Exception("Account not found")) }
+        if (account.provider != com.antigravity.filemanager.domain.model.CloudProvider.MEGA) return@withContext emptyMap()
+        cloudManager.deletePermanentlyBatchMega(account, remotePaths)
+    }
+
     override suspend fun restoreCloudFile(accountId: String, remotePath: String): Result<Unit> = withContext(Dispatchers.IO) {
         val account = database.cloudDao().getById(accountId)?.toDomain()
             ?: return@withContext Result.failure(Exception("Account not found"))

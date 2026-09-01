@@ -155,6 +155,11 @@ class CloudStorageUseCase @Inject constructor(
     suspend fun deleteItem(accountId: String, remotePath: String, moveToTrash: Boolean = true): Result<Unit> =
         cloudRepository.deleteCloudFile(accountId, remotePath, moveToTrash)
 
+    /** MEGA-only fast path for permanently deleting many items at once — see
+     * CloudManager.deletePermanentlyBatchMega. Returns an empty map for any other provider. */
+    suspend fun deletePermanentlyBatchMega(accountId: String, remotePaths: List<String>): Map<String, Result<Unit>> =
+        cloudRepository.deletePermanentlyBatchMega(accountId, remotePaths)
+
     /** Restores an item from the provider's real trash — Google Drive and MEGA only. */
     suspend fun restoreItem(accountId: String, remotePath: String): Result<Unit> =
         cloudRepository.restoreCloudFile(accountId, remotePath)

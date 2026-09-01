@@ -2,6 +2,7 @@ package com.antigravity.filemanager.presentation.cloud
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -21,8 +22,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,7 +82,11 @@ fun CloudExplorerScreen(
     }
 
     BackHandler {
-        if (!viewModel.navigateBack()) {
+        if (uiState.isSelectionMode) {
+            viewModel.clearSelection()
+        } else if (uiState.isSearchActive) {
+            viewModel.setSearchActive(false)
+        } else if (!viewModel.navigateBack()) {
             onNavigateToCloudList()
         }
     }
@@ -129,13 +137,29 @@ fun CloudExplorerScreen(
         )
     }
 
-    val filteredFiles = remember(uiState.files, uiState.searchQuery) {
-        if (uiState.searchQuery.isBlank()) {
-            uiState.files
-        } else {
-            uiState.files.filter { it.name.contains(uiState.searchQuery, ignoreCase = true) }
+    if (uiState.showEmptyTrashDialog) {
+        DeleteConfirmDialog(
+            itemCount = uiState.files.size,
+            onConfirm = { viewModel.emptyTrash() },
+            onDismiss = { viewModel.setShowEmptyTrashDialog(false) },
+            showMoveToTrashOption = false,
+            title = "Empty Trash",
+            message = "Permanently delete all ${uiState.files.size} item(s) in Trash? This cannot be undone."
+        )
+    }
+
+    val searchFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    LaunchedEffect(uiState.isSearchActive) {
+        if (uiState.isSearchActive) {
+            searchFocusRequester.requestFocus()
+            keyboardController?.show()
         }
     }
+
+    // Search results come recursively from the ViewModel (this folder + every subfolder), not a
+    // plain filter of the current listing — see CloudExplorerViewModel.onSearchQueryChanged.
+    val filteredFiles = if (uiState.searchQuery.isBlank()) uiState.files else uiState.searchResults
 
     Scaffold(
         topBar = {
@@ -181,7 +205,9 @@ fun CloudExplorerScreen(
                                 unfocusedTextColor = TextPrimary,
                                 cursorColor = TealPrimary
                             ),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(searchFocusRequester)
                         )
                     },
                     navigationIcon = {
@@ -235,8 +261,10 @@ fun CloudExplorerScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = { showCreateFolderDialog = true }) {
-                            Icon(Icons.Default.CreateNewFolder, contentDescription = "New Folder", tint = TextPrimary)
+                        if (uiState.isInsideTrashView && uiState.files.isNotEmpty()) {
+                            IconButton(onClick = { viewModel.setShowEmptyTrashDialog(true) }) {
+                                Icon(Icons.Default.DeleteSweep, contentDescription = "Empty Trash", tint = TextPrimary)
+                            }
                         }
                         IconButton(onClick = { viewModel.setSearchActive(true) }) {
                             Icon(Icons.Default.Search, contentDescription = "Search", tint = TextPrimary)
@@ -249,7 +277,18 @@ fun CloudExplorerScreen(
                             onDismissRequest = { showSortMenu = false },
                             modifier = Modifier.background(DarkCard)
                         ) {
-                            FileSortOption.values().forEach { option ->
+                            // Same display order as Local's SortViewOptionsBottomSheet — Date
+                            // first, then Name, then Size, then Type — not FileSortOption's own
+                            // declaration order.
+                            listOf(
+                                FileSortOption.BY_DATE_DESC,
+                                FileSortOption.BY_DATE_ASC,
+                                FileSortOption.BY_NAME_ASC,
+                                FileSortOption.BY_NAME_DESC,
+                                FileSortOption.BY_SIZE_DESC,
+                                FileSortOption.BY_SIZE_ASC,
+                                FileSortOption.BY_TYPE
+                            ).forEach { option ->
                                 DropdownMenuItem(
                                     text = {
                                         Text(
@@ -344,7 +383,7 @@ fun CloudExplorerScreen(
                                     tint = TextPrimary,
                                     onClick = {
                                         val firstId = uiState.selectedPaths.firstOrNull()
-                                        val item = uiState.files.find { it.id == firstId || it.path == firstId }
+                                        val item = filteredFiles.find { it.id == firstId || it.path == firstId }
                                         viewModel.setShowRenameDialog(item)
                                     },
                                     modifier = Modifier.weight(1f)
@@ -364,7 +403,7 @@ fun CloudExplorerScreen(
                                     tint = TextPrimary,
                                     onClick = {
                                         val firstId = uiState.selectedPaths.firstOrNull()
-                                        val item = uiState.files.find { it.id == firstId || it.path == firstId }
+                                        val item = filteredFiles.find { it.id == firstId || it.path == firstId }
                                         viewModel.showProperties(item)
                                     },
                                     modifier = Modifier.weight(1f)
@@ -531,7 +570,7 @@ fun CloudExplorerScreen(
                 onRefresh = { viewModel.refresh(isManual = true) },
                 modifier = Modifier.fillMaxSize()
             ) {
-                if (filteredFiles.isEmpty() && !uiState.isLoading) {
+                if (filteredFiles.isEmpty() && !uiState.isLoading && !uiState.isSearching) {
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -540,11 +579,11 @@ fun CloudExplorerScreen(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier.padding(24.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.CloudQueue,
+                            Image(
+                                painter = androidx.compose.ui.res.painterResource(com.antigravity.filemanager.R.drawable.empty_folder_owl),
                                 contentDescription = null,
-                                tint = TextSecondary.copy(alpha = 0.4f),
-                                modifier = Modifier.size(64.dp)
+                                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(TextSecondary),
+                                modifier = Modifier.size(140.dp)
                             )
                             Spacer(modifier = Modifier.height(16.dp))
                             Text(
@@ -596,7 +635,8 @@ fun CloudExplorerScreen(
                                 onLongClick = {
                                     viewModel.toggleSelection(file.id)
                                 },
-                                onVisible = { viewModel.requestThumbnail(it) }
+                                onVisible = { viewModel.requestThumbnail(it) },
+                                showPath = uiState.searchQuery.isNotBlank()
                             )
                         }
                     }

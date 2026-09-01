@@ -13,12 +13,21 @@ import com.antigravity.filemanager.domain.usecase.FileOperationsUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import java.io.File
 import javax.inject.Inject
 
@@ -60,6 +69,10 @@ data class FileBrowserUiState(
     val itemForProperties: FileItem? = null,
     val searchQuery: String = "",
     val isSearchActive: Boolean = false,
+    // See the matching fields in CloudExplorerUiState — recursive search results (this folder +
+    // every subfolder underneath it), populated by onSearchQueryChanged.
+    val searchResults: List<FileItem> = emptyList(),
+    val isSearching: Boolean = false,
     val toastMessage: String? = null,
     val bookmarks: List<com.antigravity.filemanager.domain.model.Bookmark> = emptyList(),
     val bookmarkConfirmationMessage: String? = null,
@@ -189,6 +202,21 @@ class FileBrowserViewModel @Inject constructor(
     }
 
     fun loadDirectory(path: String) {
+        // Navigating anywhere (including tapping a folder found via recursive search) must leave
+        // search mode — otherwise this correctly loads the target folder's real contents into
+        // `files`, but the screen keeps rendering the stale `searchResults` list on top of it
+        // (filteredFiles prefers searchResults whenever searchQuery is non-blank), so opening a
+        // search result folder looked like it did nothing. See the matching fix in
+        // CloudExplorerViewModel.openFolder.
+        searchJob?.cancel()
+        if (_uiState.value.isSearchActive || _uiState.value.searchQuery.isNotEmpty()) {
+            _uiState.value = _uiState.value.copy(
+                isSearchActive = false,
+                searchQuery = "",
+                searchResults = emptyList(),
+                isSearching = false
+            )
+        }
         viewModelScope.launch {
             val savedSort = folderPreferencesRepository.getSortOption(path)
             val savedHidden = folderPreferencesRepository.getShowHidden(path)
@@ -267,14 +295,72 @@ class FileBrowserViewModel @Inject constructor(
         }
     }
 
+    private var searchJob: Job? = null
+
     fun onSearchQueryChanged(query: String) {
         _uiState.value = _uiState.value.copy(searchQuery = query)
+        searchJob?.cancel()
+        if (query.isBlank()) {
+            _uiState.value = _uiState.value.copy(searchResults = emptyList(), isSearching = false)
+            return
+        }
+        val basePath = _uiState.value.currentPath
+        val showHidden = _uiState.value.showHiddenFiles
+        val thisJob = viewModelScope.launch(Dispatchers.IO) {
+            // Debounce so fast typing doesn't kick off a new tree walk per keystroke — only the
+            // settled query actually searches.
+            delay(350)
+            _uiState.value = _uiState.value.copy(searchResults = emptyList(), isSearching = true)
+            val found = mutableListOf<FileItem>()
+            val resultsMutex = Mutex()
+            // Bounded fan-out, same shape as CloudExplorerViewModel's recursive search — reading
+            // every subfolder one at a time would make searching a large tree feel like it hung.
+            val semaphore = Semaphore(4)
+
+            suspend fun walk(path: String) {
+                currentCoroutineContext().ensureActive()
+                // Permit held only around the actual directory read below, never across the
+                // recursive descent into subfolders — see the matching comment in
+                // CloudExplorerViewModel.onSearchQueryChanged for why holding it across the whole
+                // call (including waiting on this folder's own children) can deadlock a wide/deep
+                // tree with only 4 permits.
+                val children = semaphore.withPermit { fileOperationsUseCase.getFiles(path, FileSortOption.BY_NAME_ASC, showHidden) }
+                val matches = children.filter { it.name.contains(query, ignoreCase = true) }
+                if (matches.isNotEmpty()) {
+                    resultsMutex.withLock {
+                        found.addAll(matches)
+                        _uiState.value = _uiState.value.copy(searchResults = found.toList())
+                    }
+                }
+                val subfolders = children.filter { it.isDirectory }
+                coroutineScope {
+                    subfolders.forEach { sub ->
+                        launch { walk(sub.path) }
+                    }
+                }
+            }
+
+            try {
+                walk(basePath)
+            } finally {
+                // A newer search may have already started and replaced searchJob by the time this
+                // one unwinds (from cancellation) — only clear isSearching if this is still the
+                // active search, so its finally block doesn't stomp on the newer one's state.
+                if (searchJob === currentCoroutineContext().job) {
+                    _uiState.value = _uiState.value.copy(isSearching = false)
+                }
+            }
+        }
+        searchJob = thisJob
     }
 
     fun setSearchActive(active: Boolean) {
+        searchJob?.cancel()
         _uiState.value = _uiState.value.copy(
             isSearchActive = active,
-            searchQuery = if (!active) "" else _uiState.value.searchQuery
+            searchQuery = if (!active) "" else _uiState.value.searchQuery,
+            searchResults = emptyList(),
+            isSearching = false
         )
     }
 
@@ -291,8 +377,13 @@ class FileBrowserViewModel @Inject constructor(
         )
     }
 
+    // Select All / Invert must operate on what's actually visible — the recursive search results
+    // while searching, or the plain folder listing otherwise — same fix as CloudExplorerViewModel.
+    private fun visibleFiles(): List<FileItem> =
+        if (_uiState.value.searchQuery.isBlank()) _uiState.value.files else _uiState.value.searchResults
+
     fun selectAll() {
-        val allPaths = _uiState.value.files.map { it.path }.toSet()
+        val allPaths = visibleFiles().map { it.path }.toSet()
         _uiState.value = _uiState.value.copy(
             selectedPaths = allPaths,
             isSelectionMode = true
@@ -300,7 +391,7 @@ class FileBrowserViewModel @Inject constructor(
     }
 
     fun invertSelection() {
-        val all = _uiState.value.files.map { it.path }.toSet()
+        val all = visibleFiles().map { it.path }.toSet()
         val current = _uiState.value.selectedPaths
         val inverted = all - current
         _uiState.value = _uiState.value.copy(
