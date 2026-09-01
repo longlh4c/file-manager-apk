@@ -66,7 +66,9 @@ data class FileBrowserUiState(
     val overwriteConflicts: List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList(),
     val downloadProgress: CloudTransferProgress? = null,
     val storageUsedPercent: Int? = null,
-    val viewMode: com.antigravity.filemanager.presentation.components.ViewMode = com.antigravity.filemanager.presentation.components.ViewMode.LIST
+    val viewMode: com.antigravity.filemanager.presentation.components.ViewMode = com.antigravity.filemanager.presentation.components.ViewMode.LIST,
+    // See the matching field in CloudExplorerUiState for why this exists.
+    val transferCancelledByUser: Boolean = false
 )
 
 @HiltViewModel
@@ -152,6 +154,9 @@ class FileBrowserViewModel @Inject constructor(
         // came back blank after reopening. Keep this in-app bar mirrored to that shared source too.
         viewModelScope.launch {
             transferGuard.progress.collect { info ->
+                if (info != null && _uiState.value.transferCancelledByUser) {
+                    return@collect
+                }
                 _uiState.value = _uiState.value.copy(
                     downloadProgress = info?.let {
                         CloudTransferProgress(
@@ -163,7 +168,8 @@ class FileBrowserViewModel @Inject constructor(
                             isIndeterminate = it.totalBytes <= 0,
                             isUpload = it.isUpload
                         )
-                    }
+                    },
+                    transferCancelledByUser = if (info == null) false else _uiState.value.transferCancelledByUser
                 )
             }
         }
@@ -433,7 +439,8 @@ class FileBrowserViewModel @Inject constructor(
         }
         _uiState.value = _uiState.value.copy(
             downloadProgress = null,
-            toastMessage = toastMessage
+            toastMessage = toastMessage,
+            transferCancelledByUser = true
         )
     }
 

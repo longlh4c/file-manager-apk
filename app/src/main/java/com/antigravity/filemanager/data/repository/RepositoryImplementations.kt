@@ -586,6 +586,16 @@ class CloudRepositoryImpl @Inject constructor(
         cloudManager.renameItem(account, remotePath, newName)
     }
 
+    override suspend fun moveCloudFileWithinAccount(
+        accountId: String,
+        sourcePath: String,
+        targetDir: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val account = database.cloudDao().getById(accountId)?.toDomain()
+            ?: return@withContext Result.failure(Exception("Account not found"))
+        cloudManager.moveItemWithinAccount(account, sourcePath, targetDir)
+    }
+
     override suspend fun downloadCloudThumbnail(accountId: String, nodeId: String): Result<ByteArray> = withContext(Dispatchers.IO) {
         val account = database.cloudDao().getById(accountId)?.toDomain()
             ?: return@withContext Result.failure(Exception("Account not found"))

@@ -148,6 +148,31 @@ class GoogleDriveApiClient @Inject constructor(
     // into Shared Drives content — without them the API silently omits it, so every listing call
     // below sets them rather than only the ones that obviously touch a Shared Drive (folder IDs
     // don't self-identify as "inside a Shared Drive" ahead of the query).
+    /** Resolves a "/My Drive/Name/Name" display path (built by CloudManager to mimic Dropbox's
+     * real-path model, since Drive identifies folders by opaque ID, not path) back to the real
+     * folder ID by walking the tree level by level from root. CloudManager caches this result in
+     * folderIdCache so it's normally an O(1) hit — this is only the fallback for a cache miss
+     * (process just started, or navigating straight into a nested folder without replaying every
+     * parent level first). Without this, a cache miss fell back to treating the display-path
+     * STRING itself as a folder ID, which Drive's API rejects with a 404 "File not found: ." —
+     * one real API call per path segment, since Drive has no bulk "give me the whole tree" call
+     * the way MEGA's resolveHandleForDisplayPath can do entirely in-memory. */
+    suspend fun resolveIdForDisplayPath(account: CloudAccount, displayPath: String): String? {
+        val segments = displayPath.trim('/').split('/').filter { it.isNotEmpty() }
+        if (segments.isEmpty()) return null
+        // "My Drive" is the virtual alias for the real root folder id — not an actual named
+        // child to search for, so skip it as a path segment if present.
+        val startIndex = if (segments[0].equals("My Drive", ignoreCase = true)) 1 else 0
+        var currentId = "root"
+        for (i in startIndex until segments.size) {
+            val name = segments[i]
+            val children = listFiles(account, currentId).getOrNull() ?: return null
+            val match = children.find { it.isDirectory && it.name == name } ?: return null
+            currentId = match.id
+        }
+        return currentId
+    }
+
     suspend fun listFiles(account: CloudAccount, parentId: String = "root"): Result<List<FileItem>> = withContext(Dispatchers.IO) {
         try {
             val drive = buildDrive(account)
@@ -520,6 +545,25 @@ class GoogleDriveApiClient @Inject constructor(
         try {
             val drive = buildDrive(account)
             drive.files().update(fileId, DriveFile().apply { name = newName }).execute()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /** Relocates a file/folder to a different parent within the SAME account — Drive has no
+     * "path", a file's location IS its parent set, so a move is just swapping which folder is
+     * listed as parent, entirely server-side (no data transfer). This is what makes a same-
+     * account cloud "Move" cheap, unlike the generic cross-provider paste flow's download-then-
+     * upload round trip (needed there only because no such API exists across providers). */
+    suspend fun moveFile(account: CloudAccount, fileId: String, oldParentId: String, newParentId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val drive = buildDrive(account)
+            drive.files().update(fileId, null)
+                .setAddParents(newParentId)
+                .setRemoveParents(oldParentId)
+                .setSupportsAllDrives(true)
+                .execute()
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)

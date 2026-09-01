@@ -1024,7 +1024,13 @@ class MegaApiClient @Inject constructor(
      * re-keying), so moving a node within one's own account tree is a plain "a":"m" move command,
      * no re-encryption needed. Shared by [moveToRubbishBin] and [restoreFromRubbishBin].
      */
-    private suspend fun moveNode(account: CloudAccount, nodeHandle: String, newParentHandle: String): Result<Unit> = withContext(Dispatchers.IO) {
+    /** Resolves the account's root folder handle (never a null-means-root convention like
+     * createFolder/uploadFile accept — callers that need an actual handle value, e.g. moveNode,
+     * use this instead of duplicating the tree-fetch dance themselves). */
+    suspend fun resolveRootHandle(account: CloudAccount): String? =
+        getOrFetchNodeTree(account).getOrNull()?.second
+
+    suspend fun moveNode(account: CloudAccount, nodeHandle: String, newParentHandle: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             if (nodeHandle.startsWith("/")) {
                 return@withContext Result.failure(Exception("Could not resolve a MEGA handle for '$nodeHandle'"))
