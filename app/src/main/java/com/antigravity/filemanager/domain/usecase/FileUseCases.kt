@@ -165,6 +165,7 @@ class CloudStorageUseCase @Inject constructor(
     // Finds conflicting names in remoteDir on the given cloud account before upload.
     suspend fun findConflicts(accountId: String, remoteDir: String, items: List<Pair<String, Long>>): List<com.antigravity.filemanager.domain.model.OverwriteConflict> {
         val existing = cloudRepository.getCloudFiles(accountId, remoteDir).getOrDefault(emptyList())
+        android.util.Log.d("CloudStorageUseCase", "findConflicts: remoteDir='$remoteDir' existing=${existing.map { it.name }} checking=${items.map { it.first }}")
         return items.mapNotNull { (name, size) ->
             val match = existing.find { it.name == name }
             if (match != null) {

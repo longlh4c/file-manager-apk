@@ -756,6 +756,7 @@ class CloudManager @Inject constructor(
                     }
                     Result.success(destFile)
                 } else {
+                    android.util.Log.e("CloudManager", "downloadFile: no local fallback either — provider=${account.provider} remotePath='$remotePath' error=${remoteResult.exceptionOrNull()}")
                     remoteResult
                 }
             }
@@ -920,7 +921,18 @@ class CloudManager @Inject constructor(
                         }
                     }
                     CloudProvider.DROPBOX -> {
-                        dropboxApi.createFolder(account, itemPath).also { dropboxApi.invalidateTree(account.id) }
+                        // Patch the new folder into the cached tree instead of invalidating it —
+                        // a recursive cloud-to-cloud copy calls this once per subfolder, and
+                        // wiping the whole account's cache each time meant every listing right
+                        // after (including this same copy's own conflict checks) re-fetched the
+                        // full tree from network again, which is what made Dropbox look like it
+                        // "never caches" even though the tree cache itself never expires.
+                        dropboxApi.createFolder(account, itemPath).onSuccess { item ->
+                            remoteId = item.id
+                            dropboxApi.patchTreeAfterFolderCreate(account.id, itemPath, item.id)
+                        }.onFailure {
+                            remoteFailure = it as? Exception ?: Exception(it.message ?: "Dropbox create folder failed")
+                        }
                     }
                     CloudProvider.MEGA -> {
                         // MEGA identifies folders by handle, not path — resolve the display path
@@ -1163,19 +1175,48 @@ class CloudManager @Inject constructor(
             // bin where one exists (Google Drive, MEGA); Dropbox has no distinct trash API call
             // to make since Dropbox itself already keeps deleted files recoverable from its own
             // web UI for ~30 days regardless of which delete call is used.
-            try {
+            //
+            // A failure here MUST be reported, not swallowed — this used to always return
+            // Result.success(Unit) regardless of what the remote call actually did, on the
+            // reasoning that the local mirror was already cleaned up. But callers rely on this
+            // Result to know whether the remote item is really gone — a cloud-to-cloud "Move"
+            // checks it before deleting the source, so a silently-ignored remote failure left the
+            // "moved" folder still sitting on the source account with no error shown anywhere.
+            val remoteResult = try {
                 when (account.provider) {
                     CloudProvider.GOOGLE_DRIVE ->
                         if (moveToTrash) googleDriveApi.trashFile(account, targetId) else googleDriveApi.deleteFile(account, targetId)
-                    CloudProvider.DROPBOX -> dropboxApi.delete(account, if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId").also { dropboxApi.invalidateTree(account.id) }
-                    CloudProvider.MEGA ->
-                        (if (moveToTrash) megaApi.moveToRubbishBin(account, targetId) else megaApi.deleteNode(account, targetId))
+                    CloudProvider.DROPBOX -> {
+                        val dropboxPath = if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId"
+                        dropboxApi.delete(account, dropboxPath).also { dropboxApi.patchTreeAfterDelete(account.id, dropboxPath) }
+                    }
+                    CloudProvider.MEGA -> {
+                        // targetId falls back to the raw display-path STRING on a folderIdCache
+                        // miss (see above) — MEGA identifies nodes by handle, not path, so handing
+                        // it that string as if it were a handle sent a garbage "n" to the move/
+                        // delete command. MEGA apparently doesn't treat that as an error (the
+                        // response never started with "-"), so this silently no-op'd while still
+                        // reporting success — the exact "Move said it worked but the MEGA source
+                        // is still there" bug. Walk the tree to resolve the real handle first,
+                        // same fallback listCloudFiles/createFolder already use for a cold cache.
+                        val resolvedTargetId = if (targetId.startsWith("/")) {
+                            megaApi.resolveHandleForDisplayPath(account, targetId) ?: targetId
+                        } else {
+                            targetId
+                        }
+                        (if (moveToTrash) megaApi.moveToRubbishBin(account, resolvedTargetId) else megaApi.deleteNode(account, resolvedTargetId))
                             .also { megaApi.invalidateNodeTreeCache(account.id) }
+                    }
                 }
             } catch (e: Exception) {
-                // Ignore
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Result.failure(e)
             }
+            android.util.Log.d("CloudManager", "deleteItem: provider=${account.provider} remotePathOrId='$remotePathOrId' targetId='$targetId' isSuccess=${remoteResult.isSuccess} error=${remoteResult.exceptionOrNull()}")
 
+            if (remoteResult.isFailure) {
+                return@withContext Result.failure(remoteResult.exceptionOrNull() ?: Exception("Remote delete failed"))
+            }
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)

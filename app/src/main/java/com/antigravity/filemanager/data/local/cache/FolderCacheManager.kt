@@ -311,6 +311,13 @@ class FolderCacheManager @Inject constructor(
                             lastModified = obj.optLong("lastModified", 0L),
                             isDirectory = obj.optBoolean("isDirectory", false),
                             itemCount = obj.optInt("itemCount", 0),
+                            // Missing these two used to silently reset to 0 on every disk-cache
+                            // round trip, breaking the "N folders, M items" split label (it only
+                            // trusts subfolderCount+fileChildCount when they sum back to
+                            // itemCount — see folderItemCountLabel) even though the fan-out that
+                            // computed them moments earlier got it right.
+                            subfolderCount = obj.optInt("subfolderCount", 0),
+                            fileChildCount = obj.optInt("fileChildCount", 0),
                             extension = obj.optString("extension", ""),
                             thumbnailUri = obj.optString("thumbnailUri").ifBlank { null },
                             folderBadgeType = badge
@@ -341,6 +348,8 @@ class FolderCacheManager @Inject constructor(
                         put("lastModified", item.lastModified)
                         put("isDirectory", item.isDirectory)
                         put("itemCount", item.itemCount)
+                        put("subfolderCount", item.subfolderCount)
+                        put("fileChildCount", item.fileChildCount)
                         put("extension", item.extension)
                         put("thumbnailUri", item.thumbnailUri ?: "")
                         put("badge", item.folderBadgeType.name)

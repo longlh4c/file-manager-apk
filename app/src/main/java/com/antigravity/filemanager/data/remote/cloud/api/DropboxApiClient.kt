@@ -72,6 +72,42 @@ class DropboxApiClient @Inject constructor() {
         treeCache[accountId] = TreeCache(updated, System.currentTimeMillis())
     }
 
+    /** Same idea as [patchTreeAfterUpload] but for a freshly created folder — a recursive
+     * cloud-to-cloud folder copy calls createFolder once per subfolder, and each one used to
+     * call [invalidateTree] and throw away the whole cached account tree, forcing every listing
+     * right after (including this same copy's own per-folder conflict checks) to pay for a full
+     * recursive re-fetch again. Patching in place keeps the "build the tree once, reuse it"
+     * cache actually holding across a multi-folder copy instead of restarting on every folder. */
+    fun patchTreeAfterFolderCreate(accountId: String, path: String, id: String) {
+        val cached = treeCache[accountId] ?: return
+        val parent = path.trimEnd('/').substringBeforeLast('/', "")
+        val name = path.trimEnd('/').substringAfterLast('/')
+        // lastModified=0L to match every real folder entry (fetchTreeFromNetwork always sets 0L
+        // for FolderMetadata — Dropbox's API just doesn't expose a modified-time for folders).
+        // This used to be "now", which put a freshly created folder wildly out of position
+        // whenever the list was sorted by date, since every other folder sits at epoch 0.
+        val entry = DropboxEntry(path, parent, name, true, 0L, 0L, id)
+        val updated = cached.entries.filterNot { it.path == path } + entry
+        treeCache[accountId] = TreeCache(updated, System.currentTimeMillis())
+    }
+
+    /** Removes one deleted item from the cached tree in place instead of the full [invalidateTree]
+     * wipe deleteItem used to always do. Overwriting an existing file deletes it first (see
+     * FileUseCases.uploadFiles' conflict handling) — on a folder move/copy re-run against a
+     * destination that already has matching files from an earlier attempt, that meant nearly
+     * every file paid for a full account-tree re-fetch just to delete the one file it was about
+     * to replace anyway. Also drops any entries nested under this path, for a deleted folder. */
+    fun patchTreeAfterDelete(accountId: String, path: String) {
+        val cached = treeCache[accountId] ?: run {
+            android.util.Log.d("DropboxApiClient", "patchTreeAfterDelete: no cache yet for $accountId, nothing to patch (path='$path')")
+            return
+        }
+        val normalized = path.trimEnd('/')
+        val updated = cached.entries.filterNot { it.path == normalized || it.path.startsWith("$normalized/") }
+        android.util.Log.d("DropboxApiClient", "patchTreeAfterDelete: path='$normalized' removed ${cached.entries.size - updated.size} entries (${cached.entries.size} -> ${updated.size})")
+        treeCache[accountId] = TreeCache(updated, System.currentTimeMillis())
+    }
+
     private suspend fun getOrFetchTree(account: CloudAccount): Result<List<DropboxEntry>> {
         treeCache[account.id]?.let { cached ->
             return Result.success(cached.entries)
@@ -80,6 +116,7 @@ class DropboxApiClient @Inject constructor() {
             treeCache[account.id]?.let { recheck ->
                 return@withLock Result.success(recheck.entries)
             }
+            android.util.Log.d("DropboxApiClient", "getOrFetchTree: cache MISS — fetching fresh tree from network for ${account.id}")
             val fetched = fetchTreeFromNetwork(account)
             fetched.onSuccess { entries -> treeCache[account.id] = TreeCache(entries, System.currentTimeMillis()) }
             fetched
@@ -137,12 +174,25 @@ class DropboxApiClient @Inject constructor() {
                 val children = if (entry.isDirectory) childrenByParent[entry.path] else null
                 val subfolders = children?.count { it.isDirectory } ?: 0
                 val childFiles = children?.count { !it.isDirectory } ?: 0
+                // Dropbox's API never gives a folder its own modified-time, so instead of always
+                // showing 0 (which made "sort by date" put every folder in an arbitrary tie-order),
+                // use the newest file modified anywhere underneath it — recursively, not just
+                // direct children — matching how Dropbox's own desktop app displays a folder's
+                // date. entries here is the WHOLE cached account tree, so this is free (no extra
+                // network call), just a path-prefix scan.
+                val effectiveLastModified = if (entry.isDirectory) {
+                    val prefix = "${entry.path}/"
+                    entries.filter { !it.isDirectory && it.path.startsWith(prefix) }
+                        .maxOfOrNull { it.lastModified } ?: 0L
+                } else {
+                    entry.lastModified
+                }
                 FileItem(
                     id = entry.id,
                     name = entry.name,
                     path = entry.path,
                     size = entry.size,
-                    lastModified = entry.lastModified,
+                    lastModified = effectiveLastModified,
                     isDirectory = entry.isDirectory,
                     itemCount = subfolders + childFiles,
                     subfolderCount = subfolders,
@@ -331,7 +381,11 @@ class DropboxApiClient @Inject constructor() {
                 return@withContext Result.success(metadata.pathDisplay ?: targetPath)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                if (e is com.dropbox.core.RateLimitException && attempt < 4) {
+                if (e is com.dropbox.core.RateLimitException && attempt < 8) {
+                    // 4 attempts wasn't always enough under sustained load (8 files uploading in
+                    // parallel can keep tripping the rate limit for several rounds in a row on a
+                    // big batch) — a few files were still failing outright once retries ran out.
+                    // Still bounded, still honors Dropbox's own advertised backoff per attempt.
                     val backoffMs = (e.backoffMillis).coerceIn(1000L, 30_000L)
                     android.util.Log.d("DropboxApiClient", "uploadFile: rate-limited for '${localFile.name}', retrying in ${backoffMs}ms (attempt $attempt)")
                     kotlinx.coroutines.delay(backoffMs)

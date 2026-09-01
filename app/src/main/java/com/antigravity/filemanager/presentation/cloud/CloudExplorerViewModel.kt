@@ -145,6 +145,29 @@ class CloudExplorerViewModel @Inject constructor(
                 )
             }
         }
+        // TransferGuard.progress is the same source feeding the persistent notification, and it
+        // lives in a singleton tied to the whole app process — surviving regardless of whether
+        // this particular ViewModel instance does. Without this, backgrounding the app mid-copy
+        // and reopening it (which can recreate this ViewModel from scratch, e.g. after the OS
+        // reclaims the Activity) left the notification correctly still showing progress while the
+        // in-app bar came back blank, since it only ever knew about its own local, now-reset state.
+        viewModelScope.launch {
+            transferGuard.progress.collect { info ->
+                _uiState.value = _uiState.value.copy(
+                    downloadProgress = info?.let {
+                        CloudTransferProgress(
+                            currentFileName = it.currentFileName,
+                            currentIndex = it.currentIndex,
+                            totalFiles = it.totalFiles,
+                            bytesTransferred = it.bytesTransferred,
+                            totalBytes = it.totalBytes,
+                            isIndeterminate = it.totalBytes <= 0,
+                            isUpload = it.isUpload
+                        )
+                    }
+                )
+            }
+        }
     }
 
     private var activeLoadJob: kotlinx.coroutines.Job? = null
@@ -833,6 +856,12 @@ class CloudExplorerViewModel @Inject constructor(
 
     private fun sortCloudFiles(files: List<FileItem>, sort: FileSortOption): List<FileItem> {
         val locale = java.util.Locale.getDefault()
+        // Name is always the final tiebreaker. It matters most for BY_DATE_*: Dropbox's API
+        // simply doesn't expose a modified-time for folders (every folder entry — real ones from
+        // a listing, not just freshly created ones — comes back with lastModified=0), so sorting
+        // folders "by date" alone has nothing to differentiate them and fell back to whatever
+        // order the API/cache happened to return, which looked arbitrary. Falling back to name
+        // keeps that at least stable and predictable instead of looking shuffled.
         return when (sort) {
             FileSortOption.BY_NAME_ASC -> files.sortedWith(
                 compareBy<FileItem> { !it.isDirectory }.thenBy { it.name.lowercase(locale) }
@@ -841,16 +870,16 @@ class CloudExplorerViewModel @Inject constructor(
                 compareBy<FileItem> { !it.isDirectory }.thenByDescending { it.name.lowercase(locale) }
             )
             FileSortOption.BY_DATE_DESC -> files.sortedWith(
-                compareBy<FileItem> { !it.isDirectory }.thenByDescending { it.lastModified }
+                compareBy<FileItem> { !it.isDirectory }.thenByDescending { it.lastModified }.thenBy { it.name.lowercase(locale) }
             )
             FileSortOption.BY_DATE_ASC -> files.sortedWith(
-                compareBy<FileItem> { !it.isDirectory }.thenBy { it.lastModified }
+                compareBy<FileItem> { !it.isDirectory }.thenBy { it.lastModified }.thenBy { it.name.lowercase(locale) }
             )
             FileSortOption.BY_SIZE_DESC -> files.sortedWith(
-                compareBy<FileItem> { !it.isDirectory }.thenByDescending { it.size }
+                compareBy<FileItem> { !it.isDirectory }.thenByDescending { it.size }.thenBy { it.name.lowercase(locale) }
             )
             FileSortOption.BY_SIZE_ASC -> files.sortedWith(
-                compareBy<FileItem> { !it.isDirectory }.thenBy { it.size }
+                compareBy<FileItem> { !it.isDirectory }.thenBy { it.size }.thenBy { it.name.lowercase(locale) }
             )
             FileSortOption.BY_TYPE -> files.sortedWith(
                 compareBy<FileItem> { !it.isDirectory }
@@ -925,7 +954,8 @@ class CloudExplorerViewModel @Inject constructor(
                 isSelectionMode = false
             )
             pathsToDelete.forEach { path ->
-                cloudUseCase.deleteItem(accountId, path, moveToTrash)
+                val result = cloudUseCase.deleteItem(accountId, path, moveToTrash)
+                android.util.Log.d("CloudExplorerViewModel", "deleteSelected: path='$path' isSuccess=${result.isSuccess} error=${result.exceptionOrNull()}")
             }
             refresh()
         }
