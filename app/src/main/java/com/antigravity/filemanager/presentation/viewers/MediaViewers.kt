@@ -173,6 +173,34 @@ fun ImageViewerScreen(
     val coroutineScope = rememberCoroutineScope()
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var isDeleting by remember { mutableStateOf(false) }
+    var isPreparingAction by remember { mutableStateOf(false) }
+
+    // Share/Open With need an actual local file — a cloud image opened via direct stream URL
+    // (see resolveMedia's allowStreaming preference, used to avoid downloading just to view it)
+    // has no local file at all, which silently disabled both buttons with no way to use them.
+    // Force a real download on demand the first time either is tapped for a streamed entry, then
+    // reuse that download for the rest of this viewing session exactly like swiping normally
+    // resolves and caches each page.
+    fun withLocalFile(onReady: (File) -> Unit) {
+        val readyFile = currentLocalFile
+        if (readyFile != null) {
+            onReady(readyFile)
+            return
+        }
+        val cloudEntry = currentEntry as? ViewerEntry.Cloud ?: return
+        if (cloudAccountId == null || isPreparingAction) return
+        isPreparingAction = true
+        coroutineScope.launch {
+            val result = cloudMediaViewerViewModel.resolveMedia(cloudAccountId, cloudEntry.item, allowStreaming = false)
+            isPreparingAction = false
+            result.getOrNull()?.let { media ->
+                if (media is ResolvedMedia.LocalFile) {
+                    resolvedCloudMedia[cloudEntry.entryName] = ResolvedImageMedia.LocalFile(media.file)
+                    onReady(media.file)
+                }
+            }
+        }
+    }
 
     if (showDeleteConfirm && currentEntry != null) {
         AlertDialog(
@@ -240,17 +268,21 @@ fun ImageViewerScreen(
                     },
                     actions = {
                         IconButton(
-                            enabled = currentLocalFile != null,
+                            enabled = currentEntry != null && !isPreparingAction,
                             onClick = {
-                                currentLocalFile?.let { FileOpener.shareFiles(context, listOf(it.absolutePath)) }
+                                withLocalFile { file -> FileOpener.shareFiles(context, listOf(file.absolutePath)) }
                             }
                         ) {
-                            Icon(Icons.Default.Share, contentDescription = "Share", tint = TextPrimary)
+                            if (isPreparingAction) {
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp), color = TextPrimary, strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Default.Share, contentDescription = "Share", tint = TextPrimary)
+                            }
                         }
                         IconButton(
-                            enabled = currentLocalFile != null,
+                            enabled = currentEntry != null && !isPreparingAction,
                             onClick = {
-                                currentLocalFile?.let { file ->
+                                withLocalFile { file ->
                                     val item = FileItem(
                                         id = file.absolutePath,
                                         name = file.name,
@@ -485,6 +517,31 @@ fun VideoPlayerScreen(
     val coroutineScope = rememberCoroutineScope()
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var isDeleting by remember { mutableStateOf(false) }
+    var isPreparingAction by remember { mutableStateOf(false) }
+
+    // See ImageViewerScreen's matching comment — a streamed cloud video has no local file at all,
+    // which silently disabled Share/Open With with no way to use them. Force a real download on
+    // demand the first time either is tapped, reusing it for the rest of this viewing session.
+    fun withLocalFile(onReady: (File) -> Unit) {
+        val readyFile = currentLocalFile
+        if (readyFile != null) {
+            onReady(readyFile)
+            return
+        }
+        val cloudEntry = currentEntry as? ViewerEntry.Cloud ?: return
+        if (cloudAccountId == null || isPreparingAction) return
+        isPreparingAction = true
+        coroutineScope.launch {
+            val result = cloudMediaViewerViewModel.resolveMedia(cloudAccountId, cloudEntry.item, allowStreaming = false)
+            isPreparingAction = false
+            result.getOrNull()?.let { media ->
+                if (media is ResolvedMedia.LocalFile) {
+                    resolvedCloudMedia[cloudEntry.entryName] = ResolvedVideoMedia.LocalFile(media.file)
+                    onReady(media.file)
+                }
+            }
+        }
+    }
 
     if (showDeleteConfirm && currentEntry != null) {
         AlertDialog(
@@ -543,17 +600,21 @@ fun VideoPlayerScreen(
                 },
                 actions = {
                     IconButton(
-                        enabled = currentLocalFile != null,
+                        enabled = currentEntry != null && !isPreparingAction,
                         onClick = {
-                            currentLocalFile?.let { FileOpener.shareFiles(context, listOf(it.absolutePath)) }
+                            withLocalFile { file -> FileOpener.shareFiles(context, listOf(file.absolutePath)) }
                         }
                     ) {
-                        Icon(Icons.Default.Share, contentDescription = "Share", tint = TextPrimary)
+                        if (isPreparingAction) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), color = TextPrimary, strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.Share, contentDescription = "Share", tint = TextPrimary)
+                        }
                     }
                     IconButton(
-                        enabled = currentLocalFile != null,
+                        enabled = currentEntry != null && !isPreparingAction,
                         onClick = {
-                            currentLocalFile?.let { file ->
+                            withLocalFile { file ->
                                 val item = FileItem(
                                     id = file.absolutePath,
                                     name = file.name,

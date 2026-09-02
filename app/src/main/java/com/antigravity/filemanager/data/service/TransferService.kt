@@ -99,7 +99,7 @@ class TransferService : Service() {
                 .setContentTitle(getString(R.string.transfer_running_notification))
                 .setContentText(getString(R.string.transfer_running_notification_text))
         } else {
-            val verb = if (info.isUpload) "Uploading" else "Downloading"
+            val verb = info.operationLabel ?: if (info.isUpload) "Uploading" else "Downloading"
             val percent = if (info.totalBytes > 0) (info.bytesTransferred * 100 / info.totalBytes).toInt() else 0
             builder
                 .setContentTitle("$verb ${info.currentIndex}/${info.totalFiles} — $percent%")

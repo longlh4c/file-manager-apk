@@ -179,7 +179,8 @@ class FileBrowserViewModel @Inject constructor(
                             bytesTransferred = it.bytesTransferred,
                             totalBytes = it.totalBytes,
                             isIndeterminate = it.totalBytes <= 0,
-                            isUpload = it.isUpload
+                            isUpload = it.isUpload,
+                            operationLabel = it.operationLabel
                         )
                     },
                     transferCancelledByUser = if (info == null) false else _uiState.value.transferCancelledByUser

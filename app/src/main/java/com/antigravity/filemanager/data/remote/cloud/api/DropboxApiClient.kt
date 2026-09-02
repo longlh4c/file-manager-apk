@@ -453,7 +453,7 @@ class DropboxApiClient @Inject constructor() {
      * for the normal listing cache. Dropbox itself expires these automatically after ~30 days
      * (or per the account's own retention setting) — this only surfaces what Dropbox is still
      * holding right now, nothing this app controls. */
-    suspend fun listTrash(account: CloudAccount): Result<List<FileItem>> = withContext(Dispatchers.IO) {
+    suspend fun listTrash(account: CloudAccount, fullScan: Boolean = false): Result<List<FileItem>> = withContext(Dispatchers.IO) {
         try {
             val client = buildClient(account)
             val deleted = mutableListOf<DeletedMetadata>()
@@ -464,21 +464,26 @@ class DropboxApiClient @Inject constructor() {
                 }
             }
             collect(result.entries)
-            android.util.Log.d("DropboxApiClient", "listTrash: page 0 -> ${result.entries.size} entries, hasMore=${result.hasMore}")
+            android.util.Log.d("DropboxApiClient", "listTrash: page 0 -> ${result.entries.size} entries, hasMore=${result.hasMore}, fullScan=$fullScan")
             // Some Dropbox accounts genuinely have tens of thousands of deleted entries piled up
             // over years (one seen on-device hit 37,000+ and was still paging with hasMore=true) —
             // walking all of it isn't a bug, it's real data, but it made Trash take minutes to open
             // and burned a full page of metadata in memory per request the whole time. Capping at
-            // the most recent ~10k entries turns that into a handful of seconds while still easily
-            // covering "what did I just delete" — the actual reason anyone opens Trash.
+            // the most recent ~1k entries keeps a plain "open Trash" view to a couple requests.
+            // BUT Dropbox's list_folder doesn't order entries by deletion time at all, so the item
+            // someone just deleted can easily land past that cap — capping a SEARCH (fullScan=true,
+            // see CloudExplorerViewModel's recursive search) would make it silently miss the exact
+            // thing the user is looking for, which defeats the point of searching Trash at all.
             var page = 0
-            val maxDeletedEntries = 10_000
-            while (result.hasMore && deleted.size < maxDeletedEntries) {
+            val maxDeletedEntries = 1_000
+            while (result.hasMore && (fullScan || deleted.size < maxDeletedEntries)) {
                 currentCoroutineContext().ensureActive()
                 page++
+                val prevCursor = result.cursor
                 result = client.files().listFolderContinue(result.cursor)
                 collect(result.entries)
-                android.util.Log.d("DropboxApiClient", "listTrash: page $page -> ${result.entries.size} entries (total deleted=${deleted.size}), hasMore=${result.hasMore}")
+                val uniqueSoFar = deleted.distinctBy { it.pathDisplay ?: it.name }.size
+                android.util.Log.d("DropboxApiClient", "listTrash: page $page -> ${result.entries.size} entries (total deleted=${deleted.size}, unique=$uniqueSoFar), hasMore=${result.hasMore}, cursorChanged=${prevCursor != result.cursor}")
             }
             if (result.hasMore) {
                 android.util.Log.d("DropboxApiClient", "listTrash: stopped at ${deleted.size} entries (cap $maxDeletedEntries) — account has more, not fetching the rest")
@@ -535,15 +540,32 @@ class DropboxApiClient @Inject constructor() {
      * capability (Business/Team accounts with the right admin setting) — on a plain personal
      * account this call itself fails; there is no app-side workaround for that. */
     suspend fun permanentlyDelete(account: CloudAccount, path: String): Result<Unit> = withContext(Dispatchers.IO) {
-        try {
-            val client = buildClient(account)
-            val targetPath = if (path.startsWith("/")) path else "/$path"
-            client.files().permanentlyDelete(targetPath)
-            Result.success(Unit)
-        } catch (e: Exception) {
-            android.util.Log.e("DropboxApiClient", "permanentlyDelete failed for '$path': ${e.message}", e)
-            Result.failure(e)
+        val client = buildClient(account)
+        val targetPath = if (path.startsWith("/")) path else "/$path"
+        // Same rate-limit retry as uploadFile — permanently_delete gets hit especially hard by
+        // Empty Trash firing 8 of these in parallel (see deleteSelected's Semaphore(8)), and
+        // without a retry here almost every one of them came back RateLimitException instead of
+        // actually deleting anything: the item stayed in Trash with no clear reason why.
+        var attempt = 0
+        while (true) {
+            attempt++
+            try {
+                client.files().permanentlyDelete(targetPath)
+                return@withContext Result.success(Unit)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (e is com.dropbox.core.RateLimitException && attempt < 8) {
+                    val backoffMs = (e.backoffMillis).coerceIn(1000L, 30_000L)
+                    android.util.Log.d("DropboxApiClient", "permanentlyDelete: rate-limited for '$path', retrying in ${backoffMs}ms (attempt $attempt)")
+                    kotlinx.coroutines.delay(backoffMs)
+                    continue
+                }
+                android.util.Log.e("DropboxApiClient", "permanentlyDelete failed for '$path': ${e.message}", e)
+                return@withContext Result.failure(e)
+            }
         }
+        @Suppress("UNREACHABLE_CODE")
+        Result.failure(Exception("unreachable"))
     }
 
     /** Relocates an item to a different folder in the SAME account entirely server-side — no
