@@ -269,6 +269,14 @@ fun CloudExplorerScreen(
                         IconButton(onClick = { viewModel.setSearchActive(true) }) {
                             Icon(Icons.Default.Search, contentDescription = "Search", tint = TextPrimary)
                         }
+                        // Same "New Folder" placement as Local's FileManagerTopBar (Search, New
+                        // Folder, Sort/More) — hidden inside Trash/Rubbish Bin, where creating a
+                        // folder makes no sense (see the empty-state message right below it).
+                        if (!uiState.isInsideTrashView) {
+                            IconButton(onClick = { showCreateFolderDialog = true }) {
+                                Icon(Icons.Default.CreateNewFolder, contentDescription = "New Folder", tint = TextPrimary)
+                            }
+                        }
                         IconButton(onClick = { showSortMenu = true }) {
                             Icon(Icons.Default.MoreVert, contentDescription = "More options", tint = TextPrimary)
                         }
@@ -592,20 +600,6 @@ fun CloudExplorerScreen(
                                 fontSize = 16.sp,
                                 textAlign = TextAlign.Center
                             )
-                            // Creating a folder inside Trash/Rubbish Bin makes no sense — it's not
-                            // a real destination, just a flat view of deleted items.
-                            if (!uiState.isInsideTrashView) {
-                                Spacer(modifier = Modifier.height(20.dp))
-                                Button(
-                                    onClick = { showCreateFolderDialog = true },
-                                    colors = ButtonDefaults.buttonColors(containerColor = TealPrimary, contentColor = Color.Black),
-                                    shape = RoundedCornerShape(8.dp)
-                                ) {
-                                    Icon(Icons.Default.CreateNewFolder, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("+ CREATE NEW FOLDER", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                }
-                            }
                         }
                     }
                 } else {
@@ -621,7 +615,19 @@ fun CloudExplorerScreen(
                                 isSelected = uiState.selectedPaths.contains(file.id),
                                 isSelectionMode = uiState.isSelectionMode,
                                 onClick = {
-                                    if (uiState.isSelectionMode) {
+                                    // Dropbox's Trash is built from DeletedMetadata, which carries
+                                    // no file/folder type at all (see DropboxApiClient.listTrash) —
+                                    // every entry gets marked isDirectory=false regardless of what
+                                    // it really was, and none of them are downloadable content
+                                    // (deleted items aren't retrievable via the normal file-content
+                                    // API). Tapping one used to always try to "open" it as a file,
+                                    // failing with a confusing "not found" for what could easily be
+                                    // a deleted folder. MEGA's Rubbish Bin and Google Drive's Trash
+                                    // are real listings with accurate types/IDs and stay tap-to-open
+                                    // as normal.
+                                    val isUnopenableDropboxTrash = uiState.isInsideTrashView &&
+                                        uiState.account?.provider == com.antigravity.filemanager.domain.model.CloudProvider.DROPBOX
+                                    if (uiState.isSelectionMode || isUnopenableDropboxTrash) {
                                         viewModel.toggleSelection(file.id)
                                     } else {
                                         if (file.isDirectory) {

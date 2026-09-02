@@ -31,33 +31,6 @@ class CloudManager @Inject constructor(
     private val sessionNodesCache = ConcurrentHashMap<String, Pair<String, List<MegaNode>>>()
     private val masterKeyCache = ConcurrentHashMap<String, String>()
 
-    private data class RootResolution(val resolvedRootId: String, val candidateRoots: List<String>)
-    // Keyed by accountId, validated by reference-equality against the `allNodes` list it was computed
-    // from. Every mutation to sessionNodesCache builds a genuinely new list, so this self-invalidates
-    // without needing to be cleared explicitly wherever the node list changes.
-    private val rootResolutionCache = ConcurrentHashMap<String, Pair<List<MegaNode>, RootResolution>>()
-
-    /** Root-parent resolution only depends on `allNodes`/`rootId`, not on the folder being viewed —
-     * memoize it instead of recomputing three linear scans over the whole node list on every navigation. */
-    private fun resolveRoot(accountId: String, allNodes: List<MegaNode>, rootId: String): RootResolution {
-        rootResolutionCache[accountId]?.let { (cachedNodes, cachedResult) ->
-            if (cachedNodes === allNodes) return cachedResult
-        }
-        val allNodeIds = allNodes.map { it.id }.toSet()
-        val candidateRoots = allNodes.map { it.p }.filter { it.isNotBlank() && !allNodeIds.contains(it) }.distinct()
-        val resolvedRootId = if (rootId.isNotBlank() && candidateRoots.contains(rootId)) {
-            rootId
-        } else {
-            candidateRoots.find { parentId ->
-                val children = allNodes.filter { it.p == parentId }
-                children.any { it.name != "SyncDebris" && it.name != "Rubbish" && it.name != "Trash" && it.isDir }
-            } ?: candidateRoots.maxByOrNull { parentId -> allNodes.count { it.p == parentId && it.isDir } } ?: ""
-        }
-        val result = RootResolution(resolvedRootId, candidateRoots)
-        rootResolutionCache[accountId] = allNodes to result
-        return result
-    }
-
     data class MegaNode(
         val id: String,
         val p: String,
@@ -69,6 +42,7 @@ class CloudManager @Inject constructor(
         val k: String = ""
     )
 
+    //region Account storage & session payload
     fun getAccountStorageDir(accountId: String, relativePath: String = ""): File {
         val baseDir = File(context.filesDir, "cloud_accounts/$accountId")
         if (!baseDir.exists()) {
@@ -110,7 +84,6 @@ class CloudManager @Inject constructor(
         // life of the process (this manager is a singleton) even after the account is removed.
         sessionNodesCache.remove(accountId)
         masterKeyCache.remove(accountId)
-        rootResolutionCache.remove(accountId)
         try {
             val file = File(context.filesDir, "cloud_sessions/$accountId.json")
             if (file.exists()) file.delete()
@@ -149,6 +122,9 @@ class CloudManager @Inject constructor(
     // populates a session payload anymore and the check was permanently a no-op — but it was a
     // live landmine: it would have silently served stale/wrong listings again the moment anything
     // ever wrote to that cache. Removed so this function has exactly one source of truth per call.
+    //endregion
+
+    //region Listing
     suspend fun listCloudFiles(account: CloudAccount, remotePath: String, forceFullRefresh: Boolean = false): Result<List<FileItem>> = withContext(Dispatchers.IO) {
         try {
             // 1. Try remote API if valid token/session exists
@@ -204,60 +180,42 @@ class CloudManager @Inject constructor(
                     }
                 }
                 CloudProvider.DROPBOX -> {
-                    if (remotePath == "/Trash" || remotePath.startsWith("/Trash/")) {
-                        // Dropbox has no distinct trash location the way MEGA/Drive do — every
-                        // deleted item is found by walking the WHOLE account with
-                        // includeDeleted=true (see listTrash), so "/Trash" and any path nested
-                        // under it all resolve to that same flat account-wide list; there's no
-                        // real subfolder structure to descend into here.
-                        dropboxApi.listTrash(account)
+                    // The virtual "Trash" entry (and the special "/Trash" path branch that used to
+                    // sit here calling dropboxApi.listTrash) was removed by request — Dropbox has
+                    // no real trash/recycle-bin API (list_folder's include_deleted returns every
+                    // item ever deleted since account creation, not the ~30-day-recoverable set the
+                    // web "Deleted files" page shows — see the extensive investigation this came
+                    // from), so it could only ever show a wildly inaccurate, unfilterable list
+                    // (tens of thousands of long-expired entries next to genuinely recent ones,
+                    // with no deletion date available to tell them apart). dropboxApi.listTrash/
+                    // restoreFile/permanentlyDelete are left in place, unused, rather than deleted
+                    // outright, in case a real trash API becomes available later.
+                    val path = if (remotePath == "/" || remotePath.isBlank()) "" else remotePath
+                    if (forceFullRefresh) {
+                        dropboxApi.invalidateTree(account.id)
+                    }
+                    // Always build/reuse the cached whole-account tree, same as MEGA — now that
+                    // the tree cache never expires on its own (only an explicit invalidateTree()
+                    // from a manual root refresh or a mutation drops it), paying for one full
+                    // recursive fetch is worth it: every navigation after that (including the
+                    // "copy/move to Dropbox" destination picker, and revisiting a folder right
+                    // after a transfer) is served from memory instead of a fresh network call
+                    // that looked like the folder was "reloading" every time.
+                    val result = dropboxApi.listFolderCached(account, path, allowFullTreeFetch = true)
+                    if (result.isSuccess) {
+                        val list = result.getOrNull() ?: emptyList()
+                        list.forEach { item ->
+                            val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
+                            folderIdCache[itemDisplayPath] = item.id
+                            folderIdCache[item.id] = item.id
+                            folderIdCache[item.name] = item.id
+                        }
+                        Result.success(list.map { item ->
+                            val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
+                            item.copy(path = itemDisplayPath, folderBadgeType = if (item.isDirectory) detectFolderBadge(item.name) else FolderBadgeType.STANDARD)
+                        })
                     } else {
-                        val path = if (remotePath == "/" || remotePath.isBlank()) "" else remotePath
-                        if (forceFullRefresh) {
-                            dropboxApi.invalidateTree(account.id)
-                        }
-                        // Always build/reuse the cached whole-account tree, same as MEGA — now that
-                        // the tree cache never expires on its own (only an explicit invalidateTree()
-                        // from a manual root refresh or a mutation drops it), paying for one full
-                        // recursive fetch is worth it: every navigation after that (including the
-                        // "copy/move to Dropbox" destination picker, and revisiting a folder right
-                        // after a transfer) is served from memory instead of a fresh network call
-                        // that looked like the folder was "reloading" every time.
-                        val result = dropboxApi.listFolderCached(account, path, allowFullTreeFetch = true)
-                        if (result.isSuccess) {
-                            val list = result.getOrNull() ?: emptyList()
-                            list.forEach { item ->
-                                val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
-                                folderIdCache[itemDisplayPath] = item.id
-                                folderIdCache[item.id] = item.id
-                                folderIdCache[item.name] = item.id
-                            }
-                            val withTrash = if (remotePath == "/" || remotePath.isBlank()) {
-                                // A pinned virtual folder, same treatment as MEGA's Rubbish Bin —
-                                // not part of the real Dropbox tree, so it's appended here rather
-                                // than coming back from listFolderCached itself.
-                                list + FileItem(
-                                    id = "__trash__",
-                                    name = "Trash",
-                                    path = "/Trash",
-                                    isDirectory = true,
-                                    folderBadgeType = FolderBadgeType.TRASH
-                                ).also {
-                                    folderIdCache["/Trash"] = "__trash__"
-                                    folderIdCache["Trash"] = "__trash__"
-                                    folderIdCache["__trash__"] = "__trash__"
-                                }
-                            } else {
-                                list
-                            }
-                            Result.success(withTrash.map { item ->
-                                if (item.id == "__trash__") return@map item
-                                val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
-                                item.copy(path = itemDisplayPath, folderBadgeType = if (item.isDirectory) detectFolderBadge(item.name) else FolderBadgeType.STANDARD)
-                            })
-                        } else {
-                            result
-                        }
+                        result
                     }
                 }
                 CloudProvider.MEGA -> {
@@ -345,142 +303,12 @@ class CloudManager @Inject constructor(
         }
     }
 
-    fun parseSessionNodes(account: CloudAccount, remotePath: String): List<FileItem>? {
-        val cachedEntry = sessionNodesCache[account.id]
-        val (allNodes, rootId) = if (cachedEntry != null) {
-            Pair(cachedEntry.second, cachedEntry.first)
-        } else {
-            val sessionStr = getSessionPayload(account.id, account.sessionHandle)
-            if (!sessionStr.contains("\"folders\":") && !sessionStr.contains("\"files\":")) {
-                return null
-            }
-            try {
-                val json = org.json.JSONObject(sessionStr)
-                val mKey = json.optString("masterKey", "")
-                if (mKey.isNotBlank()) {
-                    masterKeyCache[account.id] = mKey
-                }
-                val arr = json.optJSONArray("folders") ?: json.optJSONArray("files") ?: org.json.JSONArray()
-                val rId = json.optString("rootId")
-                
-                val parsedNodes = mutableListOf<MegaNode>()
-                val gJunk = setOf(
-                    "Close", "Cancel", "Search", "Shared with me", "Chia sẻ với tôi", 
-                    "Shared Google Drive", "Shared drives", "Bộ nhớ dùng chung",
-                    "Computers", "Máy tính", "Starred", "Có gắn dấu sao", 
-                    "Trash", "Thùng rác", "Storage", "Bộ nhớ lưu trữ", 
-                    "Get Drive for desktop", "Tải Drive cho máy tính", "New", "Mới", 
-                    "Priority", "Ưu tiên", "Recent", "Gần đây", "Home", "Trang chủ", 
-                    "My Drive", "Drive của tôi", "Activity", "Hoạt động", "Spam", "Thư rác", 
-                    "Google Drive", "Sign in", "Đăng nhập", "Loading", "Đang tải", 
-                    "Loading...", "Đang tải...", "Close overlay", "Details", "Chi tiết", 
-                    "Đóng lớp phủ", "Open", "Mở", "Offline", "Ngoại tuyến",
-                    "More options", "Open side menu", "Tùy chọn khác",
-                    "Mở menu bên", "Search in Drive", "Tìm kiếm trong Drive"
-                )
-
-                for (i in 0 until arr.length()) {
-                    val obj = arr.getJSONObject(i)
-                    val id = obj.optString("id")
-                    val p = obj.optString("p", obj.optString("parent"))
-                    val rawName = obj.optString("name")
-                    val cleanName = rawName
-                        .replace(Regex("^(Folder|Thư mục)\\s*[:\\-]?\\s*", RegexOption.IGNORE_CASE), "")
-                        .replace(Regex("\\s*[:\\-]?\\s*(Folder|Thư mục)$", RegexOption.IGNORE_CASE), "")
-                        .trim()
-                    val isDir = obj.optBoolean("isDir", true)
-                    val size = obj.optLong("size", 0L)
-                    val ts = obj.optLong("ts", 0L)
-                    val t = obj.optInt("t", if (isDir) 1 else 0)
-                    val k = obj.optString("k", "")
-                    if (k.isNotBlank()) {
-                        nodeKeyCache[id] = k
-                        nodeKeyCache[cleanName] = k
-                        nodeKeyCache["/$cleanName"] = k
-                    }
-                    if (id.isNotBlank() && cleanName.isNotBlank() && !gJunk.contains(cleanName) && !cleanName.startsWith("Switch from", ignoreCase = true) && !cleanName.startsWith("Chuyển sang", ignoreCase = true)) {
-                        folderIdCache[id] = id
-                        folderIdCache[cleanName] = id
-                        folderIdCache[rawName] = id
-                        folderIdCache["/$cleanName"] = id
-                        parsedNodes.add(MegaNode(id, p, cleanName, isDir, size, ts, t, k))
-                    }
-                }
-                sessionNodesCache[account.id] = Pair(rId, parsedNodes)
-                Pair(parsedNodes, rId)
-            } catch (e: Exception) {
-                return null
-            }
-        }
-        
-        if (allNodes.isEmpty()) return null
-
-            // Root-parent resolution is independent of remotePath and unchanged until allNodes
-            // itself changes, so it's memoized instead of rescanned on every navigation.
-            val rootResolution = resolveRoot(account.id, allNodes, rootId)
-            val candidateRoots = rootResolution.candidateRoots
-            val resolvedRootId = rootResolution.resolvedRootId
-
-            // Determine current parent ID based on remotePath
-            val currentParentId = if (remotePath == "/" || remotePath.isBlank() || remotePath == "root") {
-                resolvedRootId
-            } else {
-                folderIdCache[remotePath] ?: run {
-                    val segments = remotePath.split("/").filter { it.isNotBlank() }
-                    var currParent = resolvedRootId
-                    for (seg in segments) {
-                        val matchingNode = allNodes.find { (it.p == currParent || currParent.isBlank()) && it.name.equals(seg, ignoreCase = true) && it.isDir }
-                            ?: allNodes.find { it.name.equals(seg, ignoreCase = true) && it.isDir }
-                        if (matchingNode != null) {
-                            currParent = matchingNode.id
-                        }
-                    }
-                    currParent
-                }
-            }
-
-            val visibleNodes = if (currentParentId.isNotBlank()) {
-                allNodes.filter { it.p == currentParentId }
-            } else {
-                val candidate = candidateRoots.find { parentId ->
-                    val children = allNodes.filter { it.p == parentId }
-                    children.any { it.name != "SyncDebris" && it.name != "Rubbish" && it.name != "Trash" && it.isDir }
-                }
-                if (candidate != null) allNodes.filter { it.p == candidate } else allNodes.filter { it.p == "root" || it.p.isBlank() }
-            }
-
-            return visibleNodes.map { node ->
-                val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${node.name}" else "${remotePath.trimEnd('/')}/${node.name}"
-                folderIdCache[itemDisplayPath] = node.id
-                folderIdCache[node.id] = node.id
-                folderIdCache[node.name] = node.id
-                if (node.k.isNotBlank()) {
-                    nodeKeyCache[itemDisplayPath] = node.k
-                    nodeKeyCache[node.id] = node.k
-                    nodeKeyCache[node.name] = node.k
-                }
-                val subItemCount = if (node.isDir) {
-                    allNodes.count { it.p == node.id }
-                } else 0
-
-                val localFile = File(getAccountStorageDir(account.id), itemDisplayPath.trimStart('/'))
-                val cacheFile = File(File(context.cacheDir, "cloud_downloads/${account.id}"), node.name)
-                val thumbUri = if (localFile.exists()) localFile.absolutePath else if (cacheFile.exists() && cacheFile.length() > 0) cacheFile.absolutePath else null
-
-                FileItem(
-                    id = node.id,
-                    name = node.name,
-                    path = itemDisplayPath,
-                    size = node.size,
-                    lastModified = if (node.ts > 0) (if (node.ts > 1000000000000L) node.ts else node.ts * 1000L) else System.currentTimeMillis(),
-                    isDirectory = node.isDir,
-                    itemCount = subItemCount,
-                    extension = if (!node.isDir) node.name.substringAfterLast('.', "") else "",
-                    thumbnailUri = thumbUri,
-                    folderBadgeType = if (node.isDir) detectFolderBadge(node.name) else FolderBadgeType.STANDARD
-                )
-            }.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase(Locale.getDefault()) }))
-    }
+    // parseSessionNodes() (WebView-DOM-scrape session-payload parsing, dead since every provider
+    // switched to a real API client — see the comment on listCloudFiles above) was removed here,
+    // along with its only callers (resolveRoot/RootResolution/rootResolutionCache). sessionNodesCache
+    // and nodeKeyCache stay: downloadFile()'s MEGA branch still reads them as an (always-empty,
+    // now that nothing populates them) best-effort lookup ahead of its real handle/key resolution —
+    // removing those two fields is a separate, riskier change than deleting this dead function.
 
     fun detectFolderBadge(folderName: String): FolderBadgeType {
         val lower = folderName.lowercase(Locale.getDefault())
@@ -493,7 +321,9 @@ class CloudManager @Inject constructor(
             else -> FolderBadgeType.STANDARD
         }
     }
+    //endregion
 
+    //region Quota, thumbnails & streaming
     suspend fun getAccountQuota(account: CloudAccount): Result<Pair<Long, Long>> = withContext(Dispatchers.IO) {
         // 1. Try querying cloud API client
         try {
@@ -654,7 +484,9 @@ class CloudManager @Inject constructor(
                 CloudProvider.MEGA -> Result.failure(Exception("Streaming not supported for ${account.provider}"))
             }
         }
+    //endregion
 
+    //region Transfer (download / upload)
     suspend fun downloadFile(
         account: CloudAccount,
         remotePath: String,
@@ -924,7 +756,9 @@ class CloudManager @Inject constructor(
             Result.failure(e)
         }
     }
+    //endregion
 
+    //region Folder & item mutations (create / delete / restore / rename / move)
     suspend fun createFolder(account: CloudAccount, folderName: String, parentPath: String): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
             val parentFolder = getAccountStorageDir(account.id, parentPath)
@@ -1397,4 +1231,5 @@ class CloudManager @Inject constructor(
             Result.failure(e)
         }
     }
+    //endregion
 }

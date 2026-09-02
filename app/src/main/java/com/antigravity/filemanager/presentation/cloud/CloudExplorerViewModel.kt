@@ -192,7 +192,8 @@ class CloudExplorerViewModel @Inject constructor(
                             bytesTransferred = it.bytesTransferred,
                             totalBytes = it.totalBytes,
                             isIndeterminate = it.totalBytes <= 0,
-                            isUpload = it.isUpload
+                            isUpload = it.isUpload,
+                            operationLabel = it.operationLabel
                         )
                     },
                     // A fresh info==null means the whole operation truly ended (TransferGuard.end()
@@ -776,6 +777,22 @@ class CloudExplorerViewModel @Inject constructor(
                 operationLabel = operationLabel
             )
         )
+        // Mirrors into the same TransferGuard the persistent notification (TransferService) reads
+        // from — every operation that shows the in-app progress dialog now also keeps that
+        // notification current, instead of only paste()'s upload/download legs doing so (delete/
+        // restore used to update this in-app dialog with no persistent notification at all,
+        // unlike copy/move, since nothing here fed TransferGuard).
+        transferGuard.updateProgress(
+            com.antigravity.filemanager.data.service.TransferProgressInfo(
+                currentFileName = currentFileName,
+                currentIndex = currentIndex,
+                totalFiles = totalFiles,
+                bytesTransferred = bytesTransferred,
+                totalBytes = totalBytes,
+                isUpload = isUpload,
+                operationLabel = operationLabel
+            )
+        )
     }
 
     fun cancelTransfer() {
@@ -1008,7 +1025,14 @@ class CloudExplorerViewModel @Inject constructor(
                 // walk() to get a permit that only a *sibling* blocked parent was holding, and
                 // nothing could ever finish. Limiting only the leaf network call still bounds
                 // concurrent requests to 4 without that risk.
-                val listResult = semaphore.withPermit { cloudUseCase.getFiles(accountId, path) }
+                // Dropbox's Trash listing is capped to the most-recent ~1k entries by default for
+                // a fast plain "open Trash" (see DropboxApiClient.listTrash) — Dropbox doesn't
+                // return them in deletion order at all, so a search that respected that cap could
+                // silently miss the very item being searched for. forceFullRefresh=true here tells
+                // CloudManager's Trash branch to do the complete (uncapped) scan instead, only for
+                // this one search call.
+                val isDropboxTrash = path == "/Trash" || path.startsWith("/Trash/")
+                val listResult = semaphore.withPermit { cloudUseCase.getFiles(accountId, path, forceFullRefresh = isDropboxTrash) }
                 val children = listResult.getOrDefault(emptyList())
                 val matches = children.filter { it.id != "__trash__" && it.name.contains(query, ignoreCase = true) }
                 if (matches.isNotEmpty()) {
@@ -1134,6 +1158,12 @@ class CloudExplorerViewModel @Inject constructor(
         // every in-flight worker happened to finish. Now Cancel actually stops the coroutine tree.
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
+            // Same foreground-service reference counting copy/move already gets for free from
+            // CloudStorageUseCase.uploadFiles/downloadFile — delete/restore called cloudUseCase
+            // directly and never touched TransferGuard at all, so backgrounding the app mid-delete
+            // (or just not watching the screen) showed no persistent notification the way a
+            // copy/move in progress does.
+            transferGuard.begin()
             try {
             val selectedIds = _uiState.value.selectedPaths
             // selectedPaths actually holds item IDs now (see toggleSelection) — resolve back to
@@ -1142,12 +1172,6 @@ class CloudExplorerViewModel @Inject constructor(
             // Resolved against visibleFiles(), not just `files` — a selection can come from
             // recursive search results that were never part of the current folder's own listing.
             val toDelete = visibleFiles().filter { it.path in selectedIds || it.id in selectedIds }
-            val remainingFiles = _uiState.value.files.filterNot { it.path in selectedIds || it.id in selectedIds }
-            // A selection resolved from recursive search results isn't necessarily in `files` at
-            // all (it can live in a completely different subfolder) — deleting it there did work,
-            // but without this the stale entry stayed visible in searchResults, making it look
-            // like the delete silently did nothing.
-            val remainingSearchResults = _uiState.value.searchResults.filterNot { it.path in selectedIds || it.id in selectedIds }
             _uiState.value = _uiState.value.copy(
                 showDeleteDialog = false,
                 selectedPaths = emptySet(),
@@ -1161,6 +1185,13 @@ class CloudExplorerViewModel @Inject constructor(
             // moves so a big delete doesn't look stuck.
             val failuresCounter = java.util.concurrent.atomic.AtomicInteger(0)
             val completedCounter = java.util.concurrent.atomic.AtomicInteger(0)
+            // Paths that genuinely failed server-side (e.g. Dropbox's permanently_delete rejecting
+            // a personal, non-Business account with a 400) — only these stay visible afterward.
+            // Removing every selected item from the list up front regardless of outcome, then
+            // refresh() re-fetching the ones that were never actually deleted, was exactly what
+            // made a failed delete look like it worked for a moment and then "came back".
+            val failedPaths = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+            var sawPermissionError = false
             setTransferProgress(currentFileName = "", currentIndex = 0, totalFiles = toDelete.size, isUpload = false, operationLabel = "Deleting")
 
             // Which items resolve to a real "permanent delete" once the per-item trash-location
@@ -1181,7 +1212,12 @@ class CloudExplorerViewModel @Inject constructor(
                 // bounded-parallel per-item loop (Dropbox/Drive have no equivalent batch endpoint
                 // wired up yet, and a "move to trash" is a different MEGA command anyway).
                 val batchResults = cloudUseCase.deletePermanentlyBatchMega(accountId, megaBatch.map { it.path })
-                batchResults.values.forEach { if (it.isFailure) failuresCounter.incrementAndGet() }
+                batchResults.forEach { (path, result) ->
+                    if (result.isFailure) {
+                        failuresCounter.incrementAndGet()
+                        failedPaths.add(path)
+                    }
+                }
                 completedCounter.addAndGet(megaBatch.size)
                 setTransferProgress(currentFileName = "", currentIndex = completedCounter.get(), totalFiles = toDelete.size, isUpload = false, operationLabel = "Deleting")
             }
@@ -1201,7 +1237,19 @@ class CloudExplorerViewModel @Inject constructor(
                             // moveToTrash=true for it again is at best a no-op and at worst a
                             // silent failure.
                             val result = cloudUseCase.deleteItem(accountId, item.path, effectiveMoveToTrash(item))
-                            if (result.isFailure) failuresCounter.incrementAndGet()
+                            if (result.isFailure) {
+                                failuresCounter.incrementAndGet()
+                                failedPaths.add(item.path)
+                                // Dropbox's permanently_delete is Business/Team-only — a personal
+                                // account gets a 400 with this exact scope message for every single
+                                // item, which is worth surfacing plainly instead of a generic
+                                // "N item(s) could not be deleted" that leaves the user guessing
+                                // why (and re-trying, which will just fail the same way again).
+                                val msg = result.exceptionOrNull()?.message ?: ""
+                                if (msg.contains("files.permanent_delete") || msg.contains("not permitted to access this endpoint")) {
+                                    sawPermissionError = true
+                                }
+                            }
                             val done = completedCounter.incrementAndGet()
                             setTransferProgress(currentFileName = item.name, currentIndex = done, totalFiles = toDelete.size, isUpload = false, operationLabel = "Deleting")
                         }
@@ -1209,19 +1257,27 @@ class CloudExplorerViewModel @Inject constructor(
                 }
             }
             val anyFailed = failuresCounter.get() > 0
-            // Only apply the optimistic removal once the real outcome is known — clearing these
-            // unconditionally beforehand made a failed delete look like it succeeded (item vanished
-            // from the list) when nothing actually happened server-side.
+            // Only remove items that were actually confirmed deleted server-side — an item whose
+            // API call failed (still in failedPaths) stays right where it was instead of vanishing
+            // and then reappearing once refresh() below finds it's still really there.
+            val remainingFiles = _uiState.value.files.filterNot { (it.path in selectedIds || it.id in selectedIds) && it.path !in failedPaths }
+            val remainingSearchResults = _uiState.value.searchResults.filterNot { (it.path in selectedIds || it.id in selectedIds) && it.path !in failedPaths }
             _uiState.value = _uiState.value.copy(
                 isLoading = true,
                 downloadProgress = null,
                 files = remainingFiles,
                 searchResults = remainingSearchResults,
-                toastMessage = if (anyFailed) "${failuresCounter.get()} item(s) could not be deleted" else _uiState.value.toastMessage
+                toastMessage = when {
+                    sawPermissionError -> "Dropbox denied permanent delete — this requires a Business/Team account"
+                    anyFailed -> "${failuresCounter.get()} item(s) could not be deleted"
+                    else -> _uiState.value.toastMessage
+                }
             )
             refresh()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 _uiState.value = _uiState.value.copy(downloadProgress = null, isLoading = false, toastMessage = "Cancelled")
+            } finally {
+                transferGuard.end()
             }
         }
     }
@@ -1234,19 +1290,23 @@ class CloudExplorerViewModel @Inject constructor(
     fun restoreSelected() {
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
+            // See the matching comment in deleteSelected — restore never touched TransferGuard
+            // either, so it showed no persistent notification the way copy/move does.
+            transferGuard.begin()
             try {
             val selectedIds = _uiState.value.selectedPaths
             val toRestore = visibleFiles().filter { it.path in selectedIds || it.id in selectedIds }
             val remainingFiles = _uiState.value.files.filterNot { it.path in selectedIds || it.id in selectedIds }
             val remainingSearchResults = _uiState.value.searchResults.filterNot { it.path in selectedIds || it.id in selectedIds }
             _uiState.value = _uiState.value.copy(
-                isLoading = true,
                 files = remainingFiles,
                 searchResults = remainingSearchResults,
                 selectedPaths = emptySet(),
                 isSelectionMode = false
             )
+            setTransferProgress(currentFileName = "", currentIndex = 0, totalFiles = toRestore.size, isUpload = true, operationLabel = "Restoring")
             // Same sequential-is-too-slow-for-a-big-selection fix as deleteSelected above.
+            val restoreCompleted = java.util.concurrent.atomic.AtomicInteger(0)
             val restoreSemaphore = kotlinx.coroutines.sync.Semaphore(8)
             kotlinx.coroutines.coroutineScope {
                 toRestore.forEach { item ->
@@ -1254,13 +1314,18 @@ class CloudExplorerViewModel @Inject constructor(
                         restoreSemaphore.withPermit {
                             kotlinx.coroutines.currentCoroutineContext().ensureActive()
                             cloudUseCase.restoreItem(accountId, item.path)
+                            val done = restoreCompleted.incrementAndGet()
+                            setTransferProgress(currentFileName = item.name, currentIndex = done, totalFiles = toRestore.size, isUpload = true, operationLabel = "Restoring")
                         }
                     }
                 }
             }
+            _uiState.value = _uiState.value.copy(isLoading = true, downloadProgress = null)
             refresh()
             } catch (e: kotlinx.coroutines.CancellationException) {
-                _uiState.value = _uiState.value.copy(isLoading = false, toastMessage = "Cancelled")
+                _uiState.value = _uiState.value.copy(downloadProgress = null, isLoading = false, toastMessage = "Cancelled")
+            } finally {
+                transferGuard.end()
             }
         }
     }
@@ -1295,16 +1360,6 @@ class CloudExplorerViewModel @Inject constructor(
                     ) { currentFile, currentIndex, totalFiles, bytesSent, totalBytes ->
                         if (uploadThrottler.shouldEmit(bytesSent, totalBytes)) {
                             setTransferProgress(currentFileName = currentFile, currentIndex = currentIndex, totalFiles = totalFiles, isUpload = true, bytesTransferred = bytesSent, totalBytes = totalBytes)
-                            transferGuard.updateProgress(
-                                com.antigravity.filemanager.data.service.TransferProgressInfo(
-                                    currentFileName = currentFile,
-                                    currentIndex = currentIndex,
-                                    totalFiles = totalFiles,
-                                    bytesTransferred = bytesSent,
-                                    totalBytes = totalBytes,
-                                    isUpload = true
-                                )
-                            )
                         }
                     }
                     _uiState.value = _uiState.value.copy(downloadProgress = null)
@@ -1455,16 +1510,6 @@ class CloudExplorerViewModel @Inject constructor(
                                     val dlResult = cloudUseCase.downloadFile(sourceCloudAccountId, remotePath, entryDir.absolutePath) { bytesRead, totalBytes ->
                                         if (downloadThrottler.shouldEmit(bytesRead, totalBytes)) {
                                             setTransferProgress(currentFileName = File(remotePath).name, currentIndex = completedCounter.get() + 1, totalFiles = totalCount, isUpload = false, bytesTransferred = bytesRead, totalBytes = totalBytes)
-                                            transferGuard.updateProgress(
-                                                com.antigravity.filemanager.data.service.TransferProgressInfo(
-                                                    currentFileName = File(remotePath).name,
-                                                    currentIndex = completedCounter.get() + 1,
-                                                    totalFiles = totalCount,
-                                                    bytesTransferred = bytesRead,
-                                                    totalBytes = totalBytes,
-                                                    isUpload = false
-                                                )
-                                            )
                                         }
                                     }
                                     val localFile = dlResult.getOrNull()
@@ -1493,16 +1538,6 @@ class CloudExplorerViewModel @Inject constructor(
                                         ) { currentFile, _, _, bytesSent, totalBytes ->
                                           if (uploadThrottler.shouldEmit(bytesSent, totalBytes)) {
                                             setTransferProgress(currentFileName = currentFile, currentIndex = completedCounter.get() + 1, totalFiles = totalCount, isUpload = true, bytesTransferred = bytesSent, totalBytes = totalBytes)
-                                            transferGuard.updateProgress(
-                                                com.antigravity.filemanager.data.service.TransferProgressInfo(
-                                                    currentFileName = currentFile,
-                                                    currentIndex = completedCounter.get() + 1,
-                                                    totalFiles = totalCount,
-                                                    bytesTransferred = bytesSent,
-                                                    totalBytes = totalBytes,
-                                                    isUpload = true
-                                                )
-                                            )
                                           }
                                         }
                                         entryDir.deleteRecursively()

@@ -27,7 +27,12 @@ data class TransferProgressInfo(
     val totalFiles: Int,
     val bytesTransferred: Long,
     val totalBytes: Long,
-    val isUpload: Boolean
+    val isUpload: Boolean,
+    // Same override as CloudTransferProgress.operationLabel — a non-upload/download operation
+    // (Deleting, Restoring, Moving...) that still reuses this notification/progress plumbing sets
+    // this so the notification text says what's actually happening instead of defaulting to the
+    // generic "Uploading"/"Downloading" derived from `isUpload` alone.
+    val operationLabel: String? = null
 )
 
 /**

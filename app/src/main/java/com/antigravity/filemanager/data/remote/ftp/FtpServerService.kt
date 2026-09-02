@@ -80,7 +80,7 @@ class FtpServerService : Service() {
     private fun startServer(port: Int, pass: String, random: Boolean, showHidden: Boolean) {
         serviceScope.launch {
             val ip = getLocalIpAddress()
-            val success = ftpServer.start(port, pass, showHidden)
+            val success = ftpServer.start(port, pass, showHidden, externalIpAddress = ip)
             if (success) {
                 wakeLock?.acquire(24 * 60 * 60 * 1000L) // 24h max
                 screenWakeLock?.acquire(24 * 60 * 60 * 1000L) // keep screen from timing out while FTP is on
