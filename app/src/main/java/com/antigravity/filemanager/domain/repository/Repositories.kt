@@ -64,10 +64,16 @@ interface IFileRepository {
 interface IRecycleBinRepository {
     fun observeTrashItems(): Flow<List<TrashItem>>
     suspend fun getTrashItems(): List<TrashItem>
-    suspend fun moveToTrash(filePaths: List<String>): Result<Int>
+    suspend fun moveToTrash(
+        filePaths: List<String>,
+        onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null
+    ): Result<Int>
     suspend fun restoreFromTrash(trashIds: List<Long>): Result<Int>
-    suspend fun deletePermanently(trashIds: List<Long>): Result<Int>
-    suspend fun emptyTrash(): Result<Unit>
+    suspend fun deletePermanently(
+        trashIds: List<Long>,
+        onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null
+    ): Result<Int>
+    suspend fun emptyTrash(onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null): Result<Unit>
     suspend fun getTrashTotalSize(): Long
 }
 

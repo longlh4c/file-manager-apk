@@ -19,6 +19,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.antigravity.filemanager.presentation.components.CloudDownloadProgressDialog
 import com.antigravity.filemanager.presentation.components.FileManagerTopBar
 import com.antigravity.filemanager.presentation.theme.*
 
@@ -46,6 +47,10 @@ fun RecycleBinScreen(
             },
             containerColor = DarkCard
         )
+    }
+
+    if (uiState.deleteProgress != null) {
+        CloudDownloadProgressDialog(progress = uiState.deleteProgress!!)
     }
 
     Scaffold(

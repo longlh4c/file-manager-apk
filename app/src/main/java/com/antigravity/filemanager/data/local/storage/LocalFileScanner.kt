@@ -13,6 +13,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.security.MessageDigest
 import java.util.*
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -158,6 +159,11 @@ class LocalFileScanner @Inject constructor(
         sortMediaFolders(list, sortOption)
     }
 
+    // Files past this size are skipped for duplicate hashing (still counted everywhere else) —
+    // reading and hashing a huge video/archive on every scan would make an otherwise cheap
+    // metadata walk noticeably slow for a rare payoff.
+    private val maxDuplicateHashBytes = 200L * 1024 * 1024
+
     suspend fun scanStorageAnalysis(): StorageAnalysisData = withContext(Dispatchers.IO) {
         val volume = getStorageVolume()
         val root = Environment.getExternalStorageDirectory()
@@ -175,6 +181,12 @@ class LocalFileScanner @Inject constructor(
         val imgExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "svg")
         val audioExts = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "wma", "opus")
         val videoExts = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp")
+
+        // Cheap first pass for duplicate detection: bucket every non-empty file by its exact
+        // byte size. Hashing (the expensive part) only ever runs on files that already share a
+        // size with at least one other file, so a device with zero true duplicates pays almost
+        // nothing beyond the walk it was already doing for the breakdown/large-files above.
+        val sizeBuckets = HashMap<Long, MutableList<File>>()
 
         fun scanRecursive(dir: File) {
             val list = dir.listFiles() ?: return
@@ -208,6 +220,10 @@ class LocalFileScanner @Inject constructor(
                             )
                         )
                     }
+
+                    if (length in 1..maxDuplicateHashBytes) {
+                        sizeBuckets.getOrPut(length) { mutableListOf() }.add(f)
+                    }
                 }
             }
         }
@@ -220,6 +236,8 @@ class LocalFileScanner @Inject constructor(
 
         largeFiles.sortByDescending { it.sizeBytes }
         val largeTotal = largeFiles.sumOf { it.sizeBytes }
+
+        val duplicateGroups = findDuplicateGroups(sizeBuckets, root)
 
         StorageAnalysisData(
             volumeInfo = volume,
@@ -234,10 +252,59 @@ class LocalFileScanner @Inject constructor(
             largeFiles = largeFiles,
             largeFilesTotalBytes = largeTotal,
             recycleBinBytes = 0L,
-            recycleBinSampleItem = null
+            recycleBinSampleItem = null,
+            duplicateFileGroups = duplicateGroups,
+            duplicateFilesBytes = duplicateGroups.sumOf { it.wastedBytes }
         )
     }
 
+    /** Groups files that share a size bucket by SHA-256 content hash, so only genuinely
+     * byte-identical files end up together (same size alone isn't proof of duplicate content). */
+    private fun findDuplicateGroups(sizeBuckets: Map<Long, List<File>>, root: File): List<DuplicateGroup> {
+        val groups = mutableListOf<DuplicateGroup>()
+        for ((size, files) in sizeBuckets) {
+            if (files.size < 2) continue
+            val byHash = HashMap<String, MutableList<File>>()
+            for (f in files) {
+                val hash = hashFile(f) ?: continue
+                byHash.getOrPut(hash) { mutableListOf() }.add(f)
+            }
+            for ((hash, matches) in byHash) {
+                if (matches.size < 2) continue
+                val original = matches.minByOrNull { it.lastModified() }
+                val entries = matches.map { f ->
+                    val relDir = f.parentFile?.absolutePath?.removePrefix(root.absolutePath)?.ifEmpty { "/" } ?: "/"
+                    DuplicateFileEntry(
+                        id = f.absolutePath,
+                        name = f.name,
+                        path = f.absolutePath,
+                        relativeDir = relDir,
+                        sizeBytes = size,
+                        lastModified = f.lastModified(),
+                        isOriginal = f == original
+                    )
+                }
+                groups.add(DuplicateGroup(key = "${hash}_$size", items = entries, wastedBytes = size * (entries.size - 1)))
+            }
+        }
+        return groups.sortedByDescending { it.wastedBytes }
+    }
+
+    private fun hashFile(file: File): String? {
+        return try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(64 * 1024)
+                var read: Int
+                while (input.read(buffer).also { read = it } > 0) {
+                    digest.update(buffer, 0, read)
+                }
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     private fun queryImageFolders(): List<MediaFolder> {
         val folderMap = mutableMapOf<String, MutableList<Triple<String, Long, Long>>>()

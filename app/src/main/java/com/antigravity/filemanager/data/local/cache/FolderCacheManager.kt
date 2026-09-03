@@ -204,7 +204,7 @@ class FolderCacheManager @Inject constructor(
         ioScope.launch { dashboardCacheFile.delete() }
         val mediaKeys = mediaFoldersCache.keys.toList()
         mediaFoldersCache.clear()
-        val keysToRemove = cacheRemoveByPrefix("docs_") + mediaKeys
+        val keysToRemove = cacheRemoveByPrefix("docs_") + cacheRemoveByPrefix("catsub_") + mediaKeys
         ioScope.launch {
             keysToRemove.forEach { key ->
                 val hashed = hashKey(key)
@@ -268,6 +268,21 @@ class FolderCacheManager @Inject constructor(
 
     suspend fun putDocuments(sort: FileSortOption, files: List<FileItem>) {
         putFolder("docs_${sort.name}", files)
+    }
+
+    // Subfolders drilled into from a media Category screen (e.g. Images > DCIM > Camera) — the
+    // filtered-to-this-category file list, keyed separately from the plain local browser cache
+    // above since the same path shows different contents depending on which category (Images vs
+    // Videos, etc.) it was opened from. Same stale-while-revalidate contract as getLocalFolder.
+    private fun getCategorySubfolderKey(categoryType: CategoryType, path: String, sort: FileSortOption, showHidden: Boolean) =
+        "catsub_${categoryType.name}_${path}_${sort.name}_$showHidden"
+
+    suspend fun getCategorySubfolder(categoryType: CategoryType, path: String, sort: FileSortOption, showHidden: Boolean, freshTtlMs: Long = 0L): CachedFolderResult? {
+        return getFolder(getCategorySubfolderKey(categoryType, path, sort, showHidden), freshTtlMs)
+    }
+
+    suspend fun putCategorySubfolder(categoryType: CategoryType, path: String, sort: FileSortOption, showHidden: Boolean, files: List<FileItem>) {
+        putFolder(getCategorySubfolderKey(categoryType, path, sort, showHidden), files)
     }
 
     suspend fun getCloudFolder(accountId: String, path: String, freshTtlMs: Long = 0L): CachedFolderResult? {

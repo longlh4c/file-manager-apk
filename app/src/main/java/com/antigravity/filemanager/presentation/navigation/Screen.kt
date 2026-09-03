@@ -10,6 +10,7 @@ sealed class Screen(val route: String) {
         fun createRoute(path: String = ""): String = "storage_folder_breakdown?path=${Uri.encode(path)}"
     }
     object LargeFiles : Screen("large_files")
+    object DuplicateFiles : Screen("duplicate_files")
     object AccessFromNetwork : Screen("access_from_network")
     object Cloud : Screen("cloud")
     object RecycleBin : Screen("recycle_bin")

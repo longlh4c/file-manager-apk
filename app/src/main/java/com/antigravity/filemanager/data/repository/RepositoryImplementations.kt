@@ -172,7 +172,8 @@ class StorageRepositoryImpl @Inject constructor(
 
 @Singleton
 class StorageAnalysisRepositoryImpl @Inject constructor(
-    private val scanner: LocalFileScanner
+    private val scanner: LocalFileScanner,
+    private val recycleBinRepository: IRecycleBinRepository
 ) : IStorageAnalysisRepository {
 
     private val mutex = Mutex()
@@ -186,7 +187,34 @@ class StorageAnalysisRepositoryImpl @Inject constructor(
         val joined = mutex.withLock { inFlight }
         if (joined != null) return@coroutineScope joined.await()
 
-        val deferred = async { scanner.scanStorageAnalysis() }
+        val deferred = async {
+            // scanner.scanStorageAnalysis() always hardcoded recycleBinBytes to 0 — it has no
+            // knowledge of the app's own recycle bin (a Room-backed table of moved-not-deleted
+            // files under .filemanager_trash, tracked separately from the raw filesystem walk).
+            // Fetch the real total from there instead so this card reflects what Recycle Bin
+            // actually shows.
+            val trashDeferred = async { recycleBinRepository.getTrashTotalSize() }
+            val sampleDeferred = async { recycleBinRepository.getTrashItems().firstOrNull() }
+            val analysis = scanner.scanStorageAnalysis()
+            val sample = sampleDeferred.await()
+            analysis.copy(
+                recycleBinBytes = trashDeferred.await(),
+                recycleBinSampleItem = sample?.let {
+                    FileItem(
+                        id = it.trashPath,
+                        name = it.fileName,
+                        // originalPath (not trashPath) so the UI can show where the item came
+                        // from — the physical file itself now lives under .filemanager_trash,
+                        // which isn't meaningful to show the user.
+                        path = it.originalPath,
+                        size = it.fileSize,
+                        lastModified = it.deletedTimestamp,
+                        isDirectory = it.isDirectory,
+                        extension = if (it.isDirectory) "" else File(it.fileName).extension
+                    )
+                }
+            )
+        }
         mutex.withLock { inFlight = deferred }
         try {
             deferred.await()
@@ -321,11 +349,15 @@ class RecycleBinRepositoryImpl @Inject constructor(
         database.trashDao().getAll().map { it.toDomain() }
     }
 
-    override suspend fun moveToTrash(filePaths: List<String>): Result<Int> = withContext(Dispatchers.IO) {
+    override suspend fun moveToTrash(
+        filePaths: List<String>,
+        onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)?
+    ): Result<Int> = withContext(Dispatchers.IO) {
         try {
             var count = 0
-            for (path in filePaths) {
+            for ((index, path) in filePaths.withIndex()) {
                 val source = File(path)
+                onProgress?.invoke(source.name, index + 1, filePaths.size)
                 if (!source.exists()) continue
 
                 val trashName = "${System.currentTimeMillis()}_${source.name}"
@@ -373,11 +405,15 @@ class RecycleBinRepositoryImpl @Inject constructor(
         }
     }
 
-    override suspend fun deletePermanently(trashIds: List<Long>): Result<Int> = withContext(Dispatchers.IO) {
+    override suspend fun deletePermanently(
+        trashIds: List<Long>,
+        onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)?
+    ): Result<Int> = withContext(Dispatchers.IO) {
         try {
             val entities = database.trashDao().getByIds(trashIds)
             var deleted = 0
-            for (entity in entities) {
+            for ((index, entity) in entities.withIndex()) {
+                onProgress?.invoke(entity.fileName, index + 1, entities.size)
                 val trashFile = File(entity.trashPath)
                 if (trashFile.exists()) {
                     if (trashFile.isDirectory) trashFile.deleteRecursively() else trashFile.delete()
@@ -391,10 +427,11 @@ class RecycleBinRepositoryImpl @Inject constructor(
         }
     }
 
-    override suspend fun emptyTrash(): Result<Unit> = withContext(Dispatchers.IO) {
+    override suspend fun emptyTrash(onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)?): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val all = database.trashDao().getAll()
-            for (item in all) {
+            for ((index, item) in all.withIndex()) {
+                onProgress?.invoke(item.fileName, index + 1, all.size)
                 val f = File(item.trashPath)
                 if (f.exists()) {
                     if (f.isDirectory) f.deleteRecursively() else f.delete()

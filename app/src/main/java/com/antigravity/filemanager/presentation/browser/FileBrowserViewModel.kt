@@ -898,11 +898,28 @@ class FileBrowserViewModel @Inject constructor(
     }
 
     fun deleteSelected(moveToRecycleBin: Boolean) {
-        viewModelScope.launch {
-            val paths = _uiState.value.selectedPaths.toList()
-            fileOperationsUseCase.delete(paths, moveToRecycleBin)
+        val paths = _uiState.value.selectedPaths.toList()
+        _uiState.value = _uiState.value.copy(showDeleteDialog = false)
+        activeTransferJob?.cancel()
+        activeTransferJob = viewModelScope.launch {
+            // Deleting (or permanently deleting) a large batch of files is a synchronous
+            // recursive filesystem walk with no built-in progress callback until now — from the
+            // user's side that looked exactly like the app hanging, with zero feedback for
+            // however long it took. Same progress-dialog treatment as compress/extract below.
+            fileOperationsUseCase.delete(paths, moveToRecycleBin) { currentName, currentIndex, total ->
+                _uiState.value = _uiState.value.copy(
+                    downloadProgress = CloudTransferProgress(
+                        currentFileName = currentName,
+                        currentIndex = currentIndex,
+                        totalFiles = total,
+                        isIndeterminate = false,
+                        isUpload = false,
+                        operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
+                    )
+                )
+            }
             _uiState.value = _uiState.value.copy(
-                showDeleteDialog = false,
+                downloadProgress = null,
                 selectedPaths = emptySet(),
                 isSelectionMode = false
             )

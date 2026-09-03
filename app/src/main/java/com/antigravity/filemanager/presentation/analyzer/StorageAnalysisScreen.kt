@@ -33,6 +33,8 @@ fun StorageAnalysisScreen(
     onNavigateBack: () -> Unit,
     onNavigateToStorageBreakdown: (String) -> Unit = {},
     onNavigateToLargeFiles: () -> Unit = {},
+    onNavigateToRecycleBin: () -> Unit = {},
+    onNavigateToDuplicateFiles: () -> Unit = {},
     viewModel: StorageAnalysisViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -263,7 +265,9 @@ fun StorageAnalysisScreen(
                 Card(
                     colors = CardDefaults.cardColors(containerColor = DarkCard),
                     shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onNavigateToRecycleBin() }
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -303,9 +307,14 @@ fun StorageAnalysisScreen(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     Text(
-                                        text = "/Pictures/Screenshots",
+                                        text = data.recycleBinSampleItem.path
+                                            .substringBeforeLast('/', "/")
+                                            .removePrefix(android.os.Environment.getExternalStorageDirectory().absolutePath)
+                                            .ifEmpty { "/" },
                                         color = TextSecondary,
-                                        fontSize = 12.sp
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                                 Text(
@@ -316,12 +325,143 @@ fun StorageAnalysisScreen(
                                 )
                             }
                         }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+                        HorizontalDivider(color = Color(0xFF2E2E2E), thickness = 0.5.dp)
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onNavigateToRecycleBin() }
+                                .padding(top = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "MORE",
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                letterSpacing = 0.8.sp
+                            )
+                        }
                     }
                 }
+            }
+
+            // CARD 4: Duplicate files — duplicates anywhere on device storage. Always shown,
+            // even with zero results, same as the Recycle Bin / Large files cards above.
+            item {
+                DuplicatesCard(
+                    title = "Duplicate files",
+                    totalBytes = data.duplicateFilesBytes,
+                    groups = data.duplicateFileGroups,
+                    onClick = onNavigateToDuplicateFiles
+                )
             }
         }
     }
 }
+}
+
+@Composable
+private fun DuplicatesCard(
+    title: String,
+    totalBytes: Long,
+    groups: List<com.antigravity.filemanager.domain.model.DuplicateGroup>,
+    onClick: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = DarkCard),
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "$title ",
+                    color = TextPrimary,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Normal
+                )
+                Text(
+                    text = FileItem.formatBytes(totalBytes),
+                    color = TealPrimary,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Normal
+                )
+            }
+            Spacer(modifier = Modifier.height(14.dp))
+
+            if (groups.isEmpty()) {
+                Text(
+                    text = "No duplicate files found",
+                    color = TextSecondary,
+                    fontSize = 13.sp
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+            }
+
+            groups.take(2).forEach { group ->
+                val item = group.items.firstOrNull { !it.isOriginal } ?: group.items.first()
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color(0xFF2C3E50)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.FileCopy, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(20.dp))
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = item.name,
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = item.relativeDir,
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = item.formattedSize,
+                        color = Color(0xFF81C784),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+
+            HorizontalDivider(color = Color(0xFF2E2E2E), thickness = 0.5.dp)
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onClick() }
+                    .padding(top = 12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "MORE",
+                    color = TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.8.sp
+                )
+            }
+        }
+    }
 }
 
 @Composable

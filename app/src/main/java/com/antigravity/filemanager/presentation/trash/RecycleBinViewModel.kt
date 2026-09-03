@@ -2,9 +2,11 @@ package com.antigravity.filemanager.presentation.trash
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.antigravity.filemanager.domain.model.CloudTransferProgress
 import com.antigravity.filemanager.domain.model.TrashItem
 import com.antigravity.filemanager.domain.usecase.RecycleBinUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,7 +18,8 @@ data class RecycleBinUiState(
     val items: List<TrashItem> = emptyList(),
     val selectedIds: Set<Long> = emptySet(),
     val totalSizeBytes: Long = 0L,
-    val showEmptyConfirm: Boolean = false
+    val showEmptyConfirm: Boolean = false,
+    val deleteProgress: CloudTransferProgress? = null
 ) {
     val formattedTotalSize: String
         get() = com.antigravity.filemanager.domain.model.FileItem.formatBytes(totalSizeBytes)
@@ -52,17 +55,49 @@ class RecycleBinViewModel @Inject constructor(
         }
     }
 
+    private var activeJob: Job? = null
+
     fun deleteSelectedPermanently() {
-        viewModelScope.launch {
-            recycleBinUseCase.deletePermanently(_uiState.value.selectedIds.toList())
-            _uiState.value = _uiState.value.copy(selectedIds = emptySet())
+        val ids = _uiState.value.selectedIds.toList()
+        activeJob?.cancel()
+        activeJob = viewModelScope.launch {
+            // Same fix as emptyTrash() below — permanently deleting many trashed items is a
+            // synchronous recursive delete with no feedback otherwise, which reads as a hang.
+            recycleBinUseCase.deletePermanently(ids) { currentName, currentIndex, total ->
+                _uiState.value = _uiState.value.copy(
+                    deleteProgress = CloudTransferProgress(
+                        currentFileName = currentName,
+                        currentIndex = currentIndex,
+                        totalFiles = total,
+                        isIndeterminate = false,
+                        isUpload = false,
+                        operationLabel = "Deleting permanently"
+                    )
+                )
+            }
+            _uiState.value = _uiState.value.copy(selectedIds = emptySet(), deleteProgress = null)
         }
     }
 
     fun emptyTrash() {
-        viewModelScope.launch {
-            recycleBinUseCase.empty()
-            _uiState.value = _uiState.value.copy(showEmptyConfirm = false, selectedIds = emptySet())
+        activeJob?.cancel()
+        activeJob = viewModelScope.launch {
+            // Empty Trash used to run with zero UI feedback while it recursively deleted every
+            // item — for a large bin that looked exactly like the app hanging. Report progress
+            // the same way compress/extract/upload already do elsewhere in the app.
+            recycleBinUseCase.empty { currentName, currentIndex, total ->
+                _uiState.value = _uiState.value.copy(
+                    deleteProgress = CloudTransferProgress(
+                        currentFileName = currentName,
+                        currentIndex = currentIndex,
+                        totalFiles = total,
+                        isIndeterminate = false,
+                        isUpload = false,
+                        operationLabel = "Emptying Trash"
+                    )
+                )
+            }
+            _uiState.value = _uiState.value.copy(showEmptyConfirm = false, selectedIds = emptySet(), deleteProgress = null)
         }
     }
 

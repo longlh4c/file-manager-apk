@@ -80,13 +80,18 @@ class FileOperationsUseCase @Inject constructor(
     suspend fun createFolder(parentPath: String, name: String): Result<FileItem> =
         fileRepository.createDirectory(parentPath, name)
 
-    suspend fun delete(paths: List<String>, moveToRecycleBin: Boolean = true): Result<Int> {
+    suspend fun delete(
+        paths: List<String>,
+        moveToRecycleBin: Boolean = true,
+        onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null
+    ): Result<Int> {
         val result = if (moveToRecycleBin) {
-            recycleBinRepository.moveToTrash(paths)
+            recycleBinRepository.moveToTrash(paths, onProgress)
         } else {
             var count = 0
-            paths.forEach { path ->
+            paths.forEachIndexed { index, path ->
                 val f = java.io.File(path)
+                onProgress?.invoke(f.name, index + 1, paths.size)
                 if (f.deleteRecursively()) count++
             }
             Result.success(count)
@@ -119,8 +124,10 @@ class RecycleBinUseCase @Inject constructor(
     suspend fun getTrash(): List<TrashItem> = recycleBinRepository.getTrashItems()
     suspend fun restore(ids: List<Long>): Result<Int> =
         recycleBinRepository.restoreFromTrash(ids).also { if (it.isSuccess) folderCacheManager.invalidateMediaFolders() }
-    suspend fun deletePermanently(ids: List<Long>): Result<Int> = recycleBinRepository.deletePermanently(ids)
-    suspend fun empty(): Result<Unit> = recycleBinRepository.emptyTrash()
+    suspend fun deletePermanently(ids: List<Long>, onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null): Result<Int> =
+        recycleBinRepository.deletePermanently(ids, onProgress)
+    suspend fun empty(onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null): Result<Unit> =
+        recycleBinRepository.emptyTrash(onProgress)
     suspend fun getTotalSize(): Long = recycleBinRepository.getTrashTotalSize()
 }
 
