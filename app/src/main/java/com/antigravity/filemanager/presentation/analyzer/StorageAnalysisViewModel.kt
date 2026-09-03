@@ -255,6 +255,18 @@ class StorageAnalysisViewModel @Inject constructor(
         }
     }
 
+    fun deleteDuplicates(paths: List<String>, onComplete: () -> Unit = {}) {
+        viewModelScope.launch {
+            fileOperationsUseCase.delete(paths, moveToRecycleBin = true)
+            // Removing a duplicate can change which copy is now the "earliest" survivor in its
+            // group, and affects both the Downloads-scoped and full-storage totals — cheapest
+            // correct option is the same full rescan the other mutations above already pay for.
+            loadDataInternal()
+            _uiState.value = _uiState.value.copy(mutationTick = _uiState.value.mutationTick + 1)
+            onComplete()
+        }
+    }
+
     fun addBookmark(path: String, name: String) {
         viewModelScope.launch {
             bookmarkUseCase.addBookmark(path, name)

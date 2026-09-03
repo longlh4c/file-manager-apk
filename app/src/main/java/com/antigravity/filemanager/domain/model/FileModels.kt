@@ -195,13 +195,48 @@ data class LargeFileItem(
         }
 }
 
+/** One file within a [DuplicateGroup] — all items in a group share identical content (same
+ * size + hash). [isOriginal] flags the earliest-modified copy, kept as the suggested one to keep. */
+data class DuplicateFileEntry(
+    val id: String,
+    val name: String,
+    val path: String,
+    val relativeDir: String,
+    val sizeBytes: Long,
+    val lastModified: Long,
+    val isOriginal: Boolean
+) {
+    val formattedSize: String
+        get() = FileItem.formatBytes(sizeBytes)
+
+    val formattedDate: String
+        get() {
+            if (lastModified <= 0L) return ""
+            val cal = Calendar.getInstance().apply { timeInMillis = lastModified }
+            val day = cal.get(Calendar.DAY_OF_MONTH)
+            val month = cal.get(Calendar.MONTH) + 1
+            val year = cal.get(Calendar.YEAR)
+            return "$day thg $month, $year"
+        }
+}
+
+/** A cluster of files with byte-identical content. [wastedBytes] is the size of every copy
+ * except the original — i.e. what's reclaimed if all but [DuplicateFileEntry.isOriginal] are deleted. */
+data class DuplicateGroup(
+    val key: String,
+    val items: List<DuplicateFileEntry>,
+    val wastedBytes: Long
+)
+
 data class StorageAnalysisData(
     val volumeInfo: StorageVolumeInfo,
     val breakdown: StorageCategoryBreakdown,
     val largeFiles: List<LargeFileItem>,
     val largeFilesTotalBytes: Long,
     val recycleBinBytes: Long,
-    val recycleBinSampleItem: FileItem? = null
+    val recycleBinSampleItem: FileItem? = null,
+    val duplicateFileGroups: List<DuplicateGroup> = emptyList(),
+    val duplicateFilesBytes: Long = 0L
 )
 
 data class CloudAccount(

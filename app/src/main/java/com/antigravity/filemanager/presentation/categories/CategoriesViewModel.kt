@@ -15,6 +15,8 @@ import com.antigravity.filemanager.domain.usecase.GetCategorizedMediaUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -202,21 +204,32 @@ class CategoriesViewModel @Inject constructor(
                 history.add(Pair(folderPath, folderName))
             }
 
+            // Stale-while-revalidate, same pattern as loadFolders(): paint the cached (already
+            // category-filtered) result instantly if we have one, and only redo the recursive
+            // filesystem scan (getFiles + filterFilesForCategory, both of which walk subfolders
+            // looking for matching extensions — the actual slow part) when it's stale. Previously
+            // this ran that full scan unconditionally on every folder open, even ones visited
+            // seconds ago.
+            val cached = folderCacheManager.getCategorySubfolder(categoryType, folderPath, savedSort, savedHidden, MEDIA_FOLDERS_FRESH_TTL_MS)
             _uiState.value = _uiState.value.copy(
-                isLoading = true,
+                isLoading = cached == null,
                 folderHistory = history,
                 selectedPaths = emptySet(),
                 isSelectionMode = false,
                 sortOption = savedSort,
                 showHiddenFiles = savedHidden,
-                viewMode = savedViewMode
+                viewMode = savedViewMode,
+                subfolderFiles = cached?.files ?: emptyList()
             )
+            if (cached != null && cached.isFresh) return@launch
+
             val allFiles = fileOperationsUseCase.getFiles(
                 folderPath,
                 savedSort,
                 showHidden = savedHidden
             )
             val filteredFiles = filterFilesForCategory(allFiles)
+            folderCacheManager.putCategorySubfolder(categoryType, folderPath, savedSort, savedHidden, filteredFiles)
             _uiState.value = _uiState.value.copy(
                 isLoading = false,
                 subfolderFiles = filteredFiles
@@ -249,38 +262,34 @@ class CategoriesViewModel @Inject constructor(
     }
 
     private suspend fun filterFilesForCategory(allFiles: List<FileItem>): List<FileItem> = withContext(Dispatchers.IO) {
-        when (categoryType) {
-            CategoryType.IMAGES -> allFiles.filter {
-                if (it.isDirectory) {
-                    folderContainsExtensions(it.path, imageExts)
-                } else {
-                    it.extension.lowercase(Locale.getDefault()) in imageExts || it.mimeType.startsWith("image/")
-                }
-            }
-            CategoryType.VIDEOS -> allFiles.filter {
-                if (it.isDirectory) {
-                    folderContainsExtensions(it.path, videoExts)
-                } else {
-                    it.extension.lowercase(Locale.getDefault()) in videoExts || it.mimeType.startsWith("video/")
-                }
-            }
-            CategoryType.AUDIO -> allFiles.filter {
-                if (it.isDirectory) {
-                    folderContainsExtensions(it.path, audioExts)
-                } else {
-                    it.extension.lowercase(Locale.getDefault()) in audioExts || it.mimeType.startsWith("audio/")
-                }
-            }
-            CategoryType.DOCUMENTS -> allFiles.filter {
-                if (it.isDirectory) {
-                    folderContainsExtensions(it.path, docExts)
-                } else {
-                    it.extension.lowercase(Locale.getDefault()) in docExts
-                }
-            }
-            CategoryType.DOWNLOADS -> allFiles
-            else -> allFiles
+        val exts = when (categoryType) {
+            CategoryType.IMAGES -> imageExts
+            CategoryType.VIDEOS -> videoExts
+            CategoryType.AUDIO -> audioExts
+            CategoryType.DOCUMENTS -> docExts
+            else -> return@withContext allFiles
         }
+        val mimePrefix = when (categoryType) {
+            CategoryType.IMAGES -> "image/"
+            CategoryType.VIDEOS -> "video/"
+            CategoryType.AUDIO -> "audio/"
+            else -> null
+        }
+        // Each directory's match check is an independent recursive filesystem walk
+        // (folderContainsExtensions) — running them one at a time made the cost add up across
+        // every subfolder in the listing. Fanning them out onto the IO dispatcher lets the scans
+        // overlap instead, same idea as LocalFileScanner.listFilesInDir's date/size sort.
+        allFiles.map { item ->
+            async {
+                val matches = if (item.isDirectory) {
+                    folderContainsExtensions(item.path, exts)
+                } else {
+                    item.extension.lowercase(Locale.getDefault()) in exts ||
+                        (mimePrefix != null && item.mimeType.startsWith(mimePrefix))
+                }
+                if (matches) item else null
+            }
+        }.awaitAll().filterNotNull()
     }
 
     fun navigateBack(): Boolean {
@@ -730,8 +739,24 @@ class CategoriesViewModel @Inject constructor(
     }
 
     fun deleteSelected(moveToRecycleBin: Boolean) {
-        viewModelScope.launch {
-            fileOperationsUseCase.delete(_uiState.value.selectedPaths.toList(), moveToRecycleBin)
+        val paths = _uiState.value.selectedPaths.toList()
+        activeTransferJob?.cancel()
+        activeTransferJob = viewModelScope.launch {
+            // Same fix as FileBrowserViewModel.deleteSelected — a large batch delete with no
+            // progress feedback used to just leave the screen looking hung until it finished.
+            fileOperationsUseCase.delete(paths, moveToRecycleBin) { currentName, currentIndex, total ->
+                _uiState.value = _uiState.value.copy(
+                    downloadProgress = CloudTransferProgress(
+                        currentFileName = currentName,
+                        currentIndex = currentIndex,
+                        totalFiles = total,
+                        isIndeterminate = false,
+                        isUpload = false,
+                        operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
+                    )
+                )
+            }
+            _uiState.value = _uiState.value.copy(downloadProgress = null)
             val folderPath = _uiState.value.currentSubfolderPath
             if (folderPath != null) {
                 openSubfolder(folderPath, _uiState.value.currentSubfolderName)

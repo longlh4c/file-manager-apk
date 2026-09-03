@@ -200,6 +200,12 @@ fun AppNavigation() {
                         },
                         onNavigateToLargeFiles = {
                             navController.navigate(Screen.LargeFiles.route)
+                        },
+                        onNavigateToRecycleBin = {
+                            navController.navigate(Screen.RecycleBin.route)
+                        },
+                        onNavigateToDuplicateFiles = {
+                            navController.navigate(Screen.DuplicateFiles.route)
                         }
                     )
                 }
@@ -226,6 +232,17 @@ fun AppNavigation() {
                     }
                     val sharedViewModel: StorageAnalysisViewModel = hiltViewModel(parentEntry)
                     com.antigravity.filemanager.presentation.analyzer.LargeFilesScreen(
+                        viewModel = sharedViewModel,
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                }
+
+                composable(Screen.DuplicateFiles.route) { backStackEntry ->
+                    val parentEntry = remember(backStackEntry) {
+                        navController.getBackStackEntry(STORAGE_ANALYSIS_GRAPH)
+                    }
+                    val sharedViewModel: StorageAnalysisViewModel = hiltViewModel(parentEntry)
+                    com.antigravity.filemanager.presentation.analyzer.DuplicateFilesScreen(
                         viewModel = sharedViewModel,
                         onNavigateBack = { navController.popBackStack() }
                     )
