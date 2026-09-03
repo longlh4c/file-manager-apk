@@ -33,10 +33,17 @@ class VideoThumbnailFetcher(
         }
 
         val bitmap: Bitmap? = run {
-            // 1. Android Q+ (API 29+) Hardware-accelerated native ThumbnailUtils
+            // 1. Android Q+ (API 29+) Hardware-accelerated native ThumbnailUtils.
+            // 256x256 instead of the previous 512x512 — this is decoded into grid cards well
+            // under 512px on screen, so the extra resolution was wasted decode time. Video frame
+            // extraction (seek + decode, unlike a plain image bitmap decode) is the real reason
+            // a folder grid full of videos visibly populates one card at a time rather than all
+            // at once like Images does — not an animation, genuine per-thumbnail decode cost.
+            // Asking for a smaller frame cuts that cost without a visible quality difference at
+            // grid-card size.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 try {
-                    val b = ThumbnailUtils.createVideoThumbnail(file, Size(512, 512), null)
+                    val b = ThumbnailUtils.createVideoThumbnail(file, Size(256, 256), null)
                     if (b != null) return@run b
                 } catch (e: Exception) {}
             }

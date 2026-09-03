@@ -525,7 +525,10 @@ fun MediaCategoriesScreen(
                     when (viewMode) {
                         ViewMode.GRID -> {
                             LazyVerticalGrid(
-                                columns = GridCells.Fixed(3),
+                                // Adaptive so column count follows actual screen width instead
+                                // of a hardcoded number — see FileBrowserScreen's identical grid
+                                // for the full rationale.
+                                columns = GridCells.Adaptive(minSize = 100.dp),
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .padding(horizontal = 4.dp, vertical = 6.dp),
@@ -611,50 +614,60 @@ fun MediaCategoriesScreen(
                     }
                 }
             } else {
-                // Root category folders view for Audio, Images, Videos, Downloads
-                when (category) {
-                    CategoryType.AUDIO -> {
-                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                            items(filteredFolders, key = { it.id }) { folder ->
-                                AudioListItem(
-                                    folder = folder,
-                                    isSelected = uiState.selectedPaths.contains(folder.path),
-                                    onClick = {
-                                        if (uiState.isSelectionMode) {
-                                            viewModel.toggleFileSelection(folder.path)
-                                        } else {
-                                            viewModel.openSubfolder(folder.path, folder.name)
-                                        }
-                                    },
-                                    onLongClick = { viewModel.toggleFileSelection(folder.path) }
-                                )
-                                HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
-                            }
+                // Root category folders view for Audio, Images, Videos, Downloads. Was branching
+                // on `category` alone (Audio always list, everything else always grid) so the
+                // View option in the sort/view sheet had no effect at all here — only the
+                // subfolder file listing below respected it. Now it's keyed off viewMode like
+                // every other listing in the app, with `category` only picking the right
+                // thumbnail fallback icon/badge for the list rows.
+                val (badgeIcon, badgeColor) = when (category) {
+                    CategoryType.AUDIO -> Icons.Default.MusicNote to Color(0xFF26A69A)
+                    CategoryType.VIDEOS -> Icons.Default.Movie to Color(0xFFEF5350)
+                    CategoryType.IMAGES -> Icons.Default.Image to Color(0xFFBA68C8)
+                    else -> Icons.Default.Folder to Color(0xFFFFB74D)
+                }
+                if (viewMode == ViewMode.GRID) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 100.dp),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(filteredFolders, key = { it.id }) { folder ->
+                            MediaFolderCard(
+                                folder = folder,
+                                isSelected = uiState.selectedPaths.contains(folder.path),
+                                onClick = {
+                                    if (uiState.isSelectionMode) {
+                                        viewModel.toggleFileSelection(folder.path)
+                                    } else {
+                                        viewModel.openSubfolder(folder.path, folder.name)
+                                    }
+                                },
+                                onLongClick = { viewModel.toggleFileSelection(folder.path) }
+                            )
                         }
                     }
-                    else -> {
-                        LazyVerticalGrid(
-                            columns = GridCells.Fixed(3),
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(horizontal = 4.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            items(filteredFolders, key = { it.id }) { folder ->
-                                MediaFolderCard(
-                                    folder = folder,
-                                    isSelected = uiState.selectedPaths.contains(folder.path),
-                                    onClick = {
-                                        if (uiState.isSelectionMode) {
-                                            viewModel.toggleFileSelection(folder.path)
-                                        } else {
-                                            viewModel.openSubfolder(folder.path, folder.name)
-                                        }
-                                    },
-                                    onLongClick = { viewModel.toggleFileSelection(folder.path) }
-                                )
-                            }
+                } else {
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        items(filteredFolders, key = { it.id }) { folder ->
+                            AudioListItem(
+                                folder = folder,
+                                badgeIcon = badgeIcon,
+                                badgeColor = badgeColor,
+                                isSelected = uiState.selectedPaths.contains(folder.path),
+                                onClick = {
+                                    if (uiState.isSelectionMode) {
+                                        viewModel.toggleFileSelection(folder.path)
+                                    } else {
+                                        viewModel.openSubfolder(folder.path, folder.name)
+                                    }
+                                },
+                                onLongClick = { viewModel.toggleFileSelection(folder.path) }
+                            )
+                            HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
                         }
                     }
                 }

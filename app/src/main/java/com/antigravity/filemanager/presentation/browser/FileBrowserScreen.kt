@@ -571,7 +571,12 @@ fun FileBrowserScreen(
             when (viewMode) {
                 ViewMode.GRID -> {
                     LazyVerticalGrid(
-                        columns = GridCells.Fixed(3),
+                        // Adaptive instead of a hardcoded column count: the number of columns
+                        // now comes from how many 100dp-min cells actually fit the screen width,
+                        // so a tablet gets more columns (smaller relative thumbnails) and a
+                        // narrow phone gets fewer, rather than the same fixed count stretched or
+                        // squeezed on every device.
+                        columns = GridCells.Adaptive(minSize = 100.dp),
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(horizontal = 6.dp, vertical = 6.dp),
