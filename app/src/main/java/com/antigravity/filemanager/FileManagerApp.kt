@@ -67,7 +67,12 @@ class FileManagerApp : Application(), ImageLoaderFactory {
                     .maxSizeBytes(100L * 1024 * 1024)
                     .build()
             }
-            .crossfade(true)
+            // Was crossfade(true): a 200ms fade-in on every thumbnail. Harmless for a single
+            // image, but a grid of dozens of thumbnails (exactly what Images/Videos categories
+            // show) made the whole screen feel like it was still "arriving" well after the data
+            // was actually ready. Instant paint reads as faster even though nothing about the
+            // underlying scan/decode time changed.
+            .crossfade(false)
             .build()
     }
 }
