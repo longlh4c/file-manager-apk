@@ -11,6 +11,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
@@ -104,7 +105,14 @@ class LocalFileScanner @Inject constructor(
                     val isImage = ext in imageExtensions
                     val isAudio = ext in audioExtensions
                     val mime = if (!isDir) getMimeType(file) else "resource/folder"
-                    val count = if (isDir) file.list()?.size ?: 0 else 0
+                    // One listFiles() call instead of list()+listFiles() separately — its
+                    // per-child isDirectory() is what lets the "N folders, M items" subtitle
+                    // (folderItemCountLabel in FileItemViews) work here the same way it already
+                    // does for Cloud folders, which populate this split themselves.
+                    val children = if (isDir) file.listFiles() else null
+                    val count = children?.size ?: 0
+                    val subfolderCount = children?.count { it.isDirectory } ?: 0
+                    val fileChildCount = count - subfolderCount
                     val size = if (isDir) {
                         if (isSizeSort) getFolderTotalSize(file, maxDepth = 2) else 0L
                     } else file.length()
@@ -124,6 +132,8 @@ class LocalFileScanner @Inject constructor(
                         mimeType = mime,
                         extension = ext,
                         itemCount = count,
+                        subfolderCount = subfolderCount,
+                        fileChildCount = fileChildCount,
                         thumbnailUri = if (!isDir && (isVideo || isImage || isAudio || mime.startsWith("image/") || mime.startsWith("video/"))) file.absolutePath else null,
                         appSourceBadge = badge,
                         folderBadgeType = folderBadge,
@@ -164,9 +174,115 @@ class LocalFileScanner @Inject constructor(
     // metadata walk noticeably slow for a rare payoff.
     private val maxDuplicateHashBytes = 200L * 1024 * 1024
 
-    suspend fun scanStorageAnalysis(): StorageAnalysisData = withContext(Dispatchers.IO) {
+    // Per-branch accumulator so the top-level fan-out below (one coroutine per top-level
+    // folder) never touches shared mutable state during the walk — each branch fills its own
+    // instance, and the results are merged back together (cheap: plain arithmetic + list/map
+    // concatenation) only after every branch has finished.
+    private class ScanAccumulator {
+        var imgBytes = 0L
+        var audioBytes = 0L
+        var videoBytes = 0L
+        var docBytes = 0L
+        var archiveBytes = 0L
+        var otherBytes = 0L
+        val largeFiles = mutableListOf<LargeFileItem>()
+        val sizeBuckets = HashMap<Long, MutableList<File>>()
+    }
+
+    private val docExts = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub")
+    private val archiveExts = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "iso", "apk")
+    private val analysisImgExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "svg")
+    private val analysisAudioExts = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "wma", "opus")
+    private val analysisVideoExts = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp")
+
+    private fun scanRecursiveInto(dir: File, root: File, acc: ScanAccumulator) {
+        val list = dir.listFiles() ?: return
+        for (f in list) {
+            if (f.isDirectory) {
+                if (!f.name.startsWith(".")) scanRecursiveInto(f, root, acc)
+            } else {
+                val length = f.length()
+                val ext = f.extension.lowercase(Locale.getDefault())
+                when {
+                    analysisImgExts.contains(ext) -> acc.imgBytes += length
+                    analysisAudioExts.contains(ext) -> acc.audioBytes += length
+                    analysisVideoExts.contains(ext) -> acc.videoBytes += length
+                    docExts.contains(ext) -> acc.docBytes += length
+                    archiveExts.contains(ext) -> acc.archiveBytes += length
+                    else -> acc.otherBytes += length
+                }
+
+                // Large file threshold: > 10 MB (10 * 1024 * 1024)
+                if (length >= 10L * 1024 * 1024) {
+                    val relDir = f.parentFile?.absolutePath?.removePrefix(root.absolutePath)?.ifEmpty { "/" } ?: "/"
+                    acc.largeFiles.add(
+                        LargeFileItem(
+                            id = f.absolutePath,
+                            name = f.name,
+                            path = f.absolutePath,
+                            relativeDir = relDir,
+                            sizeBytes = length,
+                            extension = ext,
+                            lastModified = f.lastModified()
+                        )
+                    )
+                }
+
+                if (length in 1..maxDuplicateHashBytes) {
+                    acc.sizeBuckets.getOrPut(length) { mutableListOf() }.add(f)
+                }
+            }
+        }
+    }
+
+    suspend fun scanStorageAnalysis(): StorageAnalysisData = withContext(Dispatchers.IO) { coroutineScope {
         val volume = getStorageVolume()
         val root = Environment.getExternalStorageDirectory()
+
+        // Whole-device recursive walk used to run depth-first on a single thread. Fan it out
+        // one coroutine per top-level folder (DCIM, Download, Android, WhatsApp, ... — the
+        // entries that actually hold the bulk of a device's files) so their subtrees get walked
+        // concurrently instead of one after another; each still recurses sequentially inside
+        // its own branch, same as before.
+        val topLevel = try { root.listFiles()?.toList() ?: emptyList() } catch (e: Exception) { emptyList() }
+        val branches = topLevel.map { entry ->
+            async {
+                val acc = ScanAccumulator()
+                try {
+                    if (entry.isDirectory) {
+                        if (!entry.name.startsWith(".")) scanRecursiveInto(entry, root, acc)
+                    } else {
+                        // Reuse the same per-file logic for loose files sitting directly at the
+                        // storage root by pointing scanRecursiveInto's directory walk at a
+                        // synthetic single-file case would be overkill — inline the same handling.
+                        val length = entry.length()
+                        val ext = entry.extension.lowercase(Locale.getDefault())
+                        when {
+                            analysisImgExts.contains(ext) -> acc.imgBytes += length
+                            analysisAudioExts.contains(ext) -> acc.audioBytes += length
+                            analysisVideoExts.contains(ext) -> acc.videoBytes += length
+                            docExts.contains(ext) -> acc.docBytes += length
+                            archiveExts.contains(ext) -> acc.archiveBytes += length
+                            else -> acc.otherBytes += length
+                        }
+                        if (length >= 10L * 1024 * 1024) {
+                            acc.largeFiles.add(
+                                LargeFileItem(
+                                    id = entry.absolutePath, name = entry.name, path = entry.absolutePath,
+                                    relativeDir = "/", sizeBytes = length, extension = ext, lastModified = entry.lastModified()
+                                )
+                            )
+                        }
+                        if (length in 1..maxDuplicateHashBytes) {
+                            acc.sizeBuckets.getOrPut(length) { mutableListOf() }.add(entry)
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+                acc
+            }
+        }.awaitAll()
 
         var imgBytes = 0L
         var audioBytes = 0L
@@ -174,64 +290,17 @@ class LocalFileScanner @Inject constructor(
         var docBytes = 0L
         var archiveBytes = 0L
         var otherBytes = 0L
-
         val largeFiles = mutableListOf<LargeFileItem>()
-        val docExts = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub")
-        val archiveExts = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "iso", "apk")
-        val imgExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "svg")
-        val audioExts = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "wma", "opus")
-        val videoExts = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp")
-
-        // Cheap first pass for duplicate detection: bucket every non-empty file by its exact
-        // byte size. Hashing (the expensive part) only ever runs on files that already share a
-        // size with at least one other file, so a device with zero true duplicates pays almost
-        // nothing beyond the walk it was already doing for the breakdown/large-files above.
         val sizeBuckets = HashMap<Long, MutableList<File>>()
-
-        fun scanRecursive(dir: File) {
-            val list = dir.listFiles() ?: return
-            for (f in list) {
-                if (f.isDirectory) {
-                    if (!f.name.startsWith(".")) scanRecursive(f)
-                } else {
-                    val length = f.length()
-                    val ext = f.extension.lowercase(Locale.getDefault())
-                    when {
-                        imgExts.contains(ext) -> imgBytes += length
-                        audioExts.contains(ext) -> audioBytes += length
-                        videoExts.contains(ext) -> videoBytes += length
-                        docExts.contains(ext) -> docBytes += length
-                        archiveExts.contains(ext) -> archiveBytes += length
-                        else -> otherBytes += length
-                    }
-
-                    // Large file threshold: > 10 MB (10 * 1024 * 1024)
-                    if (length >= 10L * 1024 * 1024) {
-                        val relDir = f.parentFile?.absolutePath?.removePrefix(root.absolutePath)?.ifEmpty { "/" } ?: "/"
-                        largeFiles.add(
-                            LargeFileItem(
-                                id = f.absolutePath,
-                                name = f.name,
-                                path = f.absolutePath,
-                                relativeDir = relDir,
-                                sizeBytes = length,
-                                extension = ext,
-                                lastModified = f.lastModified()
-                            )
-                        )
-                    }
-
-                    if (length in 1..maxDuplicateHashBytes) {
-                        sizeBuckets.getOrPut(length) { mutableListOf() }.add(f)
-                    }
-                }
-            }
-        }
-
-        try {
-            scanRecursive(root)
-        } catch (e: Exception) {
-            e.printStackTrace()
+        for (acc in branches) {
+            imgBytes += acc.imgBytes
+            audioBytes += acc.audioBytes
+            videoBytes += acc.videoBytes
+            docBytes += acc.docBytes
+            archiveBytes += acc.archiveBytes
+            otherBytes += acc.otherBytes
+            largeFiles.addAll(acc.largeFiles)
+            acc.sizeBuckets.forEach { (size, files) -> sizeBuckets.getOrPut(size) { mutableListOf() }.addAll(files) }
         }
 
         largeFiles.sortByDescending { it.sizeBytes }
@@ -256,7 +325,7 @@ class LocalFileScanner @Inject constructor(
             duplicateFileGroups = duplicateGroups,
             duplicateFilesBytes = duplicateGroups.sumOf { it.wastedBytes }
         )
-    }
+    } }
 
     /** Groups files that share a size bucket by SHA-256 content hash, so only genuinely
      * byte-identical files end up together (same size alone isn't proof of duplicate content). */
@@ -306,8 +375,7 @@ class LocalFileScanner @Inject constructor(
         }
     }
 
-    private fun queryImageFolders(): List<MediaFolder> {
-        val folderMap = mutableMapOf<String, MutableList<Triple<String, Long, Long>>>()
+    private suspend fun queryImageFolders(): List<MediaFolder> = coroutineScope {
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
             MediaStore.Images.Media.DATA,
@@ -316,6 +384,10 @@ class LocalFileScanner @Inject constructor(
             MediaStore.Images.Media.DATE_MODIFIED
         )
 
+        // Phase 1: drain the cursor into plain rows — this part is just reading from an
+        // already-open cursor, no filesystem I/O, so it stays single-threaded and fast.
+        data class Row(val path: String, val size: Long, val dateSec: Long)
+        val rows = mutableListOf<Row>()
         try {
             val cursor: Cursor? = context.contentResolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
@@ -324,35 +396,42 @@ class LocalFileScanner @Inject constructor(
                 null,
                 "${MediaStore.Images.Media.DATE_MODIFIED} DESC"
             )
-
             cursor?.use {
                 val dataCol = it.getColumnIndex(MediaStore.Images.Media.DATA)
                 val sizeCol = it.getColumnIndex(MediaStore.Images.Media.SIZE)
                 val dateCol = it.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
-
                 while (it.moveToNext()) {
                     val path = if (dataCol >= 0) it.getString(dataCol) else null ?: continue
-                    val size = if (sizeCol >= 0) it.getLong(sizeCol) else 0L
-                    val dateSec = if (dateCol >= 0) it.getLong(dateCol) else 0L
-                    val file = File(path)
-                    val ext = file.extension.lowercase(Locale.getDefault())
-                    // isFile() already implies the path exists (returns false otherwise), so a
-                    // separate exists() call here would just be a second redundant stat() syscall.
-                    if (ext in imageExtensions && file.isFile && file.length() > 0) {
-                        val parentFile = file.parentFile ?: continue
-                        val folderPath = parentFile.absolutePath
-                        val dateMs = if (dateSec > 0) dateSec * 1000L else file.lastModified()
-
-                        val list = folderMap.getOrPut(folderPath) { mutableListOf() }
-                        list.add(Triple(path, if (size > 0) size else file.length(), dateMs))
-                    }
+                    rows.add(Row(path, if (sizeCol >= 0) it.getLong(sizeCol) else 0L, if (dateCol >= 0) it.getLong(dateCol) else 0L))
                 }
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
 
-        return folderMap.mapNotNull { (path, rawItems) ->
+        // Phase 2: the actual stat() calls (isFile/length/lastModified) are the expensive part
+        // of this scan — one syscall each, previously done one row at a time. Fanning them out
+        // onto the IO dispatcher lets a large photo library's worth of stats overlap instead of
+        // queuing behind each other, same idea as listFilesInDir's date/size sort.
+        data class Validated(val folderPath: String, val path: String, val size: Long, val dateMs: Long)
+        val folderMap = mutableMapOf<String, MutableList<Triple<String, Long, Long>>>()
+        rows.map { row ->
+            async {
+                val file = File(row.path)
+                val ext = file.extension.lowercase(Locale.getDefault())
+                // isFile() already implies the path exists (returns false otherwise), so a
+                // separate exists() call here would just be a second redundant stat() syscall.
+                if (ext in imageExtensions && file.isFile && file.length() > 0) {
+                    val parentFile = file.parentFile ?: return@async null
+                    val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else file.lastModified()
+                    Validated(parentFile.absolutePath, row.path, if (row.size > 0) row.size else file.length(), dateMs)
+                } else null
+            }
+        }.awaitAll().filterNotNull().forEach { v ->
+            folderMap.getOrPut(v.folderPath) { mutableListOf() }.add(Triple(v.path, v.size, v.dateMs))
+        }
+
+        folderMap.mapNotNull { (path, rawItems) ->
             val folderFile = File(path)
             if (!folderFile.exists() || !folderFile.isDirectory) return@mapNotNull null
 
@@ -385,7 +464,7 @@ class LocalFileScanner @Inject constructor(
         }
     }
 
-    private fun queryAudioFolders(): List<MediaFolder> {
+    private suspend fun queryAudioFolders(): List<MediaFolder> = coroutineScope {
         val folderMap = mutableMapOf<String, MutableList<Triple<String, Long, Long>>>()
         // Tracks paths already added (from the MediaStore query below) so the recursive
         // fallback scan can dedup in O(1) instead of doing a linear list.none {} per file.
@@ -397,6 +476,10 @@ class LocalFileScanner @Inject constructor(
             MediaStore.Audio.Media.DATE_MODIFIED
         )
 
+        // See queryImageFolders for why this is a cheap cursor-drain phase followed by a
+        // fanned-out stat() phase, rather than one file's stat() blocking the next.
+        data class Row(val path: String, val size: Long, val dateSec: Long)
+        val rows = mutableListOf<Row>()
         try {
             val cursor: Cursor? = context.contentResolver.query(
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
@@ -405,31 +488,33 @@ class LocalFileScanner @Inject constructor(
                 null,
                 "${MediaStore.Audio.Media.DATE_MODIFIED} DESC"
             )
-
             cursor?.use {
                 val dataCol = it.getColumnIndex(MediaStore.Audio.Media.DATA)
                 val sizeCol = it.getColumnIndex(MediaStore.Audio.Media.SIZE)
                 val dateCol = it.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
-
                 while (it.moveToNext()) {
                     val path = if (dataCol >= 0) it.getString(dataCol) else null ?: continue
-                    val size = if (sizeCol >= 0) it.getLong(sizeCol) else 0L
-                    val dateSec = if (dateCol >= 0) it.getLong(dateCol) else 0L
-                    val file = File(path)
-                    val ext = file.extension.lowercase(Locale.getDefault())
-                    if (ext in audioExtensions && file.isFile && file.length() > 0) {
-                        val parentFile = file.parentFile ?: continue
-                        val folderPath = parentFile.absolutePath
-                        val dateMs = if (dateSec > 0) dateSec * 1000L else file.lastModified()
-
-                        val list = folderMap.getOrPut(folderPath) { mutableListOf() }
-                        list.add(Triple(path, if (size > 0) size else file.length(), dateMs))
-                        seenPaths.add(path)
-                    }
+                    rows.add(Row(path, if (sizeCol >= 0) it.getLong(sizeCol) else 0L, if (dateCol >= 0) it.getLong(dateCol) else 0L))
                 }
             }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+
+        data class Validated(val folderPath: String, val path: String, val size: Long, val dateMs: Long)
+        rows.map { row ->
+            async {
+                val file = File(row.path)
+                val ext = file.extension.lowercase(Locale.getDefault())
+                if (ext in audioExtensions && file.isFile && file.length() > 0) {
+                    val parentFile = file.parentFile ?: return@async null
+                    val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else file.lastModified()
+                    Validated(parentFile.absolutePath, row.path, if (row.size > 0) row.size else file.length(), dateMs)
+                } else null
+            }
+        }.awaitAll().filterNotNull().forEach { v ->
+            folderMap.getOrPut(v.folderPath) { mutableListOf() }.add(Triple(v.path, v.size, v.dateMs))
+            seenPaths.add(v.path)
         }
 
         // Direct scan of standard audio directories
@@ -473,7 +558,7 @@ class LocalFileScanner @Inject constructor(
             scanAudioFast(d, depth = 2)
         }
 
-        return folderMap.mapNotNull { (path, rawItems) ->
+        folderMap.mapNotNull { (path, rawItems) ->
             val folderFile = File(path)
             if (!folderFile.exists() || !folderFile.isDirectory) return@mapNotNull null
 
@@ -504,8 +589,7 @@ class LocalFileScanner @Inject constructor(
         }
     }
 
-    private fun queryVideoFolders(): List<MediaFolder> {
-        val folderMap = mutableMapOf<String, MutableList<Triple<String, Long, Long>>>()
+    private suspend fun queryVideoFolders(): List<MediaFolder> = coroutineScope {
         val projection = arrayOf(
             MediaStore.Video.Media._ID,
             MediaStore.Video.Media.DATA,
@@ -513,6 +597,10 @@ class LocalFileScanner @Inject constructor(
             MediaStore.Video.Media.DATE_MODIFIED
         )
 
+        // See queryImageFolders for why this is split into a cheap cursor-drain phase followed
+        // by a fanned-out stat() phase.
+        data class Row(val path: String, val size: Long, val dateSec: Long)
+        val rows = mutableListOf<Row>()
         try {
             val cursor: Cursor? = context.contentResolver.query(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
@@ -521,33 +609,36 @@ class LocalFileScanner @Inject constructor(
                 null,
                 "${MediaStore.Video.Media.DATE_MODIFIED} DESC"
             )
-
             cursor?.use {
                 val dataCol = it.getColumnIndex(MediaStore.Video.Media.DATA)
                 val sizeCol = it.getColumnIndex(MediaStore.Video.Media.SIZE)
                 val dateCol = it.getColumnIndex(MediaStore.Video.Media.DATE_MODIFIED)
-
                 while (it.moveToNext()) {
                     val path = if (dataCol >= 0) it.getString(dataCol) else null ?: continue
-                    val size = if (sizeCol >= 0) it.getLong(sizeCol) else 0L
-                    val dateSec = if (dateCol >= 0) it.getLong(dateCol) else 0L
-                    val file = File(path)
-                    val ext = file.extension.lowercase(Locale.getDefault())
-                    if (ext in videoExtensions && file.isFile && file.length() > 0) {
-                        val parentFile = file.parentFile ?: continue
-                        val folderPath = parentFile.absolutePath
-                        val dateMs = if (dateSec > 0) dateSec * 1000L else file.lastModified()
-
-                        val list = folderMap.getOrPut(folderPath) { mutableListOf() }
-                        list.add(Triple(path, if (size > 0) size else file.length(), dateMs))
-                    }
+                    rows.add(Row(path, if (sizeCol >= 0) it.getLong(sizeCol) else 0L, if (dateCol >= 0) it.getLong(dateCol) else 0L))
                 }
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
 
-        return folderMap.mapNotNull { (path, rawItems) ->
+        data class Validated(val folderPath: String, val path: String, val size: Long, val dateMs: Long)
+        val folderMap = mutableMapOf<String, MutableList<Triple<String, Long, Long>>>()
+        rows.map { row ->
+            async {
+                val file = File(row.path)
+                val ext = file.extension.lowercase(Locale.getDefault())
+                if (ext in videoExtensions && file.isFile && file.length() > 0) {
+                    val parentFile = file.parentFile ?: return@async null
+                    val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else file.lastModified()
+                    Validated(parentFile.absolutePath, row.path, if (row.size > 0) row.size else file.length(), dateMs)
+                } else null
+            }
+        }.awaitAll().filterNotNull().forEach { v ->
+            folderMap.getOrPut(v.folderPath) { mutableListOf() }.add(Triple(v.path, v.size, v.dateMs))
+        }
+
+        folderMap.mapNotNull { (path, rawItems) ->
             val folderFile = File(path)
             if (!folderFile.exists() || !folderFile.isDirectory) return@mapNotNull null
 
@@ -583,10 +674,13 @@ class LocalFileScanner @Inject constructor(
         "rtf", "csv", "mobi", "azw", "azw3", "prc", "odt", "ods", "odp", "wps"
     )
 
-    suspend fun getAllDocumentFiles(sortOption: FileSortOption = FileSortOption.BY_DATE_DESC): List<FileItem> = withContext(Dispatchers.IO) {
+    suspend fun getAllDocumentFiles(sortOption: FileSortOption = FileSortOption.BY_DATE_DESC): List<FileItem> = withContext(Dispatchers.IO) { coroutineScope {
         val fileMap = mutableMapOf<String, FileItem>()
 
-        // 1. Instant MediaStore.Files index query
+        // 1. Instant MediaStore.Files index query. Cursor-drain (cheap) then a fanned-out
+        // stat()/build phase (the actual I/O) — see queryImageFolders for the full rationale.
+        data class Row(val path: String, val name: String?, val size: Long, val dateSec: Long, val mime: String?)
+        val rows = mutableListOf<Row>()
         try {
             val projection = arrayOf(
                 MediaStore.Files.FileColumns._ID,
@@ -636,36 +730,48 @@ class LocalFileScanner @Inject constructor(
 
                 while (it.moveToNext()) {
                     val path = if (dataCol >= 0) it.getString(dataCol) else null ?: continue
-                    val file = File(path)
-                    if (!file.isFile) continue
-                    val ext = file.extension.lowercase(Locale.getDefault())
-                    if (ext in documentExtensions) {
-                        val name = (if (nameCol >= 0) it.getString(nameCol) else null)?.ifBlank { file.name } ?: file.name
-                        val size = if (sizeCol >= 0) it.getLong(sizeCol) else file.length()
-                        val modified = if (dateCol >= 0) it.getLong(dateCol) * 1000L else file.lastModified()
-                        val mime = if (mimeCol >= 0) it.getString(mimeCol) else getMimeType(file)
-
-                        fileMap[path] = FileItem(
-                            id = path,
-                            name = name,
-                            path = path,
-                            size = size,
-                            lastModified = modified,
-                            isDirectory = false,
-                            mimeType = mime,
-                            extension = ext,
-                            itemCount = 0,
-                            thumbnailUri = null,
-                            appSourceBadge = detectBadgeFromPath(path),
-                            folderBadgeType = FolderBadgeType.STANDARD,
-                            isHidden = file.name.startsWith(".")
+                    rows.add(
+                        Row(
+                            path,
+                            if (nameCol >= 0) it.getString(nameCol) else null,
+                            if (sizeCol >= 0) it.getLong(sizeCol) else 0L,
+                            if (dateCol >= 0) it.getLong(dateCol) else 0L,
+                            if (mimeCol >= 0) it.getString(mimeCol) else null
                         )
-                    }
+                    )
                 }
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
+
+        rows.map { row ->
+            async {
+                val file = File(row.path)
+                if (!file.isFile) return@async null
+                val ext = file.extension.lowercase(Locale.getDefault())
+                if (ext !in documentExtensions) return@async null
+                val name = row.name?.ifBlank { file.name } ?: file.name
+                val size = if (row.size > 0) row.size else file.length()
+                val modified = if (row.dateSec > 0) row.dateSec * 1000L else file.lastModified()
+                val mime = row.mime ?: getMimeType(file)
+                row.path to FileItem(
+                    id = row.path,
+                    name = name,
+                    path = row.path,
+                    size = size,
+                    lastModified = modified,
+                    isDirectory = false,
+                    mimeType = mime,
+                    extension = ext,
+                    itemCount = 0,
+                    thumbnailUri = null,
+                    appSourceBadge = detectBadgeFromPath(row.path),
+                    folderBadgeType = FolderBadgeType.STANDARD,
+                    isHidden = file.name.startsWith(".")
+                )
+            }
+        }.awaitAll().filterNotNull().forEach { (path, item) -> fileMap[path] = item }
 
         // 2. Direct scan of standard public Document & Download directories to ensure 100% complete coverage
         val standardDirs = listOf(
@@ -713,9 +819,9 @@ class LocalFileScanner @Inject constructor(
         }
 
         sortFileList(fileMap.values.toList(), sortOption)
-    }
+    } }
 
-    private fun queryDocumentFolders(): List<MediaFolder> {
+    private suspend fun queryDocumentFolders(): List<MediaFolder> = coroutineScope {
         val folderMap = mutableMapOf<String, MutableList<Triple<String, Long, Long>>>()
         // Tracks paths already added (from the MediaStore query below) so the recursive
         // fallback scan can dedup in O(1) instead of doing a linear list.none {} per file.
@@ -762,26 +868,32 @@ class LocalFileScanner @Inject constructor(
                 "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
             )
 
+            data class Row(val path: String, val size: Long, val dateSec: Long)
+            val rows = mutableListOf<Row>()
             cursor?.use {
                 val dataCol = it.getColumnIndex(MediaStore.Files.FileColumns.DATA)
                 val sizeCol = it.getColumnIndex(MediaStore.Files.FileColumns.SIZE)
                 val dateCol = it.getColumnIndex(MediaStore.Files.FileColumns.DATE_MODIFIED)
-
                 while (it.moveToNext()) {
                     val path = if (dataCol >= 0) it.getString(dataCol) else null ?: continue
-                    val size = if (sizeCol >= 0) it.getLong(sizeCol) else 0L
-                    val dateSec = if (dateCol >= 0) it.getLong(dateCol) else 0L
-                    val file = File(path)
+                    rows.add(Row(path, if (sizeCol >= 0) it.getLong(sizeCol) else 0L, if (dateCol >= 0) it.getLong(dateCol) else 0L))
+                }
+            }
+
+            data class Validated(val folderPath: String, val path: String, val size: Long, val dateMs: Long)
+            rows.map { row ->
+                async {
+                    val file = File(row.path)
                     val ext = file.extension.lowercase(Locale.getDefault())
                     if (ext in docExts && file.isFile && file.length() > 0) {
-                        val parentFile = file.parentFile ?: continue
-                        val folderPath = parentFile.absolutePath
-                        val dateMs = if (dateSec > 0) dateSec * 1000L else file.lastModified()
-                        val list = folderMap.getOrPut(folderPath) { mutableListOf() }
-                        list.add(Triple(path, if (size > 0) size else file.length(), dateMs))
-                        seenPaths.add(path)
-                    }
+                        val parentFile = file.parentFile ?: return@async null
+                        val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else file.lastModified()
+                        Validated(parentFile.absolutePath, row.path, if (row.size > 0) row.size else file.length(), dateMs)
+                    } else null
                 }
+            }.awaitAll().filterNotNull().forEach { v ->
+                folderMap.getOrPut(v.folderPath) { mutableListOf() }.add(Triple(v.path, v.size, v.dateMs))
+                seenPaths.add(v.path)
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -823,7 +935,7 @@ class LocalFileScanner @Inject constructor(
             scanFolderFast(d, depth = 2)
         }
 
-        return folderMap.mapNotNull { (path, rawItems) ->
+        folderMap.mapNotNull { (path, rawItems) ->
             val folderFile = File(path)
             if (!folderFile.exists() || !folderFile.isDirectory) return@mapNotNull null
 
@@ -854,13 +966,22 @@ class LocalFileScanner @Inject constructor(
         }
     }
 
-    private fun queryDownloadsFolder(): List<MediaFolder> {
+    private suspend fun queryDownloadsFolder(): List<MediaFolder> = coroutineScope {
         val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         val files = downloadDir.listFiles()?.filter { !it.name.startsWith(".") } ?: emptyList()
         val totalSize = files.sumOf { if (it.isDirectory) 0L else it.length() }
-        val effectiveTime = getFolderEffectiveLastModified(downloadDir)
+        // getFolderEffectiveLastModified recurses the whole subtree (maxDepth 2) on one thread to
+        // find the latest-modified file — for a Downloads folder with many subfolders (browsers
+        // and messaging apps love nesting their own download dirs in there) that walk was done
+        // sequentially. Fan the recursion out per top-level child instead, same idea as the
+        // MediaStore stat() phases above.
+        val effectiveTime = files.map { child ->
+            async {
+                if (child.isDirectory) getFolderEffectiveLastModified(child, maxDepth = 1) else child.lastModified()
+            }
+        }.awaitAll().maxOrNull()?.coerceAtLeast(downloadDir.lastModified()) ?: downloadDir.lastModified()
 
-        return listOf(
+        listOf(
             MediaFolder(
                 id = downloadDir.absolutePath,
                 name = "Downloads",

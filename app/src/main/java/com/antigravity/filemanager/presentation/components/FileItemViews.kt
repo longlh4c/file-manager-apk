@@ -243,7 +243,10 @@ private fun folderItemCountLabel(file: FileItem): String {
         return "Recently deleted"
     }
     val hasSplit = file.subfolderCount + file.fileChildCount == file.itemCount
-    return if (hasSplit) {
+    // Only worth splitting out the folder count when there actually are subfolders — an empty
+    // folder or one with only files reads better as a plain "0 items" / "N items" than the
+    // redundant "0 folders, N items".
+    return if (hasSplit && file.subfolderCount > 0) {
         "${file.subfolderCount} folders, ${file.fileChildCount} items"
     } else {
         "${file.itemCount} items"

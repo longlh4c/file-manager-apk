@@ -203,6 +203,15 @@ class FileBrowserViewModel @Inject constructor(
     }
 
     fun loadDirectory(path: String) {
+        // Set synchronously (before the coroutine below even starts) rather than inside it —
+        // the coroutine's first line is a suspend call (folderPreferencesRepository.getSortOption),
+        // so there's a real gap between this function returning and isLoading actually flipping
+        // to true. Compose's first frame can render in that gap with the state's default
+        // isLoading=false + files=emptyList(), which briefly paints the "empty folder" icon right
+        // before real content (or even cached content) replaces it. Most noticeable on a folder
+        // like Downloads that's opened straight from the dashboard with nothing pre-rendered yet.
+        _uiState.value = _uiState.value.copy(isLoading = true)
+
         // Navigating anywhere (including tapping a folder found via recursive search) must leave
         // search mode — otherwise this correctly loads the target folder's real contents into
         // `files`, but the screen keeps rendering the stale `searchResults` list on top of it
