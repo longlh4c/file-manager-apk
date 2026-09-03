@@ -132,7 +132,13 @@ fun AudioListItem(
     onClick: () -> Unit,
     onLongClick: () -> Unit = {},
     isSelected: Boolean = false,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // Was hardcoded to the music note everywhere — this composable is really just "folder list
+    // row with a thumbnail and a type badge", reused below for Images/Videos' list view (their
+    // root-folders grid used to ignore the view-mode toggle entirely and stay a grid no matter
+    // what was selected; see MediaCategoriesScreen). Defaults keep Audio's call sites unchanged.
+    badgeIcon: ImageVector = Icons.Default.MusicNote,
+    badgeColor: Color = Color(0xFF26A69A)
 ) {
     val rowBg = if (isSelected) Color(0xFF00695C) else Color.Transparent
 
@@ -147,7 +153,7 @@ fun AudioListItem(
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Square Album Artwork / Thumbnail with Note Badge
+        // Square Album Artwork / Thumbnail with type Badge
         Box(
             modifier = Modifier
                 .size(54.dp)
@@ -159,7 +165,7 @@ fun AudioListItem(
                     model = folder.latestThumbnailUri,
                     contentDescription = folder.name,
                     contentScale = ContentScale.Crop,
-                    error = rememberVectorPainter(Icons.Default.MusicNote),
+                    error = rememberVectorPainter(badgeIcon),
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
@@ -168,7 +174,7 @@ fun AudioListItem(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.MusicNote,
+                        imageVector = badgeIcon,
                         contentDescription = null,
                         tint = TealPrimary,
                         modifier = Modifier.size(28.dp)
@@ -176,18 +182,18 @@ fun AudioListItem(
                 }
             }
 
-            // Audio Badge at bottom right
+            // Type badge at bottom right
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(2.dp)
                     .size(18.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF26A69A)),
+                    .background(badgeColor),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = Icons.Default.MusicNote,
+                    imageVector = badgeIcon,
                     contentDescription = null,
                     tint = Color.White,
                     modifier = Modifier.size(11.dp)
