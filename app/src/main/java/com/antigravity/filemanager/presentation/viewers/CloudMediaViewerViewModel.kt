@@ -61,6 +61,10 @@ class CloudMediaViewerViewModel @Inject constructor(
             }
         }
 
-        cloudUseCase.downloadFile(accountId, file.path, targetDir.absolutePath).map { ResolvedMedia.LocalFile(it) }
+        // notifyTransfer=false — the viewer has its own loading UI for "fetching this file to
+        // preview it"; routing it through TransferGuard too meant this could also pop the global
+        // "Downloading from Cloud" notification/modal on whatever *other* Cloud screen happened
+        // to be open underneath, for a fetch that screen has nothing to do with.
+        cloudUseCase.downloadFile(accountId, file.path, targetDir.absolutePath, notifyTransfer = false).map { ResolvedMedia.LocalFile(it) }
     }
 }

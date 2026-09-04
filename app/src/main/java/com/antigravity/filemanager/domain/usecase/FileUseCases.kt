@@ -50,7 +50,7 @@ class FileOperationsUseCase @Inject constructor(
         fileRepository.getFilesInDirectory(directoryPath, sort, showHidden)
 
     suspend fun copy(sourcePaths: List<String>, targetDir: String, overwriteNames: Set<String> = emptySet(), skipNames: Set<String> = emptySet()): Result<Unit> {
-        transferGuard.begin()
+        transferGuard.begin(initialLabel = "Copying")
         try {
             val result = fileRepository.copyFiles(sourcePaths, targetDir, overwriteNames, skipNames)
             if (result.isSuccess) folderCacheManager.invalidateMediaFolders()
@@ -61,7 +61,7 @@ class FileOperationsUseCase @Inject constructor(
     }
 
     suspend fun move(sourcePaths: List<String>, targetDir: String, overwriteNames: Set<String> = emptySet(), skipNames: Set<String> = emptySet()): Result<Unit> {
-        transferGuard.begin()
+        transferGuard.begin(initialLabel = "Moving")
         try {
             val result = fileRepository.moveFiles(sourcePaths, targetDir, overwriteNames, skipNames)
             if (result.isSuccess) folderCacheManager.invalidateMediaFolders()
@@ -210,7 +210,7 @@ class CloudStorageUseCase @Inject constructor(
         skipNames: Set<String> = emptySet(),
         onFileProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesSent: Long, totalBytes: Long) -> Unit)? = null
     ): Result<Unit> {
-        transferGuard.begin()
+        transferGuard.begin(initialLabel = "Uploading")
         try {
         return try {
             // Directories in localPaths have no single "upload" call — recursively create a
@@ -336,15 +336,25 @@ class CloudStorageUseCase @Inject constructor(
         accountId: String,
         remotePath: String,
         localTargetDir: String,
+        // false for CloudExplorerViewModel's last-resort thumbnail fetch (small files a provider
+        // has no cheap thumbnail endpoint for) — that's an invisible background prefetch the user
+        // never asked for, not a transfer worth a persistent notification or (worse, before the
+        // fix that added this parameter) a full-screen "Downloading from Cloud" modal on whatever
+        // screen happens to be open when it runs. TransferGuard's progress is one global signal
+        // every open Cloud-adjacent screen mirrors into its own UI — see CloudMediaViewerViewModel
+        // for the other silent caller (fetching a temp local copy to preview/stream), which also
+        // passes false for the same reason. Kept before onProgress (rather than after) so existing
+        // trailing-lambda call sites for onProgress don't silently bind to the wrong parameter.
+        notifyTransfer: Boolean = true,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Result<File> {
-        transferGuard.begin()
+        if (notifyTransfer) transferGuard.begin()
         try {
             val result = cloudRepository.downloadCloudFile(accountId, remotePath, localTargetDir, onProgress)
             if (result.isSuccess) folderCacheManager.invalidateMediaFolders()
             return result
         } finally {
-            transferGuard.end()
+            if (notifyTransfer) transferGuard.end()
         }
     }
 

@@ -438,14 +438,25 @@ class FolderCacheManager @Inject constructor(
         putFolder(getCategorySubfolderKey(categoryType, path, sort, showHidden), files, markReconciled = true)
     }
 
-    suspend fun getCloudFolder(accountId: String, path: String, freshTtlMs: Long = 0L): CachedFolderResult? {
+    // Same "reconcile once per process, then trust the cache" contract as getMediaFolders/
+    // getCategorySubfolder (see reconciledOnceKeys) rather than the 30s TTL this used to carry —
+    // a cloud folder is invalidated the same explicit way a local one is (any in-app
+    // copy/move/delete/rename calls invalidateCloud), there's no external-change signal for cloud
+    // storage the way MediaChangeSignal covers local media, but that's exactly why trusting a
+    // real fetch for the rest of the session (instead of re-fetching every 30s "just in case") is
+    // safe: nothing else in this app's own session can change a cloud folder without going
+    // through this app and invalidating it. This is also the cache the "pick a destination"
+    // folder pickers (CategoriesViewModel/FileBrowserViewModel) share with the Cloud tab
+    // (CloudExplorerViewModel) — a folder fetched once from either screen now stays fresh for
+    // both for the rest of the session, not just the 30s it used to.
+    suspend fun getCloudFolder(accountId: String, path: String): CachedFolderResult? {
         val key = getCloudKey(accountId, path)
-        return getFolder(key, freshTtlMs)
+        return getFolder(key, useReconcileOnce = true)
     }
 
     suspend fun putCloudFolder(accountId: String, path: String, files: List<FileItem>) {
         val key = getCloudKey(accountId, path)
-        putFolder(key, files)
+        putFolder(key, files, markReconciled = true)
     }
 
     private suspend fun getFolder(key: String, freshTtlMs: Long = 0L, useReconcileOnce: Boolean = false): CachedFolderResult? {

@@ -99,12 +99,6 @@ class CloudExplorerViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
-    companion object {
-        // MEGA in particular pays a full account-tree fetch+decrypt per listing, so a short
-        // freshness window avoids repeating that on every navigation into an already-cached folder.
-        private const val CLOUD_CACHE_FRESH_TTL_MS = 30_000L
-    }
-
     private val accountId: String = savedStateHandle.get<String>("accountId") ?: ""
     private val title: String = savedStateHandle.get<String>("title") ?: "Cloud Storage"
 
@@ -235,7 +229,7 @@ class CloudExplorerViewModel @Inject constructor(
             val cachedAccount = baseAccount?.copy(totalSpaceBytes = cachedTotal, usedSpaceBytes = cachedUsed)
 
             // 2. Try to show cached folder contents immediately (Stale phase)
-            val cached = folderCacheManager.getCloudFolder(accountId, path, CLOUD_CACHE_FRESH_TTL_MS)
+            val cached = folderCacheManager.getCloudFolder(accountId, path)
             var skipRevalidate = false
             if (cached != null && cached.files.isNotEmpty()) {
                 val sortedCached = sortCloudFiles(cached.files, _uiState.value.sortOption)
@@ -251,8 +245,10 @@ class CloudExplorerViewModel @Inject constructor(
                     isSelectionMode = false
                 )
                 if (cached.isFresh) {
-                    // Cache is recent (and every mutation invalidates it via refresh()) —
-                    // skip the network round-trip, which for MEGA means skipping a full
+                    // Already reconciled once this process (see FolderCacheManager.
+                    // reconciledOnceKeys) — every mutation invalidates the cache explicitly, so
+                    // there's nothing this revalidate would catch that isn't already handled.
+                    // Skip the network round-trip, which for MEGA means skipping a full
                     // account-tree re-download + re-decrypt just to show this folder again.
                     skipRevalidate = true
                     fetchFolderItemCounts(sortedCached)
@@ -730,9 +726,12 @@ class CloudExplorerViewModel @Inject constructor(
             }
 
             // Last resort: no cheap path worked, so only download the whole file for a
-            // thumbnail if it's small enough to be worth it.
+            // thumbnail if it's small enough to be worth it. notifyTransfer=false — this is an
+            // invisible background prefetch triggered by just scrolling a folder, not something
+            // the user asked to see a "File transfer in progress" notification (or the in-app
+            // download modal) for.
             if (item.size !in 1..maxImageThumbnailPrefetchBytes) return
-            val dlResult = cloudUseCase.downloadFile(accountId, item.path, targetDir.absolutePath)
+            val dlResult = cloudUseCase.downloadFile(accountId, item.path, targetDir.absolutePath, notifyTransfer = false)
             if (dlResult.isSuccess) {
                 val downloaded = dlResult.getOrNull()
                 if (downloaded != null && downloaded.exists() && downloaded.length() > 0) {
@@ -1167,7 +1166,7 @@ class CloudExplorerViewModel @Inject constructor(
             // directly and never touched TransferGuard at all, so backgrounding the app mid-delete
             // (or just not watching the screen) showed no persistent notification the way a
             // copy/move in progress does.
-            transferGuard.begin()
+            transferGuard.begin(initialLabel = "Deleting")
             try {
             val selectedIds = _uiState.value.selectedPaths
             // selectedPaths actually holds item IDs now (see toggleSelection) — resolve back to
@@ -1296,7 +1295,7 @@ class CloudExplorerViewModel @Inject constructor(
         activeTransferJob = viewModelScope.launch {
             // See the matching comment in deleteSelected — restore never touched TransferGuard
             // either, so it showed no persistent notification the way copy/move does.
-            transferGuard.begin()
+            transferGuard.begin(initialLabel = "Restoring")
             try {
             val selectedIds = _uiState.value.selectedPaths
             val toRestore = visibleFiles().filter { it.path in selectedIds || it.id in selectedIds }

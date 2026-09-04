@@ -66,9 +66,30 @@ class TransferGuard @Inject constructor(
     // next begin() cancel it instead of racing a stop against a start on the same service.
     private val stopGraceMs = 1500L
 
-    fun begin() {
+    /**
+     * @param initialLabel What to call this operation ("Deleting", "Uploading", ...) before any
+     * real per-file progress is available. Without this, the very first notification the
+     * foreground service posts (right as it starts up, before the caller's first
+     * [updateProgress] call has had a chance to land) fell back to a generic "File transfer in
+     * progress" — usually invisible since it's overwritten within milliseconds, but a delete of
+     * just one or two items can finish fast enough that the generic text is the only thing the
+     * user actually sees. Setting this here, synchronously, before the service is even started,
+     * means there's no longer a window where [progress] can be read as null for this operation.
+     */
+    fun begin(initialLabel: String? = null) {
         pendingStop?.cancel()
         pendingStop = null
+        if (initialLabel != null) {
+            _progress.value = TransferProgressInfo(
+                currentFileName = "",
+                currentIndex = 0,
+                totalFiles = 0,
+                bytesTransferred = 0L,
+                totalBytes = 0L,
+                isUpload = false,
+                operationLabel = initialLabel
+            )
+        }
         if (activeCount.getAndIncrement() == 0) {
             val intent = Intent(context, TransferService::class.java).apply {
                 action = TransferService.ACTION_START

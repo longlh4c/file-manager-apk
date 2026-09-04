@@ -131,17 +131,35 @@ fun MediaFolderCard(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Name with item count
-        Text(
-            text = "${folder.name} (${folder.itemCount})",
-            color = if (isSelected) TealPrimary else TextPrimary,
-            fontSize = 13.sp,
-            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-            textAlign = TextAlign.Center,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth()
-        )
+        // Name with item count — was one Text("$name ($count)") truncated as a single string, so
+        // a long folder name (a downloader app's package-name-like folder, a Zalo/Messenger chat
+        // title, ...) could ellipsize right before the count ever appeared, leaving a grid card
+        // with no visible item count at all. Splitting into two Texts lets only the name shrink —
+        // weight(1f, fill = false) gives it up to the remaining width without forcing it to claim
+        // space it doesn't need, so short names still stay centered as a pair — while the count
+        // renders at its natural width and is never the part that gets cut off.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = folder.name,
+                color = if (isSelected) TealPrimary else TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+            Text(
+                text = " (${folder.itemCount})",
+                color = if (isSelected) TealPrimary else TextPrimary,
+                fontSize = 13.sp,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                maxLines = 1,
+                softWrap = false
+            )
+        }
     }
 }
 

@@ -15,8 +15,6 @@ import com.antigravity.filemanager.domain.usecase.GetCategorizedMediaUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -88,12 +86,6 @@ class CategoriesViewModel @Inject constructor(
     private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
-
-    companion object {
-        // Matches CloudExplorerViewModel's own TTL for the same cache — no reason for the two
-        // screens reading the same "cloud_<accountId>_<path>" entries to disagree on freshness.
-        private const val CLOUD_FOLDER_PICKER_FRESH_TTL_MS = 30_000L
-    }
 
     private val categoryTypeName: String = savedStateHandle.get<String>("categoryType") ?: CategoryType.IMAGES.name
     val categoryType: CategoryType = try {
@@ -273,25 +265,6 @@ class CategoriesViewModel @Inject constructor(
     private val audioExts = setOf("mp3", "m4a", "wav", "flac", "aac", "ogg", "wma", "opus", "amr", "mid", "midi")
     private val docExts = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "rtf", "epub")
 
-    private fun folderContainsExtensions(folderPath: String, extensions: Set<String>, maxDepth: Int = 3): Boolean {
-        val dir = File(folderPath)
-        if (!dir.exists() || !dir.isDirectory) return false
-        val files = dir.listFiles() ?: return false
-        for (f in files) {
-            if (f.name.startsWith(".")) continue
-            if (f.isDirectory) {
-                if (f.name != "Android" && maxDepth > 0) {
-                    if (folderContainsExtensions(f.absolutePath, extensions, maxDepth - 1)) return true
-                }
-            } else {
-                if (f.length() > 0 && f.extension.lowercase(Locale.getDefault()) in extensions) {
-                    return true
-                }
-            }
-        }
-        return false
-    }
-
     private suspend fun filterFilesForCategory(allFiles: List<FileItem>): List<FileItem> = withContext(Dispatchers.IO) {
         val exts = when (categoryType) {
             CategoryType.IMAGES -> imageExts
@@ -306,21 +279,22 @@ class CategoriesViewModel @Inject constructor(
             CategoryType.AUDIO -> "audio/"
             else -> null
         }
-        // Each directory's match check is an independent recursive filesystem walk
-        // (folderContainsExtensions) — running them one at a time made the cost add up across
-        // every subfolder in the listing. Fanning them out onto the IO dispatcher lets the scans
-        // overlap instead, same idea as LocalFileScanner.listFilesInDir's date/size sort.
-        allFiles.map { item ->
-            async {
-                val matches = if (item.isDirectory) {
-                    folderContainsExtensions(item.path, exts)
-                } else {
-                    item.extension.lowercase(Locale.getDefault()) in exts ||
-                        (mimePrefix != null && item.mimeType.startsWith(mimePrefix))
-                }
-                if (matches) item else null
-            }
-        }.awaitAll().filterNotNull()
+        // A category bucket (e.g. Images > Pictures) is meant to be a flat view of the files
+        // directly inside it. MediaStore already groups every *subfolder's* images/videos/etc.
+        // into its own separate top-level bucket (Images > Wallpapers, Images > Screenshots are
+        // their own cards on the root grid even though they live inside Pictures/) — so also
+        // listing Pictures' subfolders here just repeated content the user can already reach as
+        // its own card, nested one level deeper for no reason. Used to keep a subfolder whenever
+        // folderContainsExtensions() found a matching file anywhere underneath it (a recursive
+        // filesystem walk per subfolder); dropping directories outright instead is both the fix
+        // and, incidentally, no longer touches the filesystem at all beyond what's already in
+        // `allFiles`.
+        allFiles.filter { item ->
+            !item.isDirectory && (
+                item.extension.lowercase(Locale.getDefault()) in exts ||
+                    (mimePrefix != null && item.mimeType.startsWith(mimePrefix))
+            )
+        }
     }
 
     fun navigateBack(): Boolean {
@@ -653,9 +627,11 @@ class CategoriesViewModel @Inject constructor(
             // though the Cloud tab right next to it (CloudExplorerViewModel) already caches the
             // exact same folder via FolderCacheManager — so browsing here after already having
             // browsed there in the Cloud tab was needlessly slow for data already sitting in
-            // cache. Same key ("cloud_<accountId>_<path>"), so this picker now shares that cache
-            // instead of bypassing it.
-            val cached = folderCacheManager.getCloudFolder(account.id, path, CLOUD_FOLDER_PICKER_FRESH_TTL_MS)
+            // cache. Same key ("cloud_<accountId>_<path>"), reconciled at most once per process
+            // (see FolderCacheManager.getCloudFolder) — so this picker now shares that cache
+            // instead of bypassing it, and a folder either screen has already fetched this
+            // session stays instant on the other for the rest of it.
+            val cached = folderCacheManager.getCloudFolder(account.id, path)
             if (cached != null) {
                 _uiState.value = _uiState.value.copy(
                     cloudFolderPickerLoading = false,

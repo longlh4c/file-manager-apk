@@ -102,9 +102,6 @@ class FileBrowserViewModel @Inject constructor(
 
     companion object {
         private const val LOCAL_CACHE_FRESH_TTL_MS = 15_000L
-        // Matches CloudExplorerViewModel's own TTL for the same cache — no reason for the two
-        // screens reading the same "cloud_<accountId>_<path>" entries to disagree on freshness.
-        private const val CLOUD_FOLDER_PICKER_FRESH_TTL_MS = 30_000L
     }
 
     private val initialPath: String = savedStateHandle.get<String>("path") ?: android.os.Environment.getExternalStorageDirectory().absolutePath
@@ -735,9 +732,11 @@ class FileBrowserViewModel @Inject constructor(
             // though the Cloud tab right next to it (CloudExplorerViewModel) already caches the
             // exact same folder via FolderCacheManager — so browsing here after already having
             // browsed there in the Cloud tab was needlessly slow for data already sitting in
-            // cache. Same key ("cloud_<accountId>_<path>"), so this picker now shares that cache
-            // instead of bypassing it.
-            val cached = folderCacheManager.getCloudFolder(account.id, path, CLOUD_FOLDER_PICKER_FRESH_TTL_MS)
+            // cache. Same key ("cloud_<accountId>_<path>"), reconciled at most once per process
+            // (see FolderCacheManager.getCloudFolder) — so this picker now shares that cache
+            // instead of bypassing it, and a folder either screen has already fetched this
+            // session stays instant on the other for the rest of it.
+            val cached = folderCacheManager.getCloudFolder(account.id, path)
             if (cached != null) {
                 _uiState.value = _uiState.value.copy(
                     cloudFolderPickerLoading = false,

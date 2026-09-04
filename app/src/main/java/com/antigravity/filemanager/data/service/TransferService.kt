@@ -101,10 +101,19 @@ class TransferService : Service() {
         } else {
             val verb = info.operationLabel ?: if (info.isUpload) "Uploading" else "Downloading"
             val percent = if (info.totalBytes > 0) (info.bytesTransferred * 100 / info.totalBytes).toInt() else 0
-            builder
-                .setContentTitle("$verb ${info.currentIndex}/${info.totalFiles} — $percent%")
-                .setContentText(info.currentFileName)
-                .setProgress(100, percent, info.totalBytes <= 0)
+            if (info.totalFiles > 0) {
+                builder
+                    .setContentTitle("$verb ${info.currentIndex}/${info.totalFiles} — $percent%")
+                    .setContentText(info.currentFileName)
+                    .setProgress(100, percent, info.totalBytes <= 0)
+            } else {
+                // TransferGuard.begin()'s initial-label state: an operation just started and knows
+                // what it's doing (Deleting/Uploading/...) but not yet how many items or bytes —
+                // still specific enough to beat the generic "File transfer in progress" fallback.
+                builder
+                    .setContentTitle("$verb…")
+                    .setProgress(0, 0, true)
+            }
         }
 
         val notification = builder.build()

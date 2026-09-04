@@ -1706,8 +1706,19 @@ fun CloudFolderPickerDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    // The system back gesture/button is wired to onDismissRequest below — while drilled into a
+    // subfolder, that used to close this full-screen dialog outright instead of stepping back up
+    // one level the way it does everywhere else in the app (and the way a user swiping back after
+    // navigating deeper would expect). Only actually dismiss once there's nowhere left to go back
+    // to (segments.size == 1, i.e. still at Root). There's no dialog "outside" to tap here — the
+    // Surface below fills the whole window — so onDismissRequest only ever fires from back
+    // press/gesture, making this safe to redirect entirely rather than splitting it from a
+    // separate click-outside case.
+    val handleBackOrDismiss: () -> Unit = {
+        if (segments.size > 1) onSegmentClick(segments.size - 2) else onDismiss()
+    }
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = handleBackOrDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(modifier = Modifier.fillMaxSize(), color = DarkBackground) {
