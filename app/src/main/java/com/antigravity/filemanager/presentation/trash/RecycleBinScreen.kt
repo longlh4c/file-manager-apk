@@ -104,7 +104,14 @@ fun RecycleBinScreen(
         },
         containerColor = DarkBackground
     ) { paddingValues ->
-        if (uiState.items.isEmpty()) {
+        if (uiState.isLoading) {
+            Box(
+                modifier = Modifier.fillMaxSize().padding(paddingValues),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(color = TealPrimary)
+            }
+        } else if (uiState.items.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()

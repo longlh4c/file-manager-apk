@@ -20,6 +20,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -84,11 +85,14 @@ class CategoriesViewModel @Inject constructor(
     private val globalClipboardManager: GlobalClipboardManager,
     private val folderPreferencesRepository: com.antigravity.filemanager.data.repository.FolderPreferencesRepository,
     private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
+    private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
     companion object {
-        private const val MEDIA_FOLDERS_FRESH_TTL_MS = 20_000L
+        // Matches CloudExplorerViewModel's own TTL for the same cache — no reason for the two
+        // screens reading the same "cloud_<accountId>_<path>" entries to disagree on freshness.
+        private const val CLOUD_FOLDER_PICKER_FRESH_TTL_MS = 30_000L
     }
 
     private val categoryTypeName: String = savedStateHandle.get<String>("categoryType") ?: CategoryType.IMAGES.name
@@ -105,6 +109,38 @@ class CategoriesViewModel @Inject constructor(
         loadFolders()
         loadCloudAccounts()
         observeGlobalClipboard()
+        observeMediaChanges()
+    }
+
+    /** Quietly re-fetches whatever's currently shown (root folders, or the open subfolder)
+     * whenever MediaStore reports a change anywhere — a new photo, a completed download, a
+     * deleted file — so the user doesn't have to pull-to-refresh to see it. Unlike loadFolders()/
+     * openSubfolder(), this never touches folderHistory/selectedPaths/isLoading: it's meant to be
+     * invisible while the user is actively browsing, not to reset their place or selection. */
+    private fun observeMediaChanges() {
+        viewModelScope.launch {
+            // Short debounce just to coalesce a burst of MediaStore change notifications from a
+            // single file write into one rescan, not to delay the update.
+            mediaChangeSignal.changes.debounce(150).collect {
+                val subfolderPath = _uiState.value.currentSubfolderPath
+                val sort = _uiState.value.sortOption
+                val hidden = _uiState.value.showHiddenFiles
+                if (subfolderPath != null) {
+                    val allFiles = fileOperationsUseCase.getFiles(subfolderPath, sort, showHidden = hidden)
+                    val filtered = filterFilesForCategory(allFiles)
+                    folderCacheManager.putCategorySubfolder(categoryType, subfolderPath, sort, hidden, filtered)
+                    if (_uiState.value.currentSubfolderPath == subfolderPath) {
+                        _uiState.value = _uiState.value.copy(subfolderFiles = filtered)
+                    }
+                } else {
+                    val folders = mediaUseCase.getFolders(categoryType, sort)
+                    folderCacheManager.putMediaFolders(categoryType, sort, folders)
+                    if (_uiState.value.currentSubfolderPath == null) {
+                        _uiState.value = _uiState.value.copy(folders = folders)
+                    }
+                }
+            }
+        }
     }
 
     private fun observeGlobalClipboard() {
@@ -151,40 +187,35 @@ class CategoriesViewModel @Inject constructor(
                 showHiddenFiles = savedHidden,
                 viewMode = savedViewMode
             )
-            if (categoryType == CategoryType.DOCUMENTS) {
-                // Stale-while-revalidate: show the cached list instantly if we have one, and only
-                // re-run the (MediaStore query + filesystem walk) scan when it's actually stale —
-                // re-opening "Documents" a few seconds after the last visit used to always redo
-                // the full scan from scratch.
-                val cached = folderCacheManager.getDocuments(savedSort, MEDIA_FOLDERS_FRESH_TTL_MS)
-                if (cached != null) {
-                    _uiState.value = _uiState.value.copy(isLoading = false, subfolderFiles = cached.files, folders = emptyList())
-                    if (cached.isFresh) return@launch
-                } else {
-                    _uiState.value = _uiState.value.copy(isLoading = true)
-                }
-                val docs = mediaUseCase.getAllDocuments(savedSort)
-                folderCacheManager.putDocuments(savedSort, docs)
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    subfolderFiles = docs,
-                    folders = emptyList()
-                )
+            // Documents used to always show a flat list of every document file on the device at
+            // the root level, unlike Images/Audio/Videos/Downloads which show a bucket-folder
+            // grid first — now it follows the same pattern as the others (a folder like
+            // /Zalo/Documents shows up as one card, not every file inside it dumped at the top).
+            //
+            // isFresh here means "already reconciled once this process" (see
+            // FolderCacheManager.reconciledOnceKeys), not "cached within the last N seconds" — so
+            // a cache hit paints instantly and, after the first open per process, never bounces
+            // back into a background rescan at all. Anything that could make it wrong is already
+            // pushed to the cache directly: invalidateMediaFolders() on any in-app mutation, and
+            // observeMediaChanges() on any external one.
+            val cached = folderCacheManager.getMediaFolders(categoryType, savedSort)
+            if (cached != null) {
+                _uiState.value = _uiState.value.copy(isLoading = false, folders = cached.folders)
+                if (cached.isFresh) return@launch
             } else {
-                val cached = folderCacheManager.getMediaFolders(categoryType, savedSort, MEDIA_FOLDERS_FRESH_TTL_MS)
-                if (cached != null) {
-                    _uiState.value = _uiState.value.copy(isLoading = false, folders = cached.folders)
-                    if (cached.isFresh) return@launch
-                } else {
-                    _uiState.value = _uiState.value.copy(isLoading = true)
-                }
-                val folders = mediaUseCase.getFolders(categoryType, savedSort)
-                folderCacheManager.putMediaFolders(categoryType, savedSort, folders)
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    folders = folders
-                )
+                _uiState.value = _uiState.value.copy(isLoading = true)
             }
+            // Coalesced with DashboardViewModel's warm-up: if that background reconcile for this
+            // exact category is already running (a very likely race right after cold start — the
+            // dashboard kicks it off before the user can possibly have tapped in yet), this awaits
+            // that same scan instead of running a second one alongside it and fighting it for CPU.
+            val folders = folderCacheManager.reconcileMediaFolders(categoryType, savedSort) {
+                mediaUseCase.getFolders(categoryType, savedSort)
+            }
+            _uiState.value = _uiState.value.copy(
+                isLoading = false,
+                folders = folders
+            )
         }
     }
 
@@ -207,10 +238,10 @@ class CategoriesViewModel @Inject constructor(
             // Stale-while-revalidate, same pattern as loadFolders(): paint the cached (already
             // category-filtered) result instantly if we have one, and only redo the recursive
             // filesystem scan (getFiles + filterFilesForCategory, both of which walk subfolders
-            // looking for matching extensions — the actual slow part) when it's stale. Previously
-            // this ran that full scan unconditionally on every folder open, even ones visited
-            // seconds ago.
-            val cached = folderCacheManager.getCategorySubfolder(categoryType, folderPath, savedSort, savedHidden, MEDIA_FOLDERS_FRESH_TTL_MS)
+            // looking for matching extensions — the actual slow part) once per process for this
+            // exact folder+sort+hidden combination. Previously this ran that full scan
+            // unconditionally on every open, even ones visited seconds ago.
+            val cached = folderCacheManager.getCategorySubfolder(categoryType, folderPath, savedSort, savedHidden)
             _uiState.value = _uiState.value.copy(
                 isLoading = cached == null,
                 folderHistory = history,
@@ -616,11 +647,31 @@ class CategoriesViewModel @Inject constructor(
     private fun loadCloudFolderPickerFolders(path: String) {
         val account = _uiState.value.cloudFolderPickerAccount ?: return
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(cloudFolderPickerLoading = true, cloudFolderPickerPath = path)
+            _uiState.value = _uiState.value.copy(cloudFolderPickerPath = path)
+            // Was always a live network round-trip (for MEGA in particular, a full account-tree
+            // fetch+decrypt) on every folder tapped in this "pick a destination" picker, even
+            // though the Cloud tab right next to it (CloudExplorerViewModel) already caches the
+            // exact same folder via FolderCacheManager — so browsing here after already having
+            // browsed there in the Cloud tab was needlessly slow for data already sitting in
+            // cache. Same key ("cloud_<accountId>_<path>"), so this picker now shares that cache
+            // instead of bypassing it.
+            val cached = folderCacheManager.getCloudFolder(account.id, path, CLOUD_FOLDER_PICKER_FRESH_TTL_MS)
+            if (cached != null) {
+                _uiState.value = _uiState.value.copy(
+                    cloudFolderPickerLoading = false,
+                    cloudFolderPickerFolders = cached.files.filter { it.isDirectory }.sortedBy { it.name.lowercase() }
+                )
+                if (cached.isFresh) return@launch
+            } else {
+                _uiState.value = _uiState.value.copy(cloudFolderPickerLoading = true)
+            }
             val result = cloudStorageUseCase.getFiles(account.id, path)
-            val folders = result.getOrDefault(emptyList()).filter { it.isDirectory }
-                .sortedBy { it.name.lowercase() }
-            _uiState.value = _uiState.value.copy(cloudFolderPickerLoading = false, cloudFolderPickerFolders = folders)
+            val files = result.getOrDefault(emptyList())
+            folderCacheManager.putCloudFolder(account.id, path, files)
+            _uiState.value = _uiState.value.copy(
+                cloudFolderPickerLoading = false,
+                cloudFolderPickerFolders = files.filter { it.isDirectory }.sortedBy { it.name.lowercase() }
+            )
         }
     }
 

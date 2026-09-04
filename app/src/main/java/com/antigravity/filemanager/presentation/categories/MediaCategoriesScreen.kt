@@ -511,17 +511,17 @@ fun MediaCategoriesScreen(
                 onRefresh = { viewModel.refresh() },
                 modifier = Modifier.fillMaxSize()
             ) {
-            if (category == CategoryType.DOCUMENTS || uiState.folderHistory.isNotEmpty()) {
+            if (uiState.folderHistory.isNotEmpty()) {
                 if (filteredFiles.isEmpty() && !uiState.isLoading) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(
-                            text = if (category == CategoryType.DOCUMENTS) "No documents found" else "No files found",
+                            text = "No files found",
                             color = TextSecondary,
                             fontSize = 15.sp
                         )
                     }
                 } else {
-                    // Files view (Flat Documents or Nested Folder) with ViewMode support
+                    // Nested folder contents, with ViewMode support
                     when (viewMode) {
                         ViewMode.GRID -> {
                             LazyVerticalGrid(
@@ -614,9 +614,9 @@ fun MediaCategoriesScreen(
                     }
                 }
             } else {
-                // Root category folders view for Audio, Images, Videos, Downloads. Was branching
-                // on `category` alone (Audio always list, everything else always grid) so the
-                // View option in the sort/view sheet had no effect at all here — only the
+                // Root category folders view for Audio, Images, Videos, Documents, Downloads. Was
+                // branching on `category` alone (Audio always list, everything else always grid)
+                // so the View option in the sort/view sheet had no effect at all here — only the
                 // subfolder file listing below respected it. Now it's keyed off viewMode like
                 // every other listing in the app, with `category` only picking the right
                 // thumbnail fallback icon/badge for the list rows.
@@ -624,6 +624,7 @@ fun MediaCategoriesScreen(
                     CategoryType.AUDIO -> Icons.Default.MusicNote to Color(0xFF26A69A)
                     CategoryType.VIDEOS -> Icons.Default.Movie to Color(0xFFEF5350)
                     CategoryType.IMAGES -> Icons.Default.Image to Color(0xFFBA68C8)
+                    CategoryType.DOCUMENTS -> Icons.Default.Article to Color(0xFF42A5F5)
                     else -> Icons.Default.Folder to Color(0xFFFFB74D)
                 }
                 if (viewMode == ViewMode.GRID) {

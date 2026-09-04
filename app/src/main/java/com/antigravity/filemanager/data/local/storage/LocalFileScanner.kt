@@ -134,7 +134,11 @@ class LocalFileScanner @Inject constructor(
                         itemCount = count,
                         subfolderCount = subfolderCount,
                         fileChildCount = fileChildCount,
-                        thumbnailUri = if (!isDir && (isVideo || isImage || isAudio || mime.startsWith("image/") || mime.startsWith("video/"))) file.absolutePath else null,
+                        // apk/pdf added so ApkIconFetcher/PdfThumbnailFetcher (registered in
+                        // FileManagerApp's Coil ImageLoader) get a chance to load the app's real
+                        // embedded icon / the PDF's actual first page instead of every file of
+                        // that type falling back to the same generic icon.
+                        thumbnailUri = if (!isDir && (isVideo || isImage || isAudio || ext == "apk" || ext == "pdf" || mime.startsWith("image/") || mime.startsWith("video/"))) file.absolutePath else null,
                         appSourceBadge = badge,
                         folderBadgeType = folderBadge,
                         isHidden = file.name.startsWith(".")
@@ -409,43 +413,42 @@ class LocalFileScanner @Inject constructor(
             e.printStackTrace()
         }
 
-        // Phase 2: the actual stat() calls (isFile/length/lastModified) are the expensive part
-        // of this scan — one syscall each, previously done one row at a time. Fanning them out
-        // onto the IO dispatcher lets a large photo library's worth of stats overlap instead of
-        // queuing behind each other, same idea as listFilesInDir's date/size sort.
-        data class Validated(val folderPath: String, val path: String, val size: Long, val dateMs: Long)
+        // Phase 2: used to re-stat() (isFile + length) every single row to "validate" it before
+        // trusting it — for a large photo library that's thousands of syscalls, and it was the
+        // actual cost of this scan even after phase 1's cheap cursor-only read. Trusting
+        // MediaStore's own SIZE/DATE_MODIFIED columns instead (falling back to a real stat() only
+        // for the rare row that doesn't have one) turns this into a plain in-memory loop over
+        // already-read rows — no filesystem I/O at all in the common case. The tradeoff other
+        // gallery/file-manager apps make the same way: a file deleted outside the app can show as
+        // a stale entry until MediaStore's own scanner catches up and purges the row, rather than
+        // every folder open paying to re-verify the whole library against the filesystem.
         val folderMap = mutableMapOf<String, MutableList<Triple<String, Long, Long>>>()
-        rows.map { row ->
-            async {
-                val file = File(row.path)
-                val ext = file.extension.lowercase(Locale.getDefault())
-                // isFile() already implies the path exists (returns false otherwise), so a
-                // separate exists() call here would just be a second redundant stat() syscall.
-                if (ext in imageExtensions && file.isFile && file.length() > 0) {
-                    val parentFile = file.parentFile ?: return@async null
-                    val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else file.lastModified()
-                    Validated(parentFile.absolutePath, row.path, if (row.size > 0) row.size else file.length(), dateMs)
-                } else null
-            }
-        }.awaitAll().filterNotNull().forEach { v ->
-            folderMap.getOrPut(v.folderPath) { mutableListOf() }.add(Triple(v.path, v.size, v.dateMs))
+        rows.forEach { row ->
+            val ext = row.path.substringAfterLast('.', "").lowercase(Locale.getDefault())
+            if (ext !in imageExtensions) return@forEach
+            val slashIdx = row.path.lastIndexOf('/')
+            if (slashIdx <= 0) return@forEach
+            val size = if (row.size > 0) row.size else File(row.path).length()
+            if (size <= 0) return@forEach
+            val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else File(row.path).lastModified()
+            folderMap.getOrPut(row.path.substring(0, slashIdx)) { mutableListOf() }.add(Triple(row.path, size, dateMs))
         }
 
         folderMap.mapNotNull { (path, rawItems) ->
+            // Images sitting loose directly in the storage root (no real folder of their own)
+            // used to surface as a synthetic "Internal storage" bucket next to actual named
+            // folders like Camera/Screenshots — dropped rather than shown as its own entry.
+            if (path == Environment.getExternalStorageDirectory().absolutePath) return@mapNotNull null
+
+            // One stat() per folder (dozens at most, not per file) to drop a bucket MediaStore
+            // still remembers but whose folder itself is gone.
             val folderFile = File(path)
             if (!folderFile.exists() || !folderFile.isDirectory) return@mapNotNull null
 
-            // rawItems already passed this exact check (isFile + length + extension) while the
-            // MediaStore cursor was being read above — re-stat()'ing every file a second time here
-            // was pure duplicated I/O for the same answer.
             if (rawItems.isEmpty()) return@mapNotNull null
             val validItems = rawItems
 
-            val name = if (path == Environment.getExternalStorageDirectory().absolutePath) {
-                "Internal storage"
-            } else {
-                folderFile.name.ifEmpty { "Images" }
-            }
+            val name = folderFile.name.ifEmpty { "Images" }
             val badge = detectBadgeFromPath(path)
             val totalSize = validItems.sumOf { it.second }
             val latestThumb = validItems.firstOrNull()?.first
@@ -476,8 +479,7 @@ class LocalFileScanner @Inject constructor(
             MediaStore.Audio.Media.DATE_MODIFIED
         )
 
-        // See queryImageFolders for why this is a cheap cursor-drain phase followed by a
-        // fanned-out stat() phase, rather than one file's stat() blocking the next.
+        // See queryImageFolders for why this is a cheap cursor-drain phase.
         data class Row(val path: String, val size: Long, val dateSec: Long)
         val rows = mutableListOf<Row>()
         try {
@@ -501,20 +503,18 @@ class LocalFileScanner @Inject constructor(
             e.printStackTrace()
         }
 
-        data class Validated(val folderPath: String, val path: String, val size: Long, val dateMs: Long)
-        rows.map { row ->
-            async {
-                val file = File(row.path)
-                val ext = file.extension.lowercase(Locale.getDefault())
-                if (ext in audioExtensions && file.isFile && file.length() > 0) {
-                    val parentFile = file.parentFile ?: return@async null
-                    val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else file.lastModified()
-                    Validated(parentFile.absolutePath, row.path, if (row.size > 0) row.size else file.length(), dateMs)
-                } else null
-            }
-        }.awaitAll().filterNotNull().forEach { v ->
-            folderMap.getOrPut(v.folderPath) { mutableListOf() }.add(Triple(v.path, v.size, v.dateMs))
-            seenPaths.add(v.path)
+        // See queryImageFolders for why this trusts MediaStore's row data instead of re-stat()'ing
+        // every file to "confirm" it.
+        rows.forEach { row ->
+            val ext = row.path.substringAfterLast('.', "").lowercase(Locale.getDefault())
+            if (ext !in audioExtensions) return@forEach
+            val slashIdx = row.path.lastIndexOf('/')
+            if (slashIdx <= 0) return@forEach
+            val size = if (row.size > 0) row.size else File(row.path).length()
+            if (size <= 0) return@forEach
+            val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else File(row.path).lastModified()
+            folderMap.getOrPut(row.path.substring(0, slashIdx)) { mutableListOf() }.add(Triple(row.path, size, dateMs))
+            seenPaths.add(row.path)
         }
 
         // Direct scan of standard audio directories
@@ -559,19 +559,18 @@ class LocalFileScanner @Inject constructor(
         }
 
         folderMap.mapNotNull { (path, rawItems) ->
+            // See queryImageFolders for why a loose-at-the-root synthetic "Internal storage"
+            // bucket is dropped rather than shown.
+            if (path == Environment.getExternalStorageDirectory().absolutePath) return@mapNotNull null
+
+            // One stat() per folder, not per file — see queryImageFolders.
             val folderFile = File(path)
             if (!folderFile.exists() || !folderFile.isDirectory) return@mapNotNull null
 
-            // Already verified (isFile + length + extension) once above — see the image-folder
-            // query's identical comment for why a second pass here was wasted stat() I/O.
             if (rawItems.isEmpty()) return@mapNotNull null
             val validItems = rawItems
 
-            val name = if (path == Environment.getExternalStorageDirectory().absolutePath) {
-                "Internal storage"
-            } else {
-                folderFile.name.ifEmpty { "Audio" }
-            }
+            val name = folderFile.name.ifEmpty { "Audio" }
             val badge = AppSourceBadge.GENERIC_AUDIO
             val totalSize = validItems.sumOf { it.second }
             val effectiveTime = validItems.maxOfOrNull { it.third } ?: folderFile.lastModified()
@@ -597,8 +596,10 @@ class LocalFileScanner @Inject constructor(
             MediaStore.Video.Media.DATE_MODIFIED
         )
 
-        // See queryImageFolders for why this is split into a cheap cursor-drain phase followed
-        // by a fanned-out stat() phase.
+        // See queryImageFolders for why this trusts MediaStore's own row data (falling back to a
+        // real stat() only when a row is missing one) instead of re-verifying every file against
+        // the filesystem — for a large video library that used to mean thousands of syscalls just
+        // to "confirm" what MediaStore already told us.
         data class Row(val path: String, val size: Long, val dateSec: Long)
         val rows = mutableListOf<Row>()
         try {
@@ -622,36 +623,31 @@ class LocalFileScanner @Inject constructor(
             e.printStackTrace()
         }
 
-        data class Validated(val folderPath: String, val path: String, val size: Long, val dateMs: Long)
         val folderMap = mutableMapOf<String, MutableList<Triple<String, Long, Long>>>()
-        rows.map { row ->
-            async {
-                val file = File(row.path)
-                val ext = file.extension.lowercase(Locale.getDefault())
-                if (ext in videoExtensions && file.isFile && file.length() > 0) {
-                    val parentFile = file.parentFile ?: return@async null
-                    val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else file.lastModified()
-                    Validated(parentFile.absolutePath, row.path, if (row.size > 0) row.size else file.length(), dateMs)
-                } else null
-            }
-        }.awaitAll().filterNotNull().forEach { v ->
-            folderMap.getOrPut(v.folderPath) { mutableListOf() }.add(Triple(v.path, v.size, v.dateMs))
+        rows.forEach { row ->
+            val ext = row.path.substringAfterLast('.', "").lowercase(Locale.getDefault())
+            if (ext !in videoExtensions) return@forEach
+            val slashIdx = row.path.lastIndexOf('/')
+            if (slashIdx <= 0) return@forEach
+            val size = if (row.size > 0) row.size else File(row.path).length()
+            if (size <= 0) return@forEach
+            val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else File(row.path).lastModified()
+            folderMap.getOrPut(row.path.substring(0, slashIdx)) { mutableListOf() }.add(Triple(row.path, size, dateMs))
         }
 
         folderMap.mapNotNull { (path, rawItems) ->
+            // See queryImageFolders for why a loose-at-the-root synthetic "Internal storage"
+            // bucket is dropped rather than shown.
+            if (path == Environment.getExternalStorageDirectory().absolutePath) return@mapNotNull null
+
+            // One stat() per folder, not per file — see queryImageFolders.
             val folderFile = File(path)
             if (!folderFile.exists() || !folderFile.isDirectory) return@mapNotNull null
 
-            // Already verified (isFile + length + extension) once above — see the image-folder
-            // query's identical comment for why a second pass here was wasted stat() I/O.
             if (rawItems.isEmpty()) return@mapNotNull null
             val validItems = rawItems
 
-            val name = if (path == Environment.getExternalStorageDirectory().absolutePath) {
-                "Internal storage"
-            } else {
-                folderFile.name.ifEmpty { "Videos" }
-            }
+            val name = folderFile.name.ifEmpty { "Videos" }
             val badge = detectBadgeFromPath(path, isVideo = true)
             val totalSize = validItems.sumOf { it.second }
             val effectiveTime = validItems.maxOfOrNull { it.third } ?: folderFile.lastModified()
@@ -880,20 +876,18 @@ class LocalFileScanner @Inject constructor(
                 }
             }
 
-            data class Validated(val folderPath: String, val path: String, val size: Long, val dateMs: Long)
-            rows.map { row ->
-                async {
-                    val file = File(row.path)
-                    val ext = file.extension.lowercase(Locale.getDefault())
-                    if (ext in docExts && file.isFile && file.length() > 0) {
-                        val parentFile = file.parentFile ?: return@async null
-                        val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else file.lastModified()
-                        Validated(parentFile.absolutePath, row.path, if (row.size > 0) row.size else file.length(), dateMs)
-                    } else null
-                }
-            }.awaitAll().filterNotNull().forEach { v ->
-                folderMap.getOrPut(v.folderPath) { mutableListOf() }.add(Triple(v.path, v.size, v.dateMs))
-                seenPaths.add(v.path)
+            // See queryImageFolders for why this trusts MediaStore's row data instead of
+            // re-stat()'ing every file to "confirm" it.
+            rows.forEach { row ->
+                val ext = row.path.substringAfterLast('.', "").lowercase(Locale.getDefault())
+                if (ext !in docExts) return@forEach
+                val slashIdx = row.path.lastIndexOf('/')
+                if (slashIdx <= 0) return@forEach
+                val size = if (row.size > 0) row.size else File(row.path).length()
+                if (size <= 0) return@forEach
+                val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else File(row.path).lastModified()
+                folderMap.getOrPut(row.path.substring(0, slashIdx)) { mutableListOf() }.add(Triple(row.path, size, dateMs))
+                seenPaths.add(row.path)
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -936,19 +930,18 @@ class LocalFileScanner @Inject constructor(
         }
 
         folderMap.mapNotNull { (path, rawItems) ->
+            // See queryImageFolders for why a loose-at-the-root synthetic "Internal storage"
+            // bucket is dropped rather than shown.
+            if (path == Environment.getExternalStorageDirectory().absolutePath) return@mapNotNull null
+
+            // One stat() per folder, not per file — see queryImageFolders.
             val folderFile = File(path)
             if (!folderFile.exists() || !folderFile.isDirectory) return@mapNotNull null
 
-            // Already verified (isFile + length + extension) once above — see the image-folder
-            // query's identical comment for why a second pass here was wasted stat() I/O.
             if (rawItems.isEmpty()) return@mapNotNull null
             val validItems = rawItems
 
-            val name = if (path == Environment.getExternalStorageDirectory().absolutePath) {
-                "Internal storage"
-            } else {
-                folderFile.name.ifEmpty { "Documents" }
-            }
+            val name = folderFile.name.ifEmpty { "Documents" }
             val badge = detectBadgeFromPath(path)
             val totalSize = validItems.sumOf { it.second }
             val effectiveTime = validItems.maxOfOrNull { it.third } ?: folderFile.lastModified()

@@ -108,8 +108,12 @@ class CloudExplorerViewModel @Inject constructor(
     private val accountId: String = savedStateHandle.get<String>("accountId") ?: ""
     private val title: String = savedStateHandle.get<String>("title") ?: "Cloud Storage"
 
+    // isLoading starts true (rather than the data class's own false default) so the very first
+    // composition — before init{}'s loadAccountAndFiles() coroutine has had a chance to run and
+    // set real state — doesn't read as "isLoading=false, files=[]" and flash the empty-folder
+    // state for a frame before the real (cached or fetched) content replaces it.
     private val _uiState = MutableStateFlow(
-        CloudExplorerUiState(accountId = accountId, title = title)
+        CloudExplorerUiState(accountId = accountId, title = title, isLoading = true)
     )
     val uiState: StateFlow<CloudExplorerUiState> = _uiState.asStateFlow()
 

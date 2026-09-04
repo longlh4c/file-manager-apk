@@ -548,7 +548,12 @@ fun FileBrowserScreen(
             BreadcrumbBar(
                 categoryType = uiState.categoryType,
                 pathSegments = pathSegments,
-                storageUsedBadge = uiState.storageUsedPercent?.let { "$it% USED" },
+                // Only Main storage links to Storage Analysis from here — Downloads is a
+                // single-purpose folder view, and the "X% USED" badge/button there pointed at
+                // the same whole-device analysis screen regardless, which didn't belong.
+                storageUsedBadge = if (uiState.categoryType == com.antigravity.filemanager.domain.model.CategoryType.MAIN_STORAGE) {
+                    uiState.storageUsedPercent?.let { "$it% USED" }
+                } else null,
                 onHomeClick = onNavigateBack,
                 onCategoryClick = { viewModel.loadDirectory(boundary) },
                 onSegmentClick = { index ->

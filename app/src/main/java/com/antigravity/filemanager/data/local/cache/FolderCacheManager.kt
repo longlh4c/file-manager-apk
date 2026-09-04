@@ -10,8 +10,10 @@ import com.antigravity.filemanager.domain.model.FolderBadgeType
 import com.antigravity.filemanager.domain.model.MediaFolder
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -60,13 +62,31 @@ class FolderCacheManager @Inject constructor(
     private data class MediaFoldersCacheEntry(val folders: List<MediaFolder>, val timestamp: Long)
     private val mediaFoldersCache = ConcurrentHashMap<String, MediaFoldersCacheEntry>()
 
+    // A time-based TTL meant "reopen after N seconds and pay for a full rescan again" no matter
+    // how many times that happened in a row — the common case (switching tabs, backgrounding the
+    // app for a minute) never actually needed re-verifying, because the two things that can make
+    // a cached listing wrong are both already handled by explicit signals, not by a timer:
+    // an in-app copy/move/delete/rename invalidates the relevant keys immediately (see
+    // invalidateMediaFolders below), and an external change (new photo, a finished download)
+    // arrives live via MediaChangeSignal's ContentObserver. The only gap either of those can miss
+    // is something that happened while the app process wasn't alive to observe it — so instead of
+    // "fresh for N seconds", a key only needs reconciling once per process lifetime: the first
+    // read after cold start double-checks against MediaStore in the background (still painting
+    // the cached list instantly first), and every read after that within the same process trusts
+    // the cache outright, since the observer would already have updated it if anything changed.
+    private val reconciledOnceKeys = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
+    /** False the first time this exact key is asked about since process start (caller should
+     * kick off one background reconcile); true every time after (caller can trust the cache
+     * as-is — no revalidation needed, since ContentObserver/explicit invalidation keep it live). */
+    private fun markReconciledOnce(key: String): Boolean = !reconciledOnceKeys.add(key)
+
     private fun mediaFoldersKey(categoryType: CategoryType, sort: FileSortOption) = "mediafolders_${categoryType.name}_${sort.name}"
 
-    suspend fun getMediaFolders(categoryType: CategoryType, sort: FileSortOption, freshTtlMs: Long = 0L): CachedMediaFoldersResult? {
+    suspend fun getMediaFolders(categoryType: CategoryType, sort: FileSortOption): CachedMediaFoldersResult? {
         val key = mediaFoldersKey(categoryType, sort)
-        fun freshnessOf(timestamp: Long) = freshTtlMs > 0 && (System.currentTimeMillis() - timestamp) < freshTtlMs
 
-        mediaFoldersCache[key]?.let { return CachedMediaFoldersResult(it.folders, freshnessOf(it.timestamp)) }
+        mediaFoldersCache[key]?.let { return CachedMediaFoldersResult(it.folders, markReconciledOnce(key)) }
 
         return withContext(Dispatchers.IO) {
             val hashed = hashKey(key)
@@ -97,16 +117,56 @@ class FolderCacheManager @Inject constructor(
                     )
                 }
                 mediaFoldersCache[key] = MediaFoldersCacheEntry(list, timestamp)
-                CachedMediaFoldersResult(list, freshnessOf(timestamp))
+                CachedMediaFoldersResult(list, markReconciledOnce(key))
             } catch (e: Exception) {
                 null
             }
         }
     }
 
+    // Keyed the same as mediaFoldersCache — tracks a reconcile scan currently in flight for that
+    // exact (categoryType, sort) so a second caller asking for it moments later awaits the same
+    // result instead of starting a fully redundant second MediaStore scan.
+    private val inFlightMediaFolders = ConcurrentHashMap<String, Deferred<List<MediaFolder>>>()
+
+    /**
+     * The dashboard's proactive warm-up (DashboardViewModel.warmMediaFolderCaches) and a category
+     * screen the user taps into right after cold start can easily both decide "this needs
+     * reconciling" for the exact same category at the exact same moment — without this, both ran
+     * the full MediaStore scan (stat() fan-out across the whole library) independently, competing
+     * for the same CPU/IO and making the one the user is actually staring at (e.g. Images, the
+     * largest category and so the slowest scan) *slower* than if the warm-up didn't exist at all.
+     * [fetch] runs on this manager's own IO scope, not the caller's — so a caller navigating away
+     * and having its own coroutine cancelled doesn't cancel the scan out from under a second
+     * caller still awaiting the same result.
+     */
+    suspend fun reconcileMediaFolders(categoryType: CategoryType, sort: FileSortOption, fetch: suspend () -> List<MediaFolder>): List<MediaFolder> {
+        val key = mediaFoldersKey(categoryType, sort)
+        inFlightMediaFolders[key]?.let { return it.await() }
+
+        // LAZY: creating this doesn't start fetch() running yet. Only whichever Deferred actually
+        // gets awaited below (the winner of the race, or the sole caller when there's no race at
+        // all) ever executes — the loser's is simply dropped, having done no work at all, rather
+        // than being cancelled mid-flight after already duplicating part of the scan.
+        val deferred = ioScope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) { fetch() }
+        val winner = inFlightMediaFolders.putIfAbsent(key, deferred) ?: deferred
+        if (winner !== deferred) deferred.cancel()
+        return try {
+            val result = winner.await()
+            if (winner === deferred) putMediaFolders(categoryType, sort, result)
+            result
+        } finally {
+            inFlightMediaFolders.remove(key, winner)
+        }
+    }
+
     suspend fun putMediaFolders(categoryType: CategoryType, sort: FileSortOption, folders: List<MediaFolder>) {
         val key = mediaFoldersKey(categoryType, sort)
         val timestamp = System.currentTimeMillis()
+        // Writing a fresh result IS the reconcile — mark it done so a get() that raced in behind
+        // this put (or arrives moments later) doesn't think it still owes the process its one
+        // background double-check.
+        reconciledOnceKeys.add(key)
         mediaFoldersCache[key] = MediaFoldersCacheEntry(folders, timestamp)
         withContext(Dispatchers.IO) {
             val hashed = hashKey(key)
@@ -213,6 +273,95 @@ class FolderCacheManager @Inject constructor(
         }
     }
 
+    private val deleteExtCategory = buildMap {
+        val images = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng")
+        val videos = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v", "mpg", "mpeg", "vob", "ogv", "f4v")
+        val audio = setOf("mp3", "m4a", "wav", "flac", "aac", "ogg", "wma", "opus", "amr", "mid", "midi")
+        val docs = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "rtf", "epub")
+        images.forEach { put(it, CategoryType.IMAGES) }
+        videos.forEach { put(it, CategoryType.VIDEOS) }
+        audio.forEach { put(it, CategoryType.AUDIO) }
+        docs.forEach { put(it, CategoryType.DOCUMENTS) }
+    }
+
+    /**
+     * A plain delete only ever shrinks the exact folder(s) the deleted file(s) were sitting in —
+     * unlike invalidateMediaFolders() (still used for copy/move/rename, where a file can land in
+     * a folder that isn't cached yet), there's no need to drop every category's cache and force
+     * Images AND Videos AND Audio AND Documents to all redo a full MediaStore rescan just because
+     * one photo was deleted. Instead, patch the affected folder's itemCount (dropping it entirely
+     * once it hits zero) and clear a thumbnail that pointed at the deleted file, for only the
+     * category the deletion actually touched — everything else stays exactly as cached. A
+     * category that hasn't been opened yet this process isn't touched here at all; it still gets
+     * its own one-time reconcile against MediaStore the first time it's opened (reconciledOnceKeys).
+     */
+    suspend fun removeFromMediaFolders(deletedPaths: List<String>) {
+        data class Affected(val categoryType: CategoryType, val parentDir: String)
+        val byFolder = HashMap<Affected, MutableList<String>>()
+        for (path in deletedPaths) {
+            val ext = File(path).extension.lowercase()
+            val categoryType = deleteExtCategory[ext] ?: continue
+            val parentDir = File(path).parentFile?.absolutePath ?: continue
+            byFolder.getOrPut(Affected(categoryType, parentDir)) { mutableListOf() }.add(path)
+        }
+        if (byFolder.isEmpty()) return
+
+        // Dashboard totals (item counts / sizes per category) are cheap to just drop and let
+        // recompute in the background — no per-bucket bookkeeping needed there.
+        dashboardSummaryCache = null
+        ioScope.launch { dashboardCacheFile.delete() }
+
+        // Root bucket grid (Images/Videos/Audio/Documents) — every sort variant currently held
+        // for an affected category, since the folder contents/counts don't depend on sort order.
+        for (categoryType in byFolder.keys.map { it.categoryType }.toSet()) {
+            val prefix = "mediafolders_${categoryType.name}_"
+            for (key in mediaFoldersCache.keys.filter { it.startsWith(prefix) }) {
+                val sort = try { FileSortOption.valueOf(key.removePrefix(prefix)) } catch (e: Exception) { continue }
+                val entry = mediaFoldersCache[key] ?: continue
+                var changed = false
+                val patched = entry.folders.mapNotNull { folder ->
+                    val removedHere = byFolder[Affected(categoryType, folder.path)] ?: return@mapNotNull folder
+                    changed = true
+                    val newCount = folder.itemCount - removedHere.size
+                    if (newCount <= 0) {
+                        null
+                    } else {
+                        // totalSizeBytes is left as-is rather than tracked down and subtracted —
+                        // a few bytes stale until the category's next real reconcile (a fresh
+                        // process, or an external MediaStore change) is a fine trade for not
+                        // having to fetch each deleted file's size after it's already gone.
+                        folder.copy(
+                            itemCount = newCount,
+                            latestThumbnailUri = folder.latestThumbnailUri?.takeUnless { it in removedHere }
+                        )
+                    }
+                }
+                if (changed) putMediaFolders(categoryType, sort, patched)
+            }
+        }
+
+        // Category-subfolder file lists (Images > DCIM > Camera drill-down) — drop the deleted
+        // file(s) from every cached (sort, showHidden) variant of the folder they were in.
+        for ((affected, paths) in byFolder) {
+            val prefix = "catsub_${affected.categoryType.name}_${affected.parentDir}_"
+            val matchingKeys = synchronized(memoryCache) { memoryCache.keys.filter { it.startsWith(prefix) } }
+            for (key in matchingKeys) {
+                // Remainder after the prefix is "<SORT>_<showHidden>" — split on the LAST
+                // underscore since FileSortOption names (BY_NAME_ASC, ...) contain underscores too.
+                val rest = key.removePrefix(prefix)
+                val splitAt = rest.lastIndexOf('_')
+                if (splitAt < 0) continue
+                val sort = try { FileSortOption.valueOf(rest.substring(0, splitAt)) } catch (e: Exception) { continue }
+                val showHidden = rest.substring(splitAt + 1).toBooleanStrictOrNull() ?: continue
+                val entry = cacheGet(key) ?: continue
+                val patchedFiles = entry.files.filterNot { it.path in paths }
+                if (patchedFiles.size != entry.files.size) {
+                    putCategorySubfolder(affected.categoryType, affected.parentDir, sort, showHidden, patchedFiles)
+                }
+            }
+        }
+    }
+
     // LinkedHashMap isn't thread-safe, and this manager is a singleton shared across
     // ViewModels/coroutines, so every access goes through these synchronized helpers.
     private fun cacheGet(key: String): CacheEntry? = synchronized(memoryCache) { memoryCache[key] }
@@ -277,12 +426,16 @@ class FolderCacheManager @Inject constructor(
     private fun getCategorySubfolderKey(categoryType: CategoryType, path: String, sort: FileSortOption, showHidden: Boolean) =
         "catsub_${categoryType.name}_${path}_${sort.name}_$showHidden"
 
-    suspend fun getCategorySubfolder(categoryType: CategoryType, path: String, sort: FileSortOption, showHidden: Boolean, freshTtlMs: Long = 0L): CachedFolderResult? {
-        return getFolder(getCategorySubfolderKey(categoryType, path, sort, showHidden), freshTtlMs)
+    // Same "reconcile once per process, then trust the cache" contract as getMediaFolders above
+    // (see the comment on reconciledOnceKeys) rather than a time-based TTL — a category subfolder
+    // is invalidated the same way a media folder bucket is: explicitly on any in-app mutation, and
+    // implicitly live via MediaChangeSignal for anything that happens outside the app.
+    suspend fun getCategorySubfolder(categoryType: CategoryType, path: String, sort: FileSortOption, showHidden: Boolean): CachedFolderResult? {
+        return getFolder(getCategorySubfolderKey(categoryType, path, sort, showHidden), useReconcileOnce = true)
     }
 
     suspend fun putCategorySubfolder(categoryType: CategoryType, path: String, sort: FileSortOption, showHidden: Boolean, files: List<FileItem>) {
-        putFolder(getCategorySubfolderKey(categoryType, path, sort, showHidden), files)
+        putFolder(getCategorySubfolderKey(categoryType, path, sort, showHidden), files, markReconciled = true)
     }
 
     suspend fun getCloudFolder(accountId: String, path: String, freshTtlMs: Long = 0L): CachedFolderResult? {
@@ -295,8 +448,12 @@ class FolderCacheManager @Inject constructor(
         putFolder(key, files)
     }
 
-    private suspend fun getFolder(key: String, freshTtlMs: Long): CachedFolderResult? {
-        fun freshnessOf(timestamp: Long) = freshTtlMs > 0 && (System.currentTimeMillis() - timestamp) < freshTtlMs
+    private suspend fun getFolder(key: String, freshTtlMs: Long = 0L, useReconcileOnce: Boolean = false): CachedFolderResult? {
+        fun freshnessOf(timestamp: Long) = if (useReconcileOnce) {
+            markReconciledOnce(key)
+        } else {
+            freshTtlMs > 0 && (System.currentTimeMillis() - timestamp) < freshTtlMs
+        }
 
         // 1. Check in-memory cache for instantaneous retrieval (0ms, no thread hop)
         cacheGet(key)?.let { return CachedFolderResult(it.files, freshnessOf(it.timestamp)) }
@@ -347,8 +504,10 @@ class FolderCacheManager @Inject constructor(
         }
     }
 
-    private suspend fun putFolder(key: String, files: List<FileItem>) {
+    private suspend fun putFolder(key: String, files: List<FileItem>, markReconciled: Boolean = false) {
         val timestamp = System.currentTimeMillis()
+        // Same reasoning as putMediaFolders: a fresh write already IS the reconcile.
+        if (markReconciled) reconciledOnceKeys.add(key)
         cachePut(key, CacheEntry(files, timestamp))
         withContext(Dispatchers.IO) {
             val hashed = hashKey(key)
