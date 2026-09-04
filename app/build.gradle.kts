@@ -28,7 +28,14 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // Was false — meant every "release" build was really just a debug build's worth of
+            // unshrunk, unoptimized bytecode with a different name. R8 shrinking/optimization is
+            // the difference between a debug APK's cold-start cost (interpreting/JIT-compiling
+            // every class from scratch, including whatever dead code shipped) and what a real
+            // release build actually performs like — the app-debug.apk this has been tested with
+            // isn't representative of a released build's speed.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -117,12 +124,23 @@ dependencies {
     implementation(libs.okhttp.logging)
 
     // Google Play Services Auth + official Drive API client
+    // google-http-client pulls in an Apache HttpClient transport (google-http-client-apache-v2
+    // + httpcore) nobody here calls — google-api-client-android already talks to the network via
+    // its own Android-native transport. Left in, its org.apache.http.* classes collide with the
+    // ones baked into the Android platform itself (org.apache.http.legacy) the moment R8 tries to
+    // do whole-program analysis on a release build ("Library class ... implements/extends program
+    // class ..."), so this exclusion isn't just cleanup — a minified release build fails to
+    // compile without it.
     implementation(libs.play.services.auth)
     implementation(libs.google.api.client.android) {
         exclude(group = "org.apache.httpcomponents", module = "httpclient")
+        exclude(group = "org.apache.httpcomponents", module = "httpcore")
+        exclude(group = "com.google.http-client", module = "google-http-client-apache-v2")
     }
     implementation(libs.google.api.services.drive) {
         exclude(group = "org.apache.httpcomponents", module = "httpclient")
+        exclude(group = "org.apache.httpcomponents", module = "httpcore")
+        exclude(group = "com.google.http-client", module = "google-http-client-apache-v2")
     }
 
     // Dropbox official SDK (OAuth2/PKCE via Custom Tabs)
