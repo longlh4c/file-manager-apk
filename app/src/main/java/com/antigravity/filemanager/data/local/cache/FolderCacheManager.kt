@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.data.local.cache
 
 import android.content.Context
+import com.antigravity.filemanager.data.local.observer.MediaChangeSignal
 import com.antigravity.filemanager.domain.model.AppSourceBadge
 import com.antigravity.filemanager.domain.model.CategorySummary
 import com.antigravity.filemanager.domain.model.CategoryType
@@ -14,6 +15,9 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -40,7 +44,8 @@ data class CachedMediaFoldersResult(val folders: List<MediaFolder>, val isFresh:
 
 @Singleton
 class FolderCacheManager @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    mediaChangeSignal: MediaChangeSignal
 ) {
     private data class CacheEntry(val files: List<FileItem>, val timestamp: Long)
 
@@ -68,13 +73,38 @@ class FolderCacheManager @Inject constructor(
     // a cached listing wrong are both already handled by explicit signals, not by a timer:
     // an in-app copy/move/delete/rename invalidates the relevant keys immediately (see
     // invalidateMediaFolders below), and an external change (new photo, a finished download)
-    // arrives live via MediaChangeSignal's ContentObserver. The only gap either of those can miss
-    // is something that happened while the app process wasn't alive to observe it — so instead of
-    // "fresh for N seconds", a key only needs reconciling once per process lifetime: the first
-    // read after cold start double-checks against MediaStore in the background (still painting
-    // the cached list instantly first), and every read after that within the same process trusts
-    // the cache outright, since the observer would already have updated it if anything changed.
+    // clears the reconciled flag below so the next open re-verifies. The only gap either of those
+    // can miss is something that happened while the app process wasn't alive to observe it — so
+    // instead of "fresh for N seconds", a key only needs reconciling once per process lifetime:
+    // the first read after cold start (or after the flag below was last cleared) double-checks
+    // against MediaStore in the background (still painting the cached list instantly first), and
+    // every read after that trusts the cache outright, until something actually changes it again.
     private val reconciledOnceKeys = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
+    // MediaChangeSignal's ContentObserver is only ever useful here if SOMETHING is always
+    // listening — a screen-scoped ViewModel collecting it (the original design) stops listening
+    // the moment that screen isn't open, so a photo saved while the user wasn't sitting on the
+    // Images screen was never seen: the reconciled flag above stayed set from before the change,
+    // so the next time Images was opened it just trusted the (now stale) cache with nothing left
+    // to ever re-check it. Subscribing here instead, in a singleton alive for the whole process,
+    // means an external change clears the affected reconcile flags regardless of which screen (if
+    // any) happens to be open when it arrives — the next read of any of them re-verifies against
+    // MediaStore once, the same "instant stale paint, then a silent background catch-up" as a
+    // fresh cold start.
+    init {
+        // Shorter debounce than CategoriesViewModel's own 150ms collector on the same signal —
+        // when both fire for the same change, this clearing the flag first (then that screen's
+        // own handler writing fresh data back, which re-sets it) means a screen that's actually
+        // open when the change happens doesn't pay for a redundant extra reconcile on next open.
+        mediaChangeSignal.changes
+            .debounce(100)
+            .onEach { markMediaCachesUnreconciled() }
+            .launchIn(ioScope)
+    }
+
+    private fun markMediaCachesUnreconciled() {
+        reconciledOnceKeys.removeAll { it.startsWith("mediafolders_") || it.startsWith("catsub_") }
+    }
 
     /** False the first time this exact key is asked about since process start (caller should
      * kick off one background reconcile); true every time after (caller can trust the cache
