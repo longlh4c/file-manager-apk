@@ -22,8 +22,10 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import com.antigravity.filemanager.utils.observeDirectoryChanges
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -100,6 +102,9 @@ class FileBrowserViewModel @Inject constructor(
 
     companion object {
         private const val LOCAL_CACHE_FRESH_TTL_MS = 15_000L
+        // Matches CloudExplorerViewModel's own TTL for the same cache — no reason for the two
+        // screens reading the same "cloud_<accountId>_<path>" entries to disagree on freshness.
+        private const val CLOUD_FOLDER_PICKER_FRESH_TTL_MS = 30_000L
     }
 
     private val initialPath: String = savedStateHandle.get<String>("path") ?: android.os.Environment.getExternalStorageDirectory().absolutePath
@@ -276,7 +281,40 @@ class FileBrowserViewModel @Inject constructor(
                 isLoading = false,
                 files = files
             )
+
+            watchDirectory(path)
         }
+    }
+
+    private var watchJob: Job? = null
+
+    /** Restarted on every loadDirectory — silently re-fetches this exact folder whenever a file
+     * is added/removed/renamed inside it while it's on screen, so the user doesn't have to
+     * pull-to-refresh to see something another app just wrote there. */
+    private fun watchDirectory(path: String) {
+        watchJob?.cancel()
+        watchJob = viewModelScope.launch {
+            // Short debounce, not a "wait and see" delay — a single file write still fires
+            // CREATE followed by MODIFY a moment later, so this only exists to coalesce that
+            // pair into one rescan rather than two, not to sit on the update.
+            observeDirectoryChanges(path).debounce(150).collect {
+                // The user may have navigated elsewhere by the time this fires (or several
+                // change events piled up) — only apply the result if still viewing this path.
+                if (_uiState.value.currentPath != path) return@collect
+                val sort = _uiState.value.sortOption
+                val hidden = _uiState.value.showHiddenFiles
+                val files = fileOperationsUseCase.getFiles(path, sort, showHidden = hidden)
+                folderCacheManager.putLocalFolder(path, sort, hidden, files)
+                if (_uiState.value.currentPath == path) {
+                    _uiState.value = _uiState.value.copy(files = files)
+                }
+            }
+        }
+    }
+
+    override fun onCleared() {
+        watchJob?.cancel()
+        super.onCleared()
     }
 
     fun onSortChanged(sort: FileSortOption, applyToAll: Boolean = false) {
@@ -691,11 +729,31 @@ class FileBrowserViewModel @Inject constructor(
     private fun loadCloudFolderPickerFolders(path: String) {
         val account = _uiState.value.cloudFolderPickerAccount ?: return
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(cloudFolderPickerLoading = true, cloudFolderPickerPath = path)
+            _uiState.value = _uiState.value.copy(cloudFolderPickerPath = path)
+            // Was always a live network round-trip (for MEGA in particular, a full account-tree
+            // fetch+decrypt) on every folder tapped in this "pick a destination" picker, even
+            // though the Cloud tab right next to it (CloudExplorerViewModel) already caches the
+            // exact same folder via FolderCacheManager — so browsing here after already having
+            // browsed there in the Cloud tab was needlessly slow for data already sitting in
+            // cache. Same key ("cloud_<accountId>_<path>"), so this picker now shares that cache
+            // instead of bypassing it.
+            val cached = folderCacheManager.getCloudFolder(account.id, path, CLOUD_FOLDER_PICKER_FRESH_TTL_MS)
+            if (cached != null) {
+                _uiState.value = _uiState.value.copy(
+                    cloudFolderPickerLoading = false,
+                    cloudFolderPickerFolders = cached.files.filter { it.isDirectory }.sortedBy { it.name.lowercase() }
+                )
+                if (cached.isFresh) return@launch
+            } else {
+                _uiState.value = _uiState.value.copy(cloudFolderPickerLoading = true)
+            }
             val result = cloudStorageUseCase.getFiles(account.id, path)
-            val folders = result.getOrDefault(emptyList()).filter { it.isDirectory }
-                .sortedBy { it.name.lowercase() }
-            _uiState.value = _uiState.value.copy(cloudFolderPickerLoading = false, cloudFolderPickerFolders = folders)
+            val files = result.getOrDefault(emptyList())
+            folderCacheManager.putCloudFolder(account.id, path, files)
+            _uiState.value = _uiState.value.copy(
+                cloudFolderPickerLoading = false,
+                cloudFolderPickerFolders = files.filter { it.isDirectory }.sortedBy { it.name.lowercase() }
+            )
         }
     }
 

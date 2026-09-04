@@ -96,7 +96,12 @@ class FileOperationsUseCase @Inject constructor(
             }
             Result.success(count)
         }
-        if (result.isSuccess) folderCacheManager.invalidateMediaFolders()
+        // A delete only ever shrinks folders that are already cached — unlike copy/move/rename,
+        // it can't land a file in a folder the cache doesn't know about yet — so it can patch
+        // just the affected bucket(s) instead of invalidateMediaFolders()'s blanket "drop every
+        // category" (which otherwise forced Images AND Videos AND Audio AND Documents to all redo
+        // a full MediaStore rescan on their next open just because one photo was deleted).
+        if (result.isSuccess) folderCacheManager.removeFromMediaFolders(paths)
         return result
     }
 

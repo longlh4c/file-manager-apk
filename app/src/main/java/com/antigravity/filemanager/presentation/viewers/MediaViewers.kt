@@ -119,19 +119,24 @@ fun ImageViewerScreen(
 
     // Gather sibling images, ordered the same way the caller had them sorted. Cloud files come
     // from the session the explorer screen stashed (there's no local folder to scan for them).
-    val imageEntries = remember(actualInitialPath, actualParentPath, sortOption, cloudAccountId) {
-        if (cloudAccountId != null) {
-            val siblings = CloudViewerSession.get(cloudAccountId)
-                ?.filter { !it.isDirectory && it.extension.lowercase(Locale.getDefault()) in IMAGE_EXTENSIONS }
-                ?.map { ViewerEntry.Cloud(it) }
-            if (!siblings.isNullOrEmpty()) siblings else listOf(ViewerEntry.Local(File(actualInitialPath)))
-        } else {
-            val targetParent = if (actualParentPath.isNotEmpty()) File(actualParentPath) else File(actualInitialPath).parentFile
-            val found = targetParent?.listFiles()?.filter {
-                it.isFile && !it.name.startsWith(".") && it.extension.lowercase(Locale.getDefault()) in IMAGE_EXTENSIONS
-            }?.let { sortSiblingFiles(it, sortOption) }
-            if (!found.isNullOrEmpty()) found.map { ViewerEntry.Local(it) } else listOf(ViewerEntry.Local(File(actualInitialPath)))
-        }
+    // Mutable (var + mutableStateOf, not a plain remember val) so deleting the currently-viewed
+    // page can drop it from the list in place and land on the next one, instead of the viewer
+    // having to close back out to the folder — see the delete handler below.
+    var imageEntries by remember(actualInitialPath, actualParentPath, sortOption, cloudAccountId) {
+        mutableStateOf(
+            if (cloudAccountId != null) {
+                val siblings = CloudViewerSession.get(cloudAccountId)
+                    ?.filter { !it.isDirectory && it.extension.lowercase(Locale.getDefault()) in IMAGE_EXTENSIONS }
+                    ?.map { ViewerEntry.Cloud(it) }
+                if (!siblings.isNullOrEmpty()) siblings else listOf(ViewerEntry.Local(File(actualInitialPath)))
+            } else {
+                val targetParent = if (actualParentPath.isNotEmpty()) File(actualParentPath) else File(actualInitialPath).parentFile
+                val found = targetParent?.listFiles()?.filter {
+                    it.isFile && !it.name.startsWith(".") && it.extension.lowercase(Locale.getDefault()) in IMAGE_EXTENSIONS
+                }?.let { sortSiblingFiles(it, sortOption) }
+                if (!found.isNullOrEmpty()) found.map { ViewerEntry.Local(it) } else listOf(ViewerEntry.Local(File(actualInitialPath)))
+            }
+        )
     }
 
     val initialIndex = remember(initialDisplayName, imageEntries) {
@@ -219,11 +224,22 @@ fun ImageViewerScreen(
                             }
                             isDeleting = false
                             showDeleteConfirm = false
-                            // Deleting mid-pager without reworking imageEntries into mutable state
-                            // to reflow the remaining siblings isn't worth the complexity here —
-                            // just back out to the folder, which reloads fresh (without the file)
-                            // on its own.
-                            if (result.isSuccess) onNavigateBack()
+                            if (result.isSuccess) {
+                                // Drop the deleted page and land on the next one (or the new
+                                // last page, if it was the last one) instead of closing the
+                                // viewer — only back out if that was the only file left.
+                                val deletedIndex = pagerState.currentPage
+                                val updated = imageEntries.toMutableList().also {
+                                    if (deletedIndex in it.indices) it.removeAt(deletedIndex)
+                                }
+                                if (updated.isEmpty()) {
+                                    onNavigateBack()
+                                } else {
+                                    imageEntries = updated
+                                    val targetIndex = deletedIndex.coerceAtMost(updated.size - 1)
+                                    coroutineScope.launch { pagerState.scrollToPage(targetIndex) }
+                                }
+                            }
                         }
                     }
                 ) { Text(if (isDeleting) "Deleting…" else "Delete", color = Color(0xFFEF5350)) }
@@ -467,19 +483,23 @@ fun VideoPlayerScreen(
         if (isInitialStream && actualFileName.isNotEmpty()) actualFileName else File(actualInitialPath).name
     }
 
-    val videoEntries = remember(actualInitialPath, actualParentPath, sortOption, cloudAccountId) {
-        if (cloudAccountId != null) {
-            val siblings = CloudViewerSession.get(cloudAccountId)
-                ?.filter { !it.isDirectory && it.extension.lowercase(Locale.getDefault()) in VIDEO_EXTENSIONS }
-                ?.map { ViewerEntry.Cloud(it) }
-            if (!siblings.isNullOrEmpty()) siblings else listOf(ViewerEntry.Local(File(actualInitialPath)))
-        } else {
-            val targetParent = if (actualParentPath.isNotEmpty()) File(actualParentPath) else File(actualInitialPath).parentFile
-            val found = targetParent?.listFiles()?.filter {
-                it.isFile && !it.name.startsWith(".") && it.extension.lowercase(Locale.getDefault()) in VIDEO_EXTENSIONS
-            }?.let { sortSiblingFiles(it, sortOption) }
-            if (!found.isNullOrEmpty()) found.map { ViewerEntry.Local(it) } else listOf(ViewerEntry.Local(File(actualInitialPath)))
-        }
+    // Mutable for the same reason as ImageViewerScreen's imageEntries — deleting the current
+    // page drops it and lands on the next one instead of closing the viewer.
+    var videoEntries by remember(actualInitialPath, actualParentPath, sortOption, cloudAccountId) {
+        mutableStateOf(
+            if (cloudAccountId != null) {
+                val siblings = CloudViewerSession.get(cloudAccountId)
+                    ?.filter { !it.isDirectory && it.extension.lowercase(Locale.getDefault()) in VIDEO_EXTENSIONS }
+                    ?.map { ViewerEntry.Cloud(it) }
+                if (!siblings.isNullOrEmpty()) siblings else listOf(ViewerEntry.Local(File(actualInitialPath)))
+            } else {
+                val targetParent = if (actualParentPath.isNotEmpty()) File(actualParentPath) else File(actualInitialPath).parentFile
+                val found = targetParent?.listFiles()?.filter {
+                    it.isFile && !it.name.startsWith(".") && it.extension.lowercase(Locale.getDefault()) in VIDEO_EXTENSIONS
+                }?.let { sortSiblingFiles(it, sortOption) }
+                if (!found.isNullOrEmpty()) found.map { ViewerEntry.Local(it) } else listOf(ViewerEntry.Local(File(actualInitialPath)))
+            }
+        )
     }
 
     val initialIndex = remember(initialDisplayName, videoEntries) {
@@ -560,7 +580,20 @@ fun VideoPlayerScreen(
                             }
                             isDeleting = false
                             showDeleteConfirm = false
-                            if (result.isSuccess) onNavigateBack()
+                            if (result.isSuccess) {
+                                // See ImageViewerScreen's matching delete handler.
+                                val deletedIndex = pagerState.currentPage
+                                val updated = videoEntries.toMutableList().also {
+                                    if (deletedIndex in it.indices) it.removeAt(deletedIndex)
+                                }
+                                if (updated.isEmpty()) {
+                                    onNavigateBack()
+                                } else {
+                                    videoEntries = updated
+                                    val targetIndex = deletedIndex.coerceAtMost(updated.size - 1)
+                                    coroutineScope.launch { pagerState.scrollToPage(targetIndex) }
+                                }
+                            }
                         }
                     }
                 ) { Text(if (isDeleting) "Deleting…" else "Delete", color = Color(0xFFEF5350)) }

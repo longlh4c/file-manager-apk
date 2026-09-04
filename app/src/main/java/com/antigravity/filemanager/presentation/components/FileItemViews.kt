@@ -15,6 +15,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -25,14 +26,27 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.antigravity.filemanager.domain.model.AppSourceBadge
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FolderBadgeType
 import com.antigravity.filemanager.domain.model.MediaFolder
 import com.antigravity.filemanager.presentation.theme.*
+
+// A MediaFolder card's thumbnail (folder.latestThumbnailUri, used by both MediaFolderCard's grid
+// and AudioListItem's list row below) is requested at this fixed decode size rather than letting
+// Coil auto-size to whatever the composable happens to measure — the grid and list views render
+// it at different pixel dimensions, so a size tied to layout meant switching between them (or
+// just having both variants exist) never shared a decode, and DashboardViewModel's warm-up
+// (prefetching these on app start, before the user has opened the category and forced any layout
+// pass at all) had nothing fixed to prefetch *at*. One shared size across all three call sites
+// means the warm-up's decode is the SAME cache entry the grid/list card ends up asking for.
+const val MEDIA_FOLDER_THUMB_PX = 240
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -66,8 +80,14 @@ fun MediaFolderCard(
                 .then(if (isSelected) Modifier.border(2.dp, TealPrimary, RoundedCornerShape(8.dp)) else Modifier)
         ) {
             if (folder.latestThumbnailUri != null) {
+                val context = LocalContext.current
                 AsyncImage(
-                    model = folder.latestThumbnailUri,
+                    model = remember(folder.latestThumbnailUri) {
+                        ImageRequest.Builder(context)
+                            .data(folder.latestThumbnailUri)
+                            .size(MEDIA_FOLDER_THUMB_PX)
+                            .build()
+                    },
                     contentDescription = folder.name,
                     contentScale = ContentScale.Crop,
                     error = rememberVectorPainter(Icons.Default.Folder),
@@ -161,8 +181,14 @@ fun AudioListItem(
                 .background(DarkCard)
         ) {
             if (folder.latestThumbnailUri != null) {
+                val context = LocalContext.current
                 AsyncImage(
-                    model = folder.latestThumbnailUri,
+                    model = remember(folder.latestThumbnailUri) {
+                        ImageRequest.Builder(context)
+                            .data(folder.latestThumbnailUri)
+                            .size(MEDIA_FOLDER_THUMB_PX)
+                            .build()
+                    },
                     contentDescription = folder.name,
                     contentScale = ContentScale.Crop,
                     error = rememberVectorPainter(badgeIcon),
@@ -371,9 +397,16 @@ fun FileListItem(
 }
 
 @Composable
-fun FolderIconWithBadge(badgeType: FolderBadgeType) {
+fun FolderIconWithBadge(badgeType: FolderBadgeType, size: Dp = 46.dp) {
+    // Badge/icon-within-badge scale proportionally with the folder icon itself, so a caller
+    // asking for a bigger icon (e.g. FileGridCard's floating, no-longer-boxed grid icon) doesn't
+    // end up with an undersized badge stuck in the middle of a much larger folder glyph.
+    val badgeSize = size * (18f / 46f)
+    val badgeIconSize = size * (13f / 46f)
+    val badgePadding = size * (4f / 46f)
+
     Box(
-        modifier = Modifier.size(46.dp),
+        modifier = Modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
         // Yellow Folder background
@@ -381,7 +414,7 @@ fun FolderIconWithBadge(badgeType: FolderBadgeType) {
             imageVector = Icons.Default.Folder,
             contentDescription = null,
             tint = Color(0xFFF6A623),
-            modifier = Modifier.size(46.dp)
+            modifier = Modifier.size(size)
         )
 
         // Embedded Badge inside the flap (matching Screenshot 000552)
@@ -390,72 +423,72 @@ fun FolderIconWithBadge(badgeType: FolderBadgeType) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .padding(top = 4.dp)
-                        .size(18.dp)
+                        .padding(top = badgePadding)
+                        .size(badgeSize)
                         .background(Color.White, RoundedCornerShape(2.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.CameraAlt, contentDescription = null, tint = Color(0xFFF6A623), modifier = Modifier.size(13.dp))
+                    Icon(Icons.Default.CameraAlt, contentDescription = null, tint = Color(0xFFF6A623), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.DOCUMENTS -> {
                 Box(
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .padding(top = 4.dp)
-                        .size(18.dp)
+                        .padding(top = badgePadding)
+                        .size(badgeSize)
                         .background(Color.White, RoundedCornerShape(2.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Article, contentDescription = null, tint = Color(0xFF1E88E5), modifier = Modifier.size(13.dp))
+                    Icon(Icons.Default.Article, contentDescription = null, tint = Color(0xFF1E88E5), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.DOWNLOAD -> {
                 Box(
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .padding(top = 4.dp)
-                        .size(18.dp)
+                        .padding(top = badgePadding)
+                        .size(badgeSize)
                         .background(Color.White, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.ArrowDownward, contentDescription = null, tint = Color(0xFF00ACC1), modifier = Modifier.size(13.dp))
+                    Icon(Icons.Default.ArrowDownward, contentDescription = null, tint = Color(0xFF00ACC1), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.MOVIES -> {
                 Box(
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .padding(top = 4.dp)
-                        .size(18.dp)
+                        .padding(top = badgePadding)
+                        .size(badgeSize)
                         .background(Color.White, RoundedCornerShape(2.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Movie, contentDescription = null, tint = Color(0xFFE53935), modifier = Modifier.size(13.dp))
+                    Icon(Icons.Default.Movie, contentDescription = null, tint = Color(0xFFE53935), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.MUSIC -> {
                 Box(
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .padding(top = 4.dp)
-                        .size(18.dp)
+                        .padding(top = badgePadding)
+                        .size(badgeSize)
                         .background(Color.White, RoundedCornerShape(2.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color(0xFF26A69A), modifier = Modifier.size(13.dp))
+                    Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color(0xFF26A69A), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.TRASH -> {
                 Box(
                     modifier = Modifier
                         .align(Alignment.Center)
-                        .padding(top = 4.dp)
-                        .size(18.dp)
+                        .padding(top = badgePadding)
+                        .size(badgeSize)
                         .background(Color.White, RoundedCornerShape(2.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFF757575), modifier = Modifier.size(13.dp))
+                    Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFF757575), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.STANDARD -> {}
@@ -549,18 +582,29 @@ fun FileGridCard(
             .padding(4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(RoundedCornerShape(8.dp))
-                .background(DarkCard)
-                .then(if (isSelected) Modifier.border(2.dp, TealPrimary, RoundedCornerShape(8.dp)) else Modifier),
-            contentAlignment = Alignment.Center
-        ) {
-            if (file.isDirectory) {
-                FolderIconWithBadge(badgeType = file.folderBadgeType)
-            } else if (file.thumbnailUri != null) {
+        // A real thumbnail (photo/video frame) wants a filled, cropped square — that still gets
+        // its own clipped/background box below. A folder or a generic type icon doesn't: caging
+        // it inside the same dark square just made it look small and muted (folders already
+        // render as a plain flat icon via FolderIconWithBadge — the box around it was purely
+        // this composable's own doing). Let those float directly instead, sized larger so the
+        // file type actually reads at a glance.
+        if (file.isDirectory) {
+            Box(
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                FolderIconWithBadge(badgeType = file.folderBadgeType, size = 76.dp)
+            }
+        } else if (file.thumbnailUri != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(DarkCard)
+                    .then(if (isSelected) Modifier.border(2.dp, TealPrimary, RoundedCornerShape(8.dp)) else Modifier),
+                contentAlignment = Alignment.Center
+            ) {
                 AsyncImage(
                     model = file.thumbnailUri,
                     contentDescription = file.name,
@@ -568,12 +612,17 @@ fun FileGridCard(
                     error = rememberVectorPainter(getFileIcon(file)),
                     modifier = Modifier.fillMaxSize()
                 )
-            } else {
+            }
+        } else {
+            Box(
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+                contentAlignment = Alignment.Center
+            ) {
                 Icon(
                     imageVector = getFileIcon(file),
                     contentDescription = null,
                     tint = getFileIconColor(file),
-                    modifier = Modifier.size(40.dp)
+                    modifier = Modifier.size(76.dp)
                 )
             }
         }

@@ -11,11 +11,13 @@ import com.antigravity.filemanager.domain.model.CloudTransferProgress
 import com.antigravity.filemanager.domain.model.StorageVolumeInfo
 import com.antigravity.filemanager.domain.usecase.BookmarkUseCase
 import com.antigravity.filemanager.domain.usecase.FileOperationsUseCase
+import com.antigravity.filemanager.domain.usecase.GetCategorizedMediaUseCase
 import com.antigravity.filemanager.domain.usecase.GetDashboardDataUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardManager
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -56,7 +58,10 @@ class DashboardViewModel @Inject constructor(
     private val fileOperationsUseCase: FileOperationsUseCase,
     private val globalClipboardManager: GlobalClipboardManager,
     private val bookmarkUseCase: BookmarkUseCase,
-    private val cloudStorageUseCase: com.antigravity.filemanager.domain.usecase.CloudStorageUseCase
+    private val cloudStorageUseCase: com.antigravity.filemanager.domain.usecase.CloudStorageUseCase,
+    private val mediaUseCase: GetCategorizedMediaUseCase,
+    private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
+    private val folderPreferencesRepository: com.antigravity.filemanager.data.repository.FolderPreferencesRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState())
@@ -68,6 +73,69 @@ class DashboardViewModel @Inject constructor(
         loadData()
         observeClipboard()
         observeBookmarks()
+        warmMediaFolderCaches()
+    }
+
+    /**
+     * The dashboard is where every session starts, so it's the cheapest place to pay for each
+     * category's one-per-process MediaStore reconcile (see FolderCacheManager.reconciledOnceKeys)
+     * — doing it here, quietly, while the user is still looking at the dashboard, means by the
+     * time they actually tap into Images/Videos/Audio/Documents/Downloads that reconcile is
+     * already done and the tap just paints the (now-fresh) cache with no rescan left to run.
+     * Previously that same rescan only ever started on the tap itself, so the very first category
+     * opened after a cold start always paid for it visibly (see the jank measured opening Images/
+     * Videos right after launch). Sequential rather than parallel, and off the main dispatcher, so
+     * this never competes with the dashboard's own first frame for CPU.
+     *
+     * Beyond the folder LIST, each folder card also shows a thumbnail — decoding that (via Coil)
+     * is a separate cost the list cache above doesn't touch, and was the remaining source of jank
+     * measured opening a category for the first time even after the list itself was pre-warmed.
+     * Prefetching each folder's thumbnail here too, at the same fixed size the card itself
+     * requests (MEDIA_FOLDER_THUMB_PX — see FileItemViews.kt), means Coil's memory/disk cache
+     * already has the decoded bitmap ready by the time the card actually asks for it.
+     */
+    private fun warmMediaFolderCaches() {
+        viewModelScope.launch(Dispatchers.Default) {
+            val imageLoader = coil.Coil.imageLoader(context)
+            val categories = listOf(
+                CategoryType.IMAGES,
+                CategoryType.VIDEOS,
+                CategoryType.AUDIO,
+                CategoryType.DOWNLOADS,
+                CategoryType.DOCUMENTS
+            )
+            for (categoryType in categories) {
+                currentCoroutineContext().ensureActive()
+                val sort = folderPreferencesRepository.getSortOption("category_${categoryType.name}")
+                val cached = folderCacheManager.getMediaFolders(categoryType, sort)
+                val folders = if (cached == null || !cached.isFresh) {
+                    // Coalesced with CategoriesViewModel.loadFolders(): if the user taps into this
+                    // exact category before this warm-up pass reaches it, both sides await the
+                    // same scan instead of running two full MediaStore scans of the same category
+                    // side by side — which used to make the tap slower than if this warm-up didn't
+                    // exist, since it was competing with itself for CPU/IO on the one category the
+                    // user was actually staring at.
+                    folderCacheManager.reconcileMediaFolders(categoryType, sort) {
+                        mediaUseCase.getFolders(categoryType, sort)
+                    }
+                } else {
+                    cached.folders
+                }
+
+                for (folder in folders) {
+                    currentCoroutineContext().ensureActive()
+                    val uri = folder.latestThumbnailUri ?: continue
+                    val request = coil.request.ImageRequest.Builder(context)
+                        .data(uri)
+                        .size(com.antigravity.filemanager.presentation.components.MEDIA_FOLDER_THUMB_PX)
+                        .build()
+                    // execute() (not enqueue()) so this loop naturally throttles itself to one
+                    // decode at a time instead of firing dozens of concurrent requests at the
+                    // categories' combined folder count.
+                    imageLoader.execute(request)
+                }
+            }
+        }
     }
 
     private fun observeBookmarks() {

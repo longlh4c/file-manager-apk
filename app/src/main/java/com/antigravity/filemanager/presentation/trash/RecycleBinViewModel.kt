@@ -19,7 +19,13 @@ data class RecycleBinUiState(
     val selectedIds: Set<Long> = emptySet(),
     val totalSizeBytes: Long = 0L,
     val showEmptyConfirm: Boolean = false,
-    val deleteProgress: CloudTransferProgress? = null
+    val deleteProgress: CloudTransferProgress? = null,
+    // Starts true: observeTrash()'s first emission is asynchronous (a Room Flow query), so
+    // without this the very first composed frame renders with the default items=emptyList()
+    // and briefly shows the "Recycle Bin is empty" icon even when the bin actually has items —
+    // exactly the same race as FileBrowserViewModel.loadDirectory had. Flips false on the first
+    // real emission, whatever it turns out to contain.
+    val isLoading: Boolean = true
 ) {
     val formattedTotalSize: String
         get() = com.antigravity.filemanager.domain.model.FileItem.formatBytes(totalSizeBytes)
@@ -37,7 +43,7 @@ class RecycleBinViewModel @Inject constructor(
         viewModelScope.launch {
             recycleBinUseCase.observeTrash().collectLatest { list ->
                 val total = recycleBinUseCase.getTotalSize()
-                _uiState.value = _uiState.value.copy(items = list, totalSizeBytes = total)
+                _uiState.value = _uiState.value.copy(items = list, totalSizeBytes = total, isLoading = false)
             }
         }
     }

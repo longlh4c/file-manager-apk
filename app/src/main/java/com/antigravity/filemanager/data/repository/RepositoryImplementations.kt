@@ -3,6 +3,7 @@ package com.antigravity.filemanager.data.repository
 import android.content.Context
 import android.content.Intent
 import android.os.Environment
+import android.provider.MediaStore
 import com.antigravity.filemanager.data.local.db.AppDatabase
 import com.antigravity.filemanager.data.local.db.CloudEntity
 import com.antigravity.filemanager.data.local.db.TrashEntity
@@ -333,6 +334,7 @@ class FileRepositoryImpl @Inject constructor(
 
 @Singleton
 class RecycleBinRepositoryImpl @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val database: AppDatabase
 ) : IRecycleBinRepository {
 
@@ -340,6 +342,25 @@ class RecycleBinRepositoryImpl @Inject constructor(
 
     init {
         if (!trashRoot.exists()) trashRoot.mkdirs()
+        // A leading-dot directory name only hides it from plain file listings (this app's own
+        // recursive scans already skip those) — MediaStore's own indexer doesn't honor that
+        // convention at all, only an actual .nomedia marker file does. Without one, every file
+        // moved here still gets indexed and its folder shows up as a bucket in Images/Audio/
+        // Videos/Documents, exactly as if it were a normal visible folder.
+        val noMedia = File(trashRoot, ".nomedia")
+        if (!noMedia.exists()) {
+            try { noMedia.createNewFile() } catch (e: Exception) {}
+        }
+        // Rows for files that landed here before the .nomedia marker existed (or that MediaStore
+        // indexed in the gap before it noticed the marker) would otherwise sit stale in the index
+        // until a full device rescan — purge them explicitly so this takes effect immediately.
+        try {
+            context.contentResolver.delete(
+                MediaStore.Files.getContentUri("external"),
+                "${MediaStore.Files.FileColumns.DATA} LIKE ?",
+                arrayOf("${trashRoot.absolutePath}/%")
+            )
+        } catch (e: Exception) {}
     }
 
     override fun observeTrashItems(): Flow<List<TrashItem>> =

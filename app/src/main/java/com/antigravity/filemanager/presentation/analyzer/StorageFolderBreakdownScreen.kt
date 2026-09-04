@@ -46,7 +46,11 @@ fun StorageFolderBreakdownScreen(
     var selectedPaths by remember { mutableStateOf(setOf<String>()) }
     var showDeleteDialog by remember { mutableStateOf(false) }
 
-    var isScanning by remember { mutableStateOf(false) }
+    // Starts true (not false): LaunchedEffect's body only starts running after the first
+    // composition commits, so a false default here let that first frame render with
+    // folderItems still empty and isScanning=false — briefly showing the "empty folder" icon
+    // even when the folder isn't empty, before the actual scan below had a chance to run.
+    var isScanning by remember { mutableStateOf(true) }
     var folderItems by remember { mutableStateOf<List<FileItem>>(emptyList()) }
     var showMoreMenu by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
