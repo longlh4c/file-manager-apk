@@ -36,6 +36,12 @@ data class CategoryUiState(
     val isSelectionMode: Boolean = false,
     val showPropertiesDialog: Boolean = false,
     val itemForProperties: FileItem? = null,
+    // Same idea as CloudExplorerViewModel/FileBrowserViewModel's — one or many selected items.
+    // No background computation needed here: a category subfolder listing is flat (files only,
+    // see filterFilesForCategory) and a root-level MediaFolder bucket already carries its own
+    // precomputed totalSizeBytes, so every size is already known up front.
+    val propertiesItems: List<FileItem> = emptyList(),
+    val propertiesTotalSize: Long = 0L,
     val showDeleteDialog: Boolean = false,
     val showRenameDialog: Boolean = false,
     val itemForRename: FileItem? = null,
@@ -998,6 +1004,26 @@ class CategoriesViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(
             showPropertiesDialog = item != null,
             itemForProperties = item
+        )
+    }
+
+    // Entry point for the selection bar's Properties action — one or many items. Was only ever
+    // showing the FIRST selected item (see the "More > Properties" call site), silently ignoring
+    // the rest of a multi-selection and never summing their sizes.
+    fun showPropertiesForSelection(items: List<FileItem>) {
+        if (items.isEmpty()) return
+        _uiState.value = _uiState.value.copy(
+            showPropertiesDialog = true,
+            propertiesItems = items,
+            propertiesTotalSize = items.sumOf { it.size }
+        )
+    }
+
+    fun dismissPropertiesDialog() {
+        _uiState.value = _uiState.value.copy(
+            showPropertiesDialog = false,
+            propertiesItems = emptyList(),
+            propertiesTotalSize = 0L
         )
     }
 

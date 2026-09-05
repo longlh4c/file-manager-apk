@@ -502,6 +502,79 @@ private fun PropertyRow(label: String, value: String) {
     }
 }
 
+/**
+ * Properties for the Cloud tab's selection bar — one or many items (files and/or folders).
+ * "Size" is always the real total byte count: files contribute their own size directly, folders
+ * contribute their recursively-summed contents (computed in the background — see
+ * CloudExplorerViewModel.showPropertiesForSelection). Single-item Cloud "Properties" now goes
+ * through here too, so a folder shows its actual size instead of just an item count.
+ */
+@Composable
+fun SelectionPropertiesDialog(
+    items: List<com.antigravity.filemanager.domain.model.FileItem>,
+    totalSize: Long,
+    isComputing: Boolean,
+    onDismiss: () -> Unit
+) {
+    if (items.isEmpty()) return
+    val fileCount = items.count { !it.isDirectory }
+    val folderCount = items.count { it.isDirectory }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Properties",
+                color = TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 18.sp
+            )
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                if (items.size == 1) {
+                    val file = items.first()
+                    PropertyRow(label = "Name", value = file.name)
+                    PropertyRow(label = "Type", value = if (file.isDirectory) "Folder" else file.mimeType.ifEmpty { file.extension.uppercase() })
+                    PropertyRow(label = "Path", value = file.path)
+                    if (file.formattedDate.isNotEmpty()) {
+                        PropertyRow(label = "Modified", value = file.formattedDate)
+                    }
+                } else {
+                    val summary = buildList {
+                        if (fileCount > 0) add("$fileCount file(s)")
+                        if (folderCount > 0) add("$folderCount folder(s)")
+                    }.joinToString(", ")
+                    PropertyRow(label = "Selected", value = "${items.size} item(s) — $summary")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                        Text(text = "Size", color = TextSecondary, fontSize = 12.sp)
+                        Text(
+                            text = FileItem.formatBytes(totalSize) + if (isComputing) " (calculating…)" else "",
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Normal
+                        )
+                    }
+                    if (isComputing) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = TealPrimary)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(containerColor = TealPrimary, contentColor = Color.Black)
+            ) {
+                Text(text = "OK", fontWeight = FontWeight.Bold)
+            }
+        },
+        containerColor = DarkCard
+    )
+}
+
 @Composable
 fun AddCloudDialog(
     onSelectProvider: (CloudProvider, String, String, String?, String?) -> Unit,

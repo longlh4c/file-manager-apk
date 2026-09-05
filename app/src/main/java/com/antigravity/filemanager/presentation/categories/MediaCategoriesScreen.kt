@@ -130,10 +130,12 @@ fun MediaCategoriesScreen(
     // screen's top bar (see the comment where it used to be, further down) — nothing sets this
     // flag anymore, so the dialog it would show is dropped too.
 
-    if (uiState.showPropertiesDialog && uiState.itemForProperties != null) {
-        PropertiesDialog(
-            file = uiState.itemForProperties!!,
-            onDismiss = { viewModel.showProperties(null) }
+    if (uiState.showPropertiesDialog) {
+        SelectionPropertiesDialog(
+            items = uiState.propertiesItems,
+            totalSize = uiState.propertiesTotalSize,
+            isComputing = false,
+            onDismiss = { viewModel.dismissPropertiesDialog() }
         )
     }
 
@@ -446,26 +448,28 @@ fun MediaCategoriesScreen(
                                         if (file != null) FileOpener.openWith(context, file)
                                     }
                                 )
+                                // Was only ever looking up the FIRST selected path, silently
+                                // ignoring the rest of a multi-selection.
                                 DropdownMenuItem(
                                     text = { Text("Properties", color = TextPrimary) },
                                     leadingIcon = { Icon(Icons.Default.Info, contentDescription = null, tint = TextPrimary) },
                                     onClick = {
                                         showMoreMenu = false
-                                        val firstPath = uiState.selectedPaths.firstOrNull()
-                                        val file = uiState.subfolderFiles.find { it.path == firstPath }
-                                            ?: uiState.folders.find { it.path == firstPath }?.let { folder ->
-                                                FileItem(
-                                                    id = folder.id,
-                                                    name = folder.name,
-                                                    path = folder.path,
-                                                    isDirectory = true,
-                                                    itemCount = folder.itemCount,
-                                                    size = folder.totalSizeBytes,
-                                                    lastModified = folder.lastModified,
-                                                    thumbnailUri = folder.latestThumbnailUri
-                                                )
-                                            }
-                                        viewModel.showProperties(file)
+                                        val selectedPaths = uiState.selectedPaths
+                                        val fromFiles = uiState.subfolderFiles.filter { it.path in selectedPaths }
+                                        val fromFolders = uiState.folders.filter { it.path in selectedPaths }.map { folder ->
+                                            FileItem(
+                                                id = folder.id,
+                                                name = folder.name,
+                                                path = folder.path,
+                                                isDirectory = true,
+                                                itemCount = folder.itemCount,
+                                                size = folder.totalSizeBytes,
+                                                lastModified = folder.lastModified,
+                                                thumbnailUri = folder.latestThumbnailUri
+                                            )
+                                        }
+                                        viewModel.showPropertiesForSelection(fromFiles + fromFolders)
                                     }
                                 )
                             }

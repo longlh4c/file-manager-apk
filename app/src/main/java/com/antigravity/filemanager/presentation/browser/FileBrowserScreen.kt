@@ -223,10 +223,12 @@ fun FileBrowserScreen(
         )
     }
 
-    if (uiState.showPropertiesDialog && uiState.itemForProperties != null) {
-        PropertiesDialog(
-            file = uiState.itemForProperties!!,
-            onDismiss = { viewModel.setShowPropertiesDialog(null) }
+    if (uiState.showPropertiesDialog) {
+        SelectionPropertiesDialog(
+            items = uiState.propertiesItems,
+            totalSize = uiState.propertiesTotalSize,
+            isComputing = uiState.propertiesIsComputing,
+            onDismiss = { viewModel.dismissPropertiesDialog() }
         )
     }
 
@@ -506,15 +508,16 @@ fun FileBrowserScreen(
                                         if (file != null) FileOpener.openWith(context, file)
                                     }
                                 )
-                                // Properties
+                                // Properties — was only ever looking up the FIRST selected path,
+                                // silently ignoring the rest of a multi-selection.
                                 DropdownMenuItem(
                                     text = { Text("Properties", color = TextPrimary) },
                                     leadingIcon = { Icon(Icons.Default.Info, contentDescription = null, tint = TextPrimary) },
                                     onClick = {
                                         showMoreMenu = false
-                                        val firstPath = uiState.selectedPaths.firstOrNull()
-                                        val file = filteredFiles.find { it.path == firstPath }
-                                        viewModel.setShowPropertiesDialog(file)
+                                        val selectedPaths = uiState.selectedPaths
+                                        val items = filteredFiles.filter { it.path in selectedPaths }
+                                        viewModel.showPropertiesForSelection(items)
                                     }
                                 )
                             }

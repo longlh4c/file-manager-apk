@@ -55,6 +55,14 @@ data class CloudExplorerUiState(
     val toastMessage: String? = null,
     val itemForProperties: FileItem? = null,
     val showPropertiesDialog: Boolean = false,
+    // One or more items whose Properties dialog is open — a single tap still goes through this
+    // (propertiesItems has one entry) so "Size" always means the same thing: the real total byte
+    // count, including folders' own contents, not just a top-level item count. propertiesTotalSize
+    // is null while still walking any folder(s) in the selection; propertiesIsComputing drives the
+    // dialog's loading state until every folder's contents (recursively) have been summed.
+    val propertiesItems: List<FileItem> = emptyList(),
+    val propertiesTotalSize: Long = 0L,
+    val propertiesIsComputing: Boolean = false,
     val itemToRename: FileItem? = null,
     val showRenameDialog: Boolean = false,
     val showDeleteDialog: Boolean = false,
@@ -1168,6 +1176,64 @@ class CloudExplorerViewModel @Inject constructor(
 
     fun showProperties(item: FileItem?) {
         _uiState.value = _uiState.value.copy(showPropertiesDialog = item != null, itemForProperties = item)
+    }
+
+    private var propertiesJob: kotlinx.coroutines.Job? = null
+
+    // Entry point for the selection bar's Properties button — one or many items, files and/or
+    // folders. Shows the dialog immediately with what's already known (names, file sizes) while a
+    // background job walks any folder(s) in the selection to add up their real total size, so a
+    // multi-folder selection doesn't leave the dialog frozen on "0 B" for however long that takes.
+    fun showPropertiesForSelection(items: List<FileItem>) {
+        if (items.isEmpty()) return
+        propertiesJob?.cancel()
+        val knownSize = items.filterNot { it.isDirectory }.sumOf { it.size }
+        val hasFolders = items.any { it.isDirectory }
+        _uiState.value = _uiState.value.copy(
+            showPropertiesDialog = true,
+            propertiesItems = items,
+            propertiesTotalSize = knownSize,
+            propertiesIsComputing = hasFolders
+        )
+        if (!hasFolders) return
+        propertiesJob = viewModelScope.launch {
+            var total = knownSize
+            for (item in items.filter { it.isDirectory }) {
+                total += computeCloudFolderSize(item.path)
+                _uiState.value = _uiState.value.copy(propertiesTotalSize = total)
+            }
+            _uiState.value = _uiState.value.copy(propertiesIsComputing = false)
+        }
+    }
+
+    fun dismissPropertiesDialog() {
+        propertiesJob?.cancel()
+        _uiState.value = _uiState.value.copy(
+            showPropertiesDialog = false,
+            propertiesItems = emptyList(),
+            propertiesTotalSize = 0L,
+            propertiesIsComputing = false
+        )
+    }
+
+    // Cloud listings carry no folder-level size field (Dropbox/Drive/MEGA all report 0 for a
+    // directory's own "size"), so the only way to know a folder's real total is walking its
+    // contents — recursively, since a subfolder needs the same treatment. Reuses whatever's
+    // already cached for a given path/no cost for folders already browsed this session.
+    private suspend fun computeCloudFolderSize(path: String): Long {
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        val cached = folderCacheManager.getCloudFolder(accountId, path)
+        val children = if (cached != null && cached.isFresh) {
+            cached.files
+        } else {
+            cloudUseCase.getFiles(accountId, path).getOrDefault(emptyList())
+        }
+        var total = 0L
+        for (child in children) {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            total += if (child.isDirectory) computeCloudFolderSize(child.path) else child.size
+        }
+        return total
     }
 
     /** Selects everything in the currently open trash/rubbish-bin folder and permanently deletes
