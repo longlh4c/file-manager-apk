@@ -386,7 +386,25 @@ class RecycleBinRepositoryImpl @Inject constructor(
                 val size = if (source.isDirectory) 0L else source.length()
                 val isDir = source.isDirectory
 
-                if (source.renameTo(trashFile)) {
+                // Same renameTo()-alone-isn't-reliable-enough fix as restoreFromTrash below —
+                // fall back to copy+delete instead of just skipping the file when it fails.
+                val moved = try {
+                    if (source.renameTo(trashFile)) {
+                        true
+                    } else if (isDir) {
+                        source.copyRecursively(trashFile, overwrite = true)
+                        source.deleteRecursively()
+                        true
+                    } else {
+                        source.copyTo(trashFile, overwrite = true)
+                        source.delete()
+                        true
+                    }
+                } catch (e: Exception) {
+                    false
+                }
+
+                if (moved) {
                     database.trashDao().insert(
                         TrashEntity(
                             originalPath = source.absolutePath,
@@ -410,15 +428,48 @@ class RecycleBinRepositoryImpl @Inject constructor(
         try {
             val entities = database.trashDao().getByIds(trashIds)
             var restored = 0
+            val scannedPaths = mutableListOf<String>()
             for (entity in entities) {
                 val trashFile = File(entity.trashPath)
                 val originalFile = File(entity.originalPath)
+                if (!trashFile.exists()) continue
                 originalFile.parentFile?.mkdirs()
 
-                if (trashFile.exists() && trashFile.renameTo(originalFile)) {
+                // renameTo() alone silently fails on a lot of real devices/paths — same reason
+                // FileOperationsHelper.move() below already falls back to copy+delete instead of
+                // trusting it outright. Restore had no such fallback, so on any device/path where
+                // renameTo() just returns false, the file quietly never came back (still sitting
+                // in .filemanager_trash) with the DB row untouched — restored never incremented,
+                // no error surfaced anywhere, reading as "Restore doesn't do anything."
+                val moved = try {
+                    if (trashFile.renameTo(originalFile)) {
+                        true
+                    } else if (entity.isDirectory) {
+                        trashFile.copyRecursively(originalFile, overwrite = true)
+                        trashFile.deleteRecursively()
+                        true
+                    } else {
+                        trashFile.copyTo(originalFile, overwrite = true)
+                        trashFile.delete()
+                        true
+                    }
+                } catch (e: Exception) {
+                    false
+                }
+
+                if (moved) {
                     database.trashDao().deleteByIds(listOf(entity.id))
+                    scannedPaths.add(originalFile.absolutePath)
                     restored++
                 }
+            }
+            // Writing straight to a java.io.File never tells MediaStore anything happened — a
+            // restored photo/video/etc. showed back up fine navigating to its folder directly, but
+            // never updated the folder's thumbnail/count on the category root grid without this.
+            if (scannedPaths.isNotEmpty()) {
+                try {
+                    android.media.MediaScannerConnection.scanFile(context, scannedPaths.toTypedArray(), null, null)
+                } catch (e: Exception) {}
             }
             Result.success(restored)
         } catch (e: Exception) {

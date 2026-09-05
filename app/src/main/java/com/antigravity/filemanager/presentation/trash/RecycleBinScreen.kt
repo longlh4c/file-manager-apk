@@ -5,23 +5,33 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import coil.compose.AsyncImage
+import com.antigravity.filemanager.domain.model.FileItem
+import com.antigravity.filemanager.domain.model.TrashItem
 import com.antigravity.filemanager.presentation.components.CloudDownloadProgressDialog
 import com.antigravity.filemanager.presentation.components.FileManagerTopBar
+import com.antigravity.filemanager.presentation.components.getFileIcon
 import com.antigravity.filemanager.presentation.theme.*
+import java.io.File
 
 @Composable
 fun RecycleBinScreen(
@@ -150,6 +160,8 @@ fun RecycleBinScreen(
                             onCheckedChange = { viewModel.toggleItemSelection(item.id) },
                             colors = CheckboxDefaults.colors(checkedColor = TealPrimary, checkmarkColor = PureBlack)
                         )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        TrashItemThumbnail(item)
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
@@ -172,6 +184,50 @@ fun RecycleBinScreen(
                     HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
                 }
             }
+        }
+    }
+}
+
+// Was a plain text-only row with no thumbnail at all. trashPath (not originalPath) is the file's
+// real current location — Coil's registered fetchers (VideoThumbnailFetcher, PdfThumbnailFetcher,
+// AudioArtFetcher, plain image decoding) already know how to make a thumbnail straight from a
+// File/path for whatever type it turns out to be, the same way a normal folder listing does.
+@Composable
+private fun TrashItemThumbnail(item: TrashItem) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(DarkCard),
+        contentAlignment = Alignment.Center
+    ) {
+        if (item.isDirectory) {
+            Icon(
+                imageVector = Icons.Default.Folder,
+                contentDescription = null,
+                tint = TextSecondary,
+                modifier = Modifier.size(26.dp)
+            )
+        } else {
+            val fakeFile = remember(item.id) {
+                val ext = item.fileName.substringAfterLast('.', "").lowercase()
+                FileItem(
+                    id = item.trashPath,
+                    name = item.fileName,
+                    path = item.trashPath,
+                    size = item.fileSize,
+                    lastModified = item.deletedTimestamp,
+                    isDirectory = false,
+                    extension = ext
+                )
+            }
+            AsyncImage(
+                model = File(item.trashPath),
+                contentDescription = item.fileName,
+                contentScale = ContentScale.Crop,
+                error = rememberVectorPainter(getFileIcon(fakeFile)),
+                modifier = Modifier.fillMaxSize()
+            )
         }
     }
 }
