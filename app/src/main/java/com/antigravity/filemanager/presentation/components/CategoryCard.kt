@@ -92,6 +92,7 @@ private fun getCategoryIcon(type: CategoryType): ImageVector = when (type) {
     CategoryType.AUDIO -> Icons.Default.MusicNote
     CategoryType.VIDEOS -> Icons.Default.Movie
     CategoryType.DOCUMENTS -> Icons.Default.Article
+    CategoryType.NEW_FILES -> Icons.Default.NewReleases
     CategoryType.CLOUD -> Icons.Default.Cloud
     CategoryType.ACCESS_FROM_NETWORK -> Icons.Default.Devices
     CategoryType.RECYCLE_BIN -> Icons.Default.DeleteOutline
@@ -105,6 +106,7 @@ private fun getCategoryBgColor(type: CategoryType): Color = when (type) {
     CategoryType.AUDIO -> Color(0xFF1E3A3A)
     CategoryType.VIDEOS -> Color(0xFF452226)
     CategoryType.DOCUMENTS -> Color(0xFF1E2F47)
+    CategoryType.NEW_FILES -> Color(0xFF203524)
     CategoryType.CLOUD -> Color(0xFF1B384F)
     CategoryType.ACCESS_FROM_NETWORK -> Color(0xFF263238)
     CategoryType.RECYCLE_BIN -> Color(0xFF2C2438)
@@ -118,6 +120,7 @@ private fun getCategoryBorderColor(type: CategoryType): Color = when (type) {
     CategoryType.AUDIO -> Color(0xFF4DB6AC)
     CategoryType.VIDEOS -> Color(0xFFEF5350)
     CategoryType.DOCUMENTS -> Color(0xFF42A5F5)
+    CategoryType.NEW_FILES -> Color(0xFF66BB6A)
     CategoryType.CLOUD -> Color(0xFF29B6F6)
     CategoryType.ACCESS_FROM_NETWORK -> Color(0xFF78909C)
     CategoryType.RECYCLE_BIN -> Color(0xFF9575CD)
@@ -131,6 +134,7 @@ private fun getCategoryIconTint(type: CategoryType): Color = when (type) {
     CategoryType.AUDIO -> Color(0xFF80CBC4)
     CategoryType.VIDEOS -> Color(0xFFFFCDD2)
     CategoryType.DOCUMENTS -> Color(0xFF90CAF9)
+    CategoryType.NEW_FILES -> Color(0xFFA5D6A7)
     CategoryType.CLOUD -> Color(0xFF81D4FA)
     CategoryType.ACCESS_FROM_NETWORK -> Color(0xFFB0BEC5)
     CategoryType.RECYCLE_BIN -> Color(0xFFD1C4E9)

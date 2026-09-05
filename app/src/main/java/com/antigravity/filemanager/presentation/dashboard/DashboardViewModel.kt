@@ -35,6 +35,7 @@ private val INITIAL_DASHBOARD_CATEGORIES = listOf(
     CategorySummary(type = CategoryType.AUDIO, title = "Audio"),
     CategorySummary(type = CategoryType.VIDEOS, title = "Videos"),
     CategorySummary(type = CategoryType.DOCUMENTS, title = "Documents"),
+    CategorySummary(type = CategoryType.NEW_FILES, title = "New Files"),
     CategorySummary(type = CategoryType.CLOUD, title = "Cloud"),
     CategorySummary(type = CategoryType.ACCESS_FROM_NETWORK, title = "FTP"),
     CategorySummary(type = CategoryType.RECYCLE_BIN, title = "Recycle Bin")

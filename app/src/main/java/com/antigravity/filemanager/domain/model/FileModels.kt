@@ -39,6 +39,7 @@ enum class CategoryType {
     AUDIO,
     VIDEOS,
     DOCUMENTS,
+    NEW_FILES,
     CLOUD,
     ACCESS_FROM_NETWORK,
     RECYCLE_BIN

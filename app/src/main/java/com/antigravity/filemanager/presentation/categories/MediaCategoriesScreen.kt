@@ -11,6 +11,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
@@ -130,10 +131,12 @@ fun MediaCategoriesScreen(
     // screen's top bar (see the comment where it used to be, further down) — nothing sets this
     // flag anymore, so the dialog it would show is dropped too.
 
-    if (uiState.showPropertiesDialog && uiState.itemForProperties != null) {
-        PropertiesDialog(
-            file = uiState.itemForProperties!!,
-            onDismiss = { viewModel.showProperties(null) }
+    if (uiState.showPropertiesDialog) {
+        SelectionPropertiesDialog(
+            items = uiState.propertiesItems,
+            totalSize = uiState.propertiesTotalSize,
+            isComputing = false,
+            onDismiss = { viewModel.dismissPropertiesDialog() }
         )
     }
 
@@ -209,6 +212,14 @@ fun MediaCategoriesScreen(
     val filteredFiles = remember(uiState.subfolderFiles, uiState.searchQuery) {
         if (uiState.searchQuery.isBlank()) uiState.subfolderFiles
         else uiState.subfolderFiles.filter { it.name.contains(uiState.searchQuery, ignoreCase = true) }
+    }
+
+    // New Files groups its (already newest-first) listing under a date header per day — "Today",
+    // "Yesterday", then a formatted date for anything older. Files already sorted newest-first by
+    // queryRecentFiles(), so grouping consecutive same-day entries alone (not a full re-sort) is
+    // enough to keep each group's own internal order intact.
+    val groupedNewFiles = remember(filteredFiles, category) {
+        if (category != CategoryType.NEW_FILES) emptyList() else groupFilesByDate(filteredFiles)
     }
 
     Scaffold(
@@ -299,11 +310,13 @@ fun MediaCategoriesScreen(
                         // "New Folder doesn't work" — it's not that it silently failed, there was
                         // just nowhere for it to show up.
 
-                        // Sort + View buttons (shared with FileBrowserScreen).
+                        // Sort + View buttons (shared with FileBrowserScreen). New Files has a
+                        // fixed newest-first order — no Sort button for it, View toggle stays.
                         SortAndViewTopBarActions(
                             viewMode = viewMode,
                             onSortClick = { showSortDialog = true },
-                            onViewModeChange = { mode, applyToAll -> viewModel.onViewModeChanged(mode, applyToAll) }
+                            onViewModeChange = { mode, applyToAll -> viewModel.onViewModeChanged(mode, applyToAll) },
+                            showSort = viewModel.categoryType != CategoryType.NEW_FILES
                         )
                     }
                 )
@@ -428,51 +441,61 @@ fun MediaCategoriesScreen(
                                         }
                                     )
                                 }
-                                DropdownMenuItem(
-                                    text = { Text("Compress", color = TextPrimary) },
-                                    leadingIcon = { Icon(Icons.Default.FolderZip, contentDescription = null, tint = TextPrimary) },
-                                    onClick = {
-                                        showMoreMenu = false
-                                        viewModel.setShowCompressDialog(true)
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Open with", color = TextPrimary) },
-                                    leadingIcon = { Icon(Icons.Default.OpenInBrowser, contentDescription = null, tint = TextPrimary) },
-                                    onClick = {
-                                        showMoreMenu = false
-                                        val firstPath = uiState.selectedPaths.firstOrNull()
-                                        val file = uiState.subfolderFiles.find { it.path == firstPath }
-                                        if (file != null) FileOpener.openWith(context, file)
-                                    }
-                                )
+                                // Compress and Open With are both excluded from New Files by
+                                // request — a listing pulled from wherever its files actually live
+                                // on disk, not a real folder to compress the contents of.
+                                if (viewModel.categoryType != CategoryType.NEW_FILES) {
+                                    DropdownMenuItem(
+                                        text = { Text("Compress", color = TextPrimary) },
+                                        leadingIcon = { Icon(Icons.Default.FolderZip, contentDescription = null, tint = TextPrimary) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            viewModel.setShowCompressDialog(true)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Open with", color = TextPrimary) },
+                                        leadingIcon = { Icon(Icons.Default.OpenInBrowser, contentDescription = null, tint = TextPrimary) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            val firstPath = uiState.selectedPaths.firstOrNull()
+                                            val file = uiState.subfolderFiles.find { it.path == firstPath }
+                                            if (file != null) FileOpener.openWith(context, file)
+                                        }
+                                    )
+                                }
+                                // Was only ever looking up the FIRST selected path, silently
+                                // ignoring the rest of a multi-selection.
                                 DropdownMenuItem(
                                     text = { Text("Properties", color = TextPrimary) },
                                     leadingIcon = { Icon(Icons.Default.Info, contentDescription = null, tint = TextPrimary) },
                                     onClick = {
                                         showMoreMenu = false
-                                        val firstPath = uiState.selectedPaths.firstOrNull()
-                                        val file = uiState.subfolderFiles.find { it.path == firstPath }
-                                            ?: uiState.folders.find { it.path == firstPath }?.let { folder ->
-                                                FileItem(
-                                                    id = folder.id,
-                                                    name = folder.name,
-                                                    path = folder.path,
-                                                    isDirectory = true,
-                                                    itemCount = folder.itemCount,
-                                                    size = folder.totalSizeBytes,
-                                                    lastModified = folder.lastModified,
-                                                    thumbnailUri = folder.latestThumbnailUri
-                                                )
-                                            }
-                                        viewModel.showProperties(file)
+                                        val selectedPaths = uiState.selectedPaths
+                                        val fromFiles = uiState.subfolderFiles.filter { it.path in selectedPaths }
+                                        val fromFolders = uiState.folders.filter { it.path in selectedPaths }.map { folder ->
+                                            FileItem(
+                                                id = folder.id,
+                                                name = folder.name,
+                                                path = folder.path,
+                                                isDirectory = true,
+                                                itemCount = folder.itemCount,
+                                                size = folder.totalSizeBytes,
+                                                lastModified = folder.lastModified,
+                                                thumbnailUri = folder.latestThumbnailUri
+                                            )
+                                        }
+                                        viewModel.showPropertiesForSelection(fromFiles + fromFolders)
                                     }
                                 )
                             }
                         }
                     }
                 }
-            } else if (uiState.clipboardPaths.isNotEmpty()) {
+            } else if (uiState.clipboardPaths.isNotEmpty() && viewModel.categoryType != CategoryType.NEW_FILES) {
+                // New Files is a synthetic aggregated view (files pulled from wherever they
+                // actually live on disk), not a real folder — there's nowhere for "Paste Here" to
+                // actually write to, so it's hidden here rather than pasting into a made-up path.
                 PasteBottomBar(
                     itemCount = uiState.clipboardPaths.size,
                     onPaste = { viewModel.paste() },
@@ -493,7 +516,10 @@ fun MediaCategoriesScreen(
                 categoryType = category,
                 pathSegments = uiState.pathSegments,
                 onHomeClick = onNavigateBack,
-                onCategoryClick = { viewModel.loadFolders() },
+                // New Files has no root bucket grid to go back to — loadFolders() would run the
+                // wrong query entirely (a MediaFolder bucket scan) and leave the screen showing an
+                // empty "root grid" for a category that never has one. Refresh in place instead.
+                onCategoryClick = { if (category == CategoryType.NEW_FILES) viewModel.loadRecentFiles() else viewModel.loadFolders() },
                 onSegmentClick = { index -> viewModel.navigateToSegment(index) }
             )
 
@@ -525,7 +551,8 @@ fun MediaCategoriesScreen(
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                items(filteredFiles, key = { it.path }) { file ->
+                                @Composable
+                                fun gridCard(file: FileItem) {
                                     FileGridCard(
                                         file = file,
                                         isSelectionMode = uiState.isSelectionMode,
@@ -546,11 +573,22 @@ fun MediaCategoriesScreen(
                                         }
                                     )
                                 }
+                                if (category == CategoryType.NEW_FILES) {
+                                    groupedNewFiles.forEach { (label, files) ->
+                                        item(key = "header_$label", span = { GridItemSpan(maxLineSpan) }) {
+                                            DateGroupHeader(label)
+                                        }
+                                        items(files, key = { it.path }) { file -> gridCard(file) }
+                                    }
+                                } else {
+                                    items(filteredFiles, key = { it.path }) { file -> gridCard(file) }
+                                }
                             }
                         }
                         ViewMode.DETAILED_LIST -> {
                             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                items(filteredFiles, key = { it.path }) { file ->
+                                @Composable
+                                fun listRow(file: FileItem) {
                                     FileDetailedListItem(
                                         file = file,
                                         isSelectionMode = uiState.isSelectionMode,
@@ -572,12 +610,21 @@ fun MediaCategoriesScreen(
                                     )
                                     HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
                                 }
+                                if (category == CategoryType.NEW_FILES) {
+                                    groupedNewFiles.forEach { (label, files) ->
+                                        item(key = "header_$label") { DateGroupHeader(label) }
+                                        items(files, key = { it.path }) { file -> listRow(file) }
+                                    }
+                                } else {
+                                    items(filteredFiles, key = { it.path }) { file -> listRow(file) }
+                                }
                             }
                         }
                         else -> {
                             // Standard List view
                             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                items(filteredFiles, key = { it.path }) { file ->
+                                @Composable
+                                fun listRow(file: FileItem) {
                                     FileListItem(
                                         file = file,
                                         isSelectionMode = uiState.isSelectionMode,
@@ -598,6 +645,14 @@ fun MediaCategoriesScreen(
                                         }
                                     )
                                     HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
+                                }
+                                if (category == CategoryType.NEW_FILES) {
+                                    groupedNewFiles.forEach { (label, files) ->
+                                        item(key = "header_$label") { DateGroupHeader(label) }
+                                        items(files, key = { it.path }) { file -> listRow(file) }
+                                    }
+                                } else {
+                                    items(filteredFiles, key = { it.path }) { file -> listRow(file) }
                                 }
                             }
                         }
@@ -666,4 +721,47 @@ fun MediaCategoriesScreen(
             }
         }
     }
+}
+
+@Composable
+private fun DateGroupHeader(label: String) {
+    Text(
+        text = label,
+        color = TealAccent,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    )
+}
+
+/** "Today" / "Yesterday" / "MMM d, yyyy" per calendar day, preserving each day's existing
+ * (already newest-first) relative order — see New Files' groupedNewFiles above. */
+private fun groupFilesByDate(files: List<FileItem>): List<Pair<String, List<FileItem>>> {
+    val today = java.util.Calendar.getInstance().apply {
+        set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+        set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+    }.timeInMillis
+    val oneDayMs = 24L * 60 * 60 * 1000
+    val dateFormat = java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.getDefault())
+
+    fun labelFor(timestamp: Long): String {
+        val dayStart = java.util.Calendar.getInstance().apply {
+            timeInMillis = timestamp
+            set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        return when (today - dayStart) {
+            0L -> "Today"
+            oneDayMs -> "Yesterday"
+            else -> dateFormat.format(java.util.Date(dayStart))
+        }
+    }
+
+    val grouped = LinkedHashMap<String, MutableList<FileItem>>()
+    for (file in files) {
+        grouped.getOrPut(labelFor(file.lastModified)) { mutableListOf() }.add(file)
+    }
+    return grouped.map { (label, items) -> label to items }
 }

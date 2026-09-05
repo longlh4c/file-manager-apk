@@ -253,6 +253,9 @@ class FileRepositoryImpl @Inject constructor(
     override suspend fun getAllDocuments(sortOption: FileSortOption): List<FileItem> =
         scanner.getAllDocumentFiles(sortOption)
 
+    override suspend fun getRecentFiles(sinceMillis: Long): List<FileItem> =
+        scanner.queryRecentFiles(sinceMillis)
+
     override suspend fun searchFiles(query: String, rootPath: String?, categoryType: CategoryType?): List<FileItem> = withContext(Dispatchers.IO) {
         val root = if (rootPath != null) File(rootPath) else Environment.getExternalStorageDirectory()
         val results = mutableListOf<FileItem>()

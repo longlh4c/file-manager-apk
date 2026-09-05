@@ -39,6 +39,8 @@ class GetCategorizedMediaUseCase @Inject constructor(
     suspend fun getAllDocuments(
         sortOption: FileSortOption = FileSortOption.BY_DATE_DESC
     ): List<FileItem> = fileRepository.getAllDocuments(sortOption)
+
+    suspend fun getRecentFiles(sinceMillis: Long): List<FileItem> = fileRepository.getRecentFiles(sinceMillis)
 }
 
 class FileOperationsUseCase @Inject constructor(

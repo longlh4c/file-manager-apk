@@ -69,6 +69,12 @@ data class FileBrowserUiState(
     val localFolderPickerLoading: Boolean = false,
     val itemToRename: FileItem? = null,
     val itemForProperties: FileItem? = null,
+    // Same idea as CloudExplorerViewModel's — one or many items (files and/or folders), "Size"
+    // always the real total byte count including recursively-summed folder contents, computed in
+    // the background so a folder with a lot inside it doesn't block the dialog from opening.
+    val propertiesItems: List<FileItem> = emptyList(),
+    val propertiesTotalSize: Long = 0L,
+    val propertiesIsComputing: Boolean = false,
     val searchQuery: String = "",
     val isSearchActive: Boolean = false,
     // See the matching fields in CloudExplorerUiState — recursive search results (this folder +
@@ -1038,4 +1044,48 @@ class FileBrowserViewModel @Inject constructor(
     fun setShowDeleteDialog(show: Boolean) { _uiState.value = _uiState.value.copy(showDeleteDialog = show) }
     fun setShowPropertiesDialog(item: FileItem?) { _uiState.value = _uiState.value.copy(showPropertiesDialog = item != null, itemForProperties = item) }
     fun setShowCompressDialog(show: Boolean) { _uiState.value = _uiState.value.copy(showCompressDialog = show) }
+
+    private var propertiesJob: kotlinx.coroutines.Job? = null
+
+    // Entry point for the selection bar's Properties action — one or many items, files and/or
+    // folders. Was only ever able to show a single item (the "More > Properties" menu just looked
+    // up uiState.selectedPaths.firstOrNull(), silently ignoring the rest of a multi-selection).
+    // Shows the dialog immediately with what's already known (file sizes) while a background job
+    // walks any folder(s) in the selection on disk to add up their real total size.
+    fun showPropertiesForSelection(items: List<FileItem>) {
+        if (items.isEmpty()) return
+        propertiesJob?.cancel()
+        val knownSize = items.filterNot { it.isDirectory }.sumOf { it.size }
+        val folders = items.filter { it.isDirectory }
+        _uiState.value = _uiState.value.copy(
+            showPropertiesDialog = true,
+            propertiesItems = items,
+            propertiesTotalSize = knownSize,
+            propertiesIsComputing = folders.isNotEmpty()
+        )
+        if (folders.isEmpty()) return
+        propertiesJob = viewModelScope.launch(Dispatchers.IO) {
+            var total = knownSize
+            for (folder in folders) {
+                ensureActive()
+                total += try {
+                    File(folder.path).walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                } catch (e: Exception) {
+                    0L
+                }
+                _uiState.value = _uiState.value.copy(propertiesTotalSize = total)
+            }
+            _uiState.value = _uiState.value.copy(propertiesIsComputing = false)
+        }
+    }
+
+    fun dismissPropertiesDialog() {
+        propertiesJob?.cancel()
+        _uiState.value = _uiState.value.copy(
+            showPropertiesDialog = false,
+            propertiesItems = emptyList(),
+            propertiesTotalSize = 0L,
+            propertiesIsComputing = false
+        )
+    }
 }

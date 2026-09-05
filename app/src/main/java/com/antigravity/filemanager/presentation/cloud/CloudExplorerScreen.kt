@@ -91,10 +91,12 @@ fun CloudExplorerScreen(
         }
     }
 
-    if (uiState.showPropertiesDialog && uiState.itemForProperties != null) {
-        PropertiesDialog(
-            file = uiState.itemForProperties!!,
-            onDismiss = { viewModel.showProperties(null) }
+    if (uiState.showPropertiesDialog) {
+        SelectionPropertiesDialog(
+            items = uiState.propertiesItems,
+            totalSize = uiState.propertiesTotalSize,
+            isComputing = uiState.propertiesIsComputing,
+            onDismiss = { viewModel.dismissPropertiesDialog() }
         )
     }
 
@@ -404,19 +406,17 @@ fun CloudExplorerScreen(
                                 onClick = { viewModel.setShowDeleteDialog(true) },
                                 modifier = Modifier.weight(1f)
                             )
-                            if (uiState.selectedPaths.size == 1) {
-                                BottomBarActionItem(
-                                    icon = Icons.Default.Info,
-                                    label = "Properties",
-                                    tint = TextPrimary,
-                                    onClick = {
-                                        val firstId = uiState.selectedPaths.firstOrNull()
-                                        val item = filteredFiles.find { it.id == firstId || it.path == firstId }
-                                        viewModel.showProperties(item)
-                                    },
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
+                            BottomBarActionItem(
+                                icon = Icons.Default.Info,
+                                label = "Properties",
+                                tint = TextPrimary,
+                                onClick = {
+                                    val selectedIds = uiState.selectedPaths
+                                    val items = filteredFiles.filter { it.id in selectedIds || it.path in selectedIds }
+                                    viewModel.showPropertiesForSelection(items)
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
                             BottomBarActionItem(
                                 icon = Icons.Default.Close,
                                 label = "Cancel",

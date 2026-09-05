@@ -37,6 +37,10 @@ interface IFileRepository {
         sortOption: FileSortOption = FileSortOption.BY_DATE_DESC
     ): List<FileItem>
 
+    /** Every local file (any type) last modified at or after [sinceMillis], newest first —
+     * backs the "New Files" category. */
+    suspend fun getRecentFiles(sinceMillis: Long): List<FileItem>
+
     suspend fun searchFiles(
         query: String,
         rootPath: String? = null,

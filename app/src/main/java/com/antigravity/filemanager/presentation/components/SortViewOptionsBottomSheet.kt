@@ -34,10 +34,15 @@ enum class ViewMode {
 fun SortAndViewTopBarActions(
     viewMode: ViewMode,
     onSortClick: () -> Unit,
-    onViewModeChange: (ViewMode, applyToAll: Boolean) -> Unit
+    onViewModeChange: (ViewMode, applyToAll: Boolean) -> Unit,
+    // false for a listing with a fixed, non-user-choosable sort order (e.g. "New Files", always
+    // newest-first) — there's nothing for a "Sort by" dialog to offer there.
+    showSort: Boolean = true
 ) {
-    IconButton(onClick = onSortClick) {
-        Icon(Icons.Default.SwapVert, contentDescription = "Sort", tint = TextPrimary)
+    if (showSort) {
+        IconButton(onClick = onSortClick) {
+            Icon(Icons.Default.SwapVert, contentDescription = "Sort", tint = TextPrimary)
+        }
     }
 
     // DETAILED_LIST (a third mode the old combined sheet also offered) counts as "List" for this

@@ -36,6 +36,12 @@ data class CategoryUiState(
     val isSelectionMode: Boolean = false,
     val showPropertiesDialog: Boolean = false,
     val itemForProperties: FileItem? = null,
+    // Same idea as CloudExplorerViewModel/FileBrowserViewModel's — one or many selected items.
+    // No background computation needed here: a category subfolder listing is flat (files only,
+    // see filterFilesForCategory) and a root-level MediaFolder bucket already carries its own
+    // precomputed totalSizeBytes, so every size is already known up front.
+    val propertiesItems: List<FileItem> = emptyList(),
+    val propertiesTotalSize: Long = 0L,
     val showDeleteDialog: Boolean = false,
     val showRenameDialog: Boolean = false,
     val itemForRename: FileItem? = null,
@@ -106,10 +112,45 @@ class CategoriesViewModel @Inject constructor(
     val uiState: StateFlow<CategoryUiState> = _uiState.asStateFlow()
 
     init {
-        loadFolders()
+        // "New Files" has no root bucket grid to drill into — it's always the same flat,
+        // date-grouped listing, so go straight there instead of loadFolders()' MediaFolder scan.
+        if (categoryType == CategoryType.NEW_FILES) {
+            loadRecentFiles()
+        } else {
+            loadFolders()
+        }
         loadCloudAccounts()
         observeGlobalClipboard()
         observeMediaChanges()
+    }
+
+    // Files (any type, any folder) modified in the last NEW_FILES_WINDOW_DAYS days, newest first.
+    // Reuses the same category-subfolder cache/reconcile-once contract as a real subfolder (see
+    // openSubfolder), keyed by a synthetic path since there's no real folder behind this listing.
+    private val newFilesCacheKey = "__recent_${NEW_FILES_WINDOW_DAYS}d__"
+
+    fun loadRecentFiles() {
+        viewModelScope.launch {
+            val cached = folderCacheManager.getCategorySubfolder(categoryType, newFilesCacheKey, FileSortOption.BY_DATE_DESC, false)
+            _uiState.value = _uiState.value.copy(
+                isLoading = cached == null,
+                // A one-entry folderHistory so currentSubfolderPath/currentSubfolderName resolve
+                // to something — copy/move/delete/rename/paste-to-cloud all read those to know
+                // "where am I, what do I refresh afterward", and NEW_FILES otherwise has no real
+                // folder behind it for that path to come from.
+                folderHistory = listOf(newFilesCacheKey to "New Files"),
+                selectedPaths = emptySet(),
+                isSelectionMode = false,
+                sortOption = FileSortOption.BY_DATE_DESC,
+                subfolderFiles = cached?.files ?: _uiState.value.subfolderFiles
+            )
+            if (cached != null && cached.isFresh) return@launch
+
+            val sinceMillis = System.currentTimeMillis() - NEW_FILES_WINDOW_DAYS * 24L * 60 * 60 * 1000
+            val files = mediaUseCase.getRecentFiles(sinceMillis)
+            folderCacheManager.putCategorySubfolder(categoryType, newFilesCacheKey, FileSortOption.BY_DATE_DESC, false, files)
+            _uiState.value = _uiState.value.copy(isLoading = false, subfolderFiles = files)
+        }
     }
 
     /** Quietly re-fetches whatever's currently shown (root folders, or the open subfolder)
@@ -125,7 +166,18 @@ class CategoriesViewModel @Inject constructor(
                 val subfolderPath = _uiState.value.currentSubfolderPath
                 val sort = _uiState.value.sortOption
                 val hidden = _uiState.value.showHiddenFiles
-                if (subfolderPath != null) {
+                if (categoryType == CategoryType.NEW_FILES) {
+                    // subfolderPath here is the synthetic newFilesCacheKey, not a real directory —
+                    // treating it as one (the branch below) would call getFiles() on a path that
+                    // doesn't exist, silently wiping this cache entry to empty on every external
+                    // change instead of actually re-running the recent-files query.
+                    val sinceMillis = System.currentTimeMillis() - NEW_FILES_WINDOW_DAYS * 24L * 60 * 60 * 1000
+                    val files = mediaUseCase.getRecentFiles(sinceMillis)
+                    folderCacheManager.putCategorySubfolder(categoryType, newFilesCacheKey, FileSortOption.BY_DATE_DESC, false, files)
+                    if (_uiState.value.currentSubfolderPath == newFilesCacheKey) {
+                        _uiState.value = _uiState.value.copy(subfolderFiles = files)
+                    }
+                } else if (subfolderPath != null) {
                     val allFiles = fileOperationsUseCase.getFiles(subfolderPath, sort, showHidden = hidden)
                     val filtered = filterFilesForCategory(allFiles)
                     folderCacheManager.putCategorySubfolder(categoryType, subfolderPath, sort, hidden, filtered)
@@ -222,6 +274,15 @@ class CategoriesViewModel @Inject constructor(
     }
 
     fun openSubfolder(folderPath: String, folderName: String) {
+        // NEW_FILES has no real folder to browse — every "refresh whatever's currently open" call
+        // site throughout this ViewModel (paste, delete, rename, transferToCloud, ...) calls this
+        // with currentSubfolderPath/currentSubfolderName, which loadRecentFiles() itself set to
+        // the synthetic newFilesCacheKey/"New Files" pair. Redirect straight there instead of
+        // treating that synthetic key as a real path to list.
+        if (categoryType == CategoryType.NEW_FILES) {
+            loadRecentFiles()
+            return
+        }
         viewModelScope.launch {
             val savedSort = folderPreferencesRepository.getSortOption(folderPath)
             val savedHidden = folderPreferencesRepository.getShowHidden(folderPath)
@@ -1001,6 +1062,26 @@ class CategoriesViewModel @Inject constructor(
         )
     }
 
+    // Entry point for the selection bar's Properties action — one or many items. Was only ever
+    // showing the FIRST selected item (see the "More > Properties" call site), silently ignoring
+    // the rest of a multi-selection and never summing their sizes.
+    fun showPropertiesForSelection(items: List<FileItem>) {
+        if (items.isEmpty()) return
+        _uiState.value = _uiState.value.copy(
+            showPropertiesDialog = true,
+            propertiesItems = items,
+            propertiesTotalSize = items.sumOf { it.size }
+        )
+    }
+
+    fun dismissPropertiesDialog() {
+        _uiState.value = _uiState.value.copy(
+            showPropertiesDialog = false,
+            propertiesItems = emptyList(),
+            propertiesTotalSize = 0L
+        )
+    }
+
     fun setShowRenameDialog(item: FileItem?) {
         _uiState.value = _uiState.value.copy(
             showRenameDialog = item != null,
@@ -1018,5 +1099,9 @@ class CategoriesViewModel @Inject constructor(
 
     fun setShowDeleteDialog(show: Boolean) {
         _uiState.value = _uiState.value.copy(showDeleteDialog = show)
+    }
+
+    companion object {
+        const val NEW_FILES_WINDOW_DAYS = 30
     }
 }

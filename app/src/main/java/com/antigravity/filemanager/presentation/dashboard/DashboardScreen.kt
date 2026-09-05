@@ -136,6 +136,7 @@ fun DashboardScreen(
                             CategoryType.AUDIO -> onNavigateToCategory(CategoryType.AUDIO)
                             CategoryType.VIDEOS -> onNavigateToCategory(CategoryType.VIDEOS)
                             CategoryType.DOCUMENTS -> onNavigateToCategory(CategoryType.DOCUMENTS)
+                            CategoryType.NEW_FILES -> onNavigateToCategory(CategoryType.NEW_FILES)
                             CategoryType.CLOUD -> {}
                             CategoryType.ACCESS_FROM_NETWORK -> {}
                             CategoryType.RECYCLE_BIN -> onNavigateToTrash()

@@ -670,6 +670,70 @@ class LocalFileScanner @Inject constructor(
         "rtf", "csv", "mobi", "azw", "azw3", "prc", "odt", "ods", "odp", "wps"
     )
 
+    // Backs the "New Files" category: every local file (any type, any folder) modified at or
+    // after sinceMillis, newest first. Unlike getAllDocumentFiles above, there's no mimeType
+    // restriction and no supplementary recursive directory walk — MediaStore.Files' own index
+    // (sorted DATE_MODIFIED DESC, so no extra sort pass needed) is trusted directly, the same way
+    // the per-category folder queries (queryImageFolders, etc.) already do.
+    suspend fun queryRecentFiles(sinceMillis: Long): List<FileItem> = withContext(Dispatchers.IO) {
+        val results = mutableListOf<FileItem>()
+        try {
+            val projection = arrayOf(
+                MediaStore.Files.FileColumns.DATA,
+                MediaStore.Files.FileColumns.DISPLAY_NAME,
+                MediaStore.Files.FileColumns.SIZE,
+                MediaStore.Files.FileColumns.DATE_MODIFIED,
+                MediaStore.Files.FileColumns.MIME_TYPE
+            )
+            // MediaStore.Files.FileColumns.DATE_MODIFIED is stored in whole SECONDS, not millis.
+            val sinceSec = sinceMillis / 1000L
+            val cursor: Cursor? = context.contentResolver.query(
+                MediaStore.Files.getContentUri("external"),
+                projection,
+                "${MediaStore.Files.FileColumns.DATE_MODIFIED} >= ?",
+                arrayOf(sinceSec.toString()),
+                "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
+            )
+            cursor?.use {
+                val dataCol = it.getColumnIndex(MediaStore.Files.FileColumns.DATA)
+                val nameCol = it.getColumnIndex(MediaStore.Files.FileColumns.DISPLAY_NAME)
+                val sizeCol = it.getColumnIndex(MediaStore.Files.FileColumns.SIZE)
+                val dateCol = it.getColumnIndex(MediaStore.Files.FileColumns.DATE_MODIFIED)
+                val mimeCol = it.getColumnIndex(MediaStore.Files.FileColumns.MIME_TYPE)
+                while (it.moveToNext()) {
+                    val path = if (dataCol >= 0) it.getString(dataCol) else null ?: continue
+                    val file = File(path)
+                    // MediaStore.Files rows are files, not directories — this just guards against
+                    // a stale index entry pointing at something that no longer exists as a file.
+                    if (!file.isFile) continue
+                    val name = (if (nameCol >= 0) it.getString(nameCol) else null)?.ifBlank { file.name } ?: file.name
+                    val rawSize = if (sizeCol >= 0) it.getLong(sizeCol) else 0L
+                    val size = if (rawSize > 0) rawSize else file.length()
+                    val dateSec = if (dateCol >= 0) it.getLong(dateCol) else 0L
+                    val modified = if (dateSec > 0) dateSec * 1000L else file.lastModified()
+                    val mime = (if (mimeCol >= 0) it.getString(mimeCol) else null) ?: getMimeType(file)
+                    results.add(
+                        FileItem(
+                            id = path,
+                            name = name,
+                            path = path,
+                            size = size,
+                            lastModified = modified,
+                            isDirectory = false,
+                            mimeType = mime,
+                            extension = file.extension.lowercase(Locale.getDefault()),
+                            appSourceBadge = detectBadgeFromPath(path),
+                            isHidden = file.name.startsWith(".")
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        results
+    }
+
     suspend fun getAllDocumentFiles(sortOption: FileSortOption = FileSortOption.BY_DATE_DESC): List<FileItem> = withContext(Dispatchers.IO) { coroutineScope {
         val fileMap = mutableMapOf<String, FileItem>()
 
