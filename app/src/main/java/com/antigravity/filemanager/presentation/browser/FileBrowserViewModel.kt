@@ -597,103 +597,32 @@ class FileBrowserViewModel @Inject constructor(
 
     private suspend fun pasteFromCloud(accountId: String, remotePaths: List<String>, targetDir: String, isMove: Boolean, overwriteNames: Set<String> = emptySet(), skipNames: Set<String> = emptySet()) {
         try {
-            var failures = 0
-            val targetFolder = File(targetDir)
-            val totalCount = remotePaths.size
             val itemSizes = _uiState.value.clipboardItemSizes
-            val progressThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
+            val result = cloudStorageUseCase.downloadFilesToLocal(
+                context = context,
+                accountId = accountId,
+                remotePaths = remotePaths,
+                targetDir = targetDir,
+                itemSizes = itemSizes,
+                isMove = isMove,
+                overwriteNames = overwriteNames,
+                skipNames = skipNames
+            ) { progress -> _uiState.value = _uiState.value.copy(downloadProgress = progress) }
 
-            remotePaths.forEachIndexed { index, remotePath ->
-                kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                val name = File(remotePath).name
-                if (name in skipNames) return@forEachIndexed
-                val destFile = File(targetFolder, name)
-                val expectedSize = itemSizes[remotePath] ?: 0L
-
-                _uiState.value = _uiState.value.copy(
-                    downloadProgress = CloudTransferProgress(
-                        currentFileName = name,
-                        currentIndex = index + 1,
-                        totalFiles = totalCount,
-                        bytesTransferred = 0L,
-                        totalBytes = expectedSize,
-                        isIndeterminate = expectedSize <= 0,
-                        isUpload = false
-                    )
-                )
-
-                val tempDir = File(context.cacheDir, "cloud_paste_temp_${System.nanoTime()}").apply { mkdirs() }
-                val result = cloudStorageUseCase.downloadFile(accountId, remotePath, tempDir.absolutePath) { bytesRead, totalBytes ->
-                    val effTotal = if (totalBytes > 0) totalBytes else expectedSize
-                    if (progressThrottler.shouldEmit(bytesRead, effTotal)) {
-                        _uiState.value = _uiState.value.copy(
-                            downloadProgress = CloudTransferProgress(
-                                currentFileName = name,
-                                currentIndex = index + 1,
-                                totalFiles = totalCount,
-                                bytesTransferred = bytesRead,
-                                totalBytes = effTotal,
-                                isIndeterminate = effTotal <= 0,
-                                isUpload = false
-                            )
-                        )
-                    }
-                }
-                if (result.isSuccess) {
-                    val downloaded = result.getOrNull()
-                    if (downloaded != null && downloaded.exists() && downloaded.isFile) {
-                        val finalFile = if (name in overwriteNames) {
-                            destFile
-                        } else if (destFile.exists()) {
-                            uniqueLocalDestination(targetFolder, downloaded.name)
-                        } else {
-                            destFile
-                        }
-                        if (finalFile.exists()) {
-                            finalFile.delete()
-                        }
-                        downloaded.inputStream().use { input ->
-                            finalFile.outputStream().use { output ->
-                                val buf = ByteArray(64 * 1024)
-                                var read: Int
-                                while (input.read(buf).also { read = it } != -1) {
-                                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                                    output.write(buf, 0, read)
-                                }
-                            }
-                        }
-                        if (isMove) {
-                            cloudStorageUseCase.deleteItem(accountId, remotePath)
-                        }
-                    } else {
-                        failures++
-                    }
-                } else {
-                    failures++
-                }
-                tempDir.deleteRecursively()
-            }
+            // result.scannedPaths.size is how many actually got written — was always "Pasted
+            // ${remotePaths.size}" regardless of skipNames, so skipping every conflict still
+            // reported success for files that never actually landed.
             _uiState.value = _uiState.value.copy(
                 downloadProgress = null,
-                toastMessage = if (failures == 0) "Pasted ${remotePaths.size} item(s)" else "Pasted with $failures failure(s)"
+                toastMessage = when {
+                    result.failedNames.isNotEmpty() -> "Pasted with ${result.failedNames.size} failure(s)"
+                    result.scannedPaths.isEmpty() -> "No files pasted (all skipped)"
+                    else -> "Pasted ${result.scannedPaths.size} item(s)"
+                }
             )
         } catch (e: kotlinx.coroutines.CancellationException) {
             _uiState.value = _uiState.value.copy(downloadProgress = null, toastMessage = "Transfer cancelled")
         }
-    }
-
-    private fun uniqueLocalDestination(targetFolder: File, name: String): File {
-        var candidate = File(targetFolder, name)
-        if (!candidate.exists()) return candidate
-        val dotIndex = name.lastIndexOf('.')
-        val base = if (dotIndex > 0) name.substring(0, dotIndex) else name
-        val ext = if (dotIndex > 0) name.substring(dotIndex) else ""
-        var counter = 1
-        while (candidate.exists()) {
-            candidate = File(targetFolder, "$base ($counter)$ext")
-            counter++
-        }
-        return candidate
     }
 
     fun openCopyToCloudDialog(isMove: Boolean = false) {
@@ -913,16 +842,40 @@ class FileBrowserViewModel @Inject constructor(
                         )
                         return
                     }
-                    folderCacheManager.invalidateCloud(account.id, destPath)
+                    // uploadFiles() now returns how many files actually went out — was always
+                    // reporting the ORIGINAL selection count here regardless of skipNames, so
+                    // choosing "Skip" on every conflict still said "Transferred N successfully"
+                    // for zero real uploads.
+                    val uploadedCount = result.getOrDefault(0)
+                    // A plain flat-file upload with no rename/merge decision (no overwrite
+                    // conflict, nothing in the selection was a folder) means we already know
+                    // exactly what landed under exactly what name — hand that straight to
+                    // FolderCacheManager so a Cloud tab already open on this folder can splice it
+                    // in live instead of paying for a refetch. Anything less certain (a folder in
+                    // the selection, or an overwrite that deleted+replaced a remote item) falls
+                    // back to the generic invalidate, which only triggers a real refresh().
+                    if (overwriteNames.isEmpty() && selected.none { File(it).isDirectory }) {
+                        val addedFiles = folderCacheManager.buildUploadedFileItems(selected, skipNames, destPath)
+                        folderCacheManager.notifyCloudFilesAdded(account.id, destPath, addedFiles)
+                    } else {
+                        folderCacheManager.invalidateCloud(account.id, destPath)
+                    }
                     if (isMove) {
-                        fileOperationsUseCase.delete(selected, moveToRecycleBin = false)
+                        // Only delete sources that actually transferred — a skipped conflict never
+                        // left this device, so deleting it here would just lose the file outright.
+                        val movedSources = selected.filter { File(it).name !in skipNames }
+                        fileOperationsUseCase.delete(movedSources, moveToRecycleBin = false)
                         folderCacheManager.invalidateLocal(_uiState.value.currentPath)
                         loadDirectory(_uiState.value.currentPath)
                     }
                     _uiState.value = _uiState.value.copy(
                         selectedPaths = emptySet(),
                         isSelectionMode = false,
-                        toastMessage = "Transferred $count file(s) to ${account.accountName} successfully!"
+                        toastMessage = if (uploadedCount > 0) {
+                            "Transferred $uploadedCount file(s) to ${account.accountName} successfully!"
+                        } else {
+                            "No files transferred (all skipped)"
+                        }
                     )
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     _uiState.value = _uiState.value.copy(downloadProgress = null, toastMessage = "Transfer cancelled")

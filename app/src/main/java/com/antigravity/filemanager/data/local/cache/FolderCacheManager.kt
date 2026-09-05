@@ -593,7 +593,67 @@ class FolderCacheManager @Inject constructor(
         }
     }
 
-    fun invalidateCloud(accountId: String, path: String? = null) {
+    // getCategorySubfolder uses the reconcile-once model (see reconciledOnceKeys), not a TTL —
+    // unlike invalidateLocal's plain local browser folders, just dropping the cached entry here
+    // isn't enough: reconciledOnceKeys still remembers this key as already reconciled, so the very
+    // next read would trust a freshly-refetched (but by definition once again "reconciled") result
+    // forever regardless, UNLESS the flag itself is cleared too. Without this, creating a new
+    // folder from inside a category (Images > Pictures > New Folder) never showed the folder
+    // afterward — openSubfolder()'s cache read still thought this exact folder didn't need
+    // re-checking, since nothing had ever told it otherwise.
+    fun invalidateCategorySubfolder(categoryType: CategoryType, path: String) {
+        val prefix = "catsub_${categoryType.name}_${path}_"
+        val keysToRemove = cacheRemoveByPrefix(prefix)
+        reconciledOnceKeys.removeAll { it.startsWith(prefix) }
+        ioScope.launch {
+            keysToRemove.forEach { key ->
+                val hashed = hashKey(key)
+                File(cacheDir, "$hashed.json").delete()
+            }
+        }
+    }
+
+    /**
+     * A single stream any screen holding a cloud folder open can subscribe to, to react when
+     * that exact folder changes from somewhere else in the app instead of only catching up on
+     * its next open/navigation. Two variants:
+     * - [FilesAdded]: the caller already knows EXACTLY what landed and under what name (a plain
+     *   flat-file Copy/Move to Dropbox with no rename/merge decision — no overwrite conflict, no
+     *   folder in the selection). A listening screen can splice these straight into what it's
+     *   showing, no network call needed — the same "already know the answer" shortcut a delete
+     *   already uses for its own optimistic removal.
+     * - [FilesRemoved]: same idea, the other direction — the caller knows exactly which item(s)
+     *   left this folder (e.g. the source side of a "Move to Local"). A listening screen can drop
+     *   them from what it's showing directly, no re-fetch needed.
+     * - [Invalidated]: something changed but the caller doesn't know exactly what (an overwrite
+     *   that deleted+replaced an item, a folder copy, a rename) — a listening screen has to
+     *   actually re-fetch to find out.
+     *
+     * All three carry `accountId`/`path` so a subscriber can ignore events for any folder other
+     * than the one it's currently showing. See [invalidateCloud], [notifyCloudFilesAdded] and
+     * [notifyCloudFilesRemoved] for the write side.
+     */
+    sealed class CloudFolderEvent {
+        abstract val accountId: String
+        abstract val path: String
+        data class FilesAdded(override val accountId: String, override val path: String, val files: List<FileItem>) : CloudFolderEvent()
+        data class FilesRemoved(override val accountId: String, override val path: String, val removedPaths: Set<String>) : CloudFolderEvent()
+        data class Invalidated(override val accountId: String, override val path: String) : CloudFolderEvent()
+    }
+
+    // replay=0/extraBufferCapacity so a screen that isn't collecting when this fires (e.g. not
+    // currently open) simply catches up via the normal cache-miss path next time it's opened,
+    // rather than replaying a now-irrelevant old change.
+    private val _cloudFolderEvents = kotlinx.coroutines.flow.MutableSharedFlow<CloudFolderEvent>(replay = 0, extraBufferCapacity = 8)
+    val cloudFolderEvents: kotlinx.coroutines.flow.SharedFlow<CloudFolderEvent> = _cloudFolderEvents
+
+    // notify=false is for a screen invalidating a folder IT ITSELF is about to re-fetch (e.g.
+    // CloudExplorerViewModel.refresh()) — emitting an event there caused that same screen's own
+    // collector (added for the "another screen just changed this folder" case) to see its own
+    // invalidation and call refresh() again, which invalidates again, which emits again... an
+    // infinite refresh loop with no way out short of force-quitting the app. Only an invalidate
+    // coming from somewhere OTHER than the folder's own screen should notify.
+    fun invalidateCloud(accountId: String, path: String? = null, notify: Boolean = true) {
         val prefix = if (path != null) "cloud_${accountId}_$path" else "cloud_${accountId}_"
         val keysToRemove = cacheRemoveByPrefix(prefix)
         ioScope.launch {
@@ -602,6 +662,67 @@ class FolderCacheManager @Inject constructor(
                 File(cacheDir, "$hashed.json").delete()
             }
         }
+        if (path != null && notify) {
+            _cloudFolderEvents.tryEmit(CloudFolderEvent.Invalidated(accountId, path))
+        }
+    }
+
+    // Merges files straight into this path's cache (so the next reader anywhere gets them without
+    // a refetch) and emits FilesAdded so a screen already open on this exact folder can splice
+    // them into what it's showing directly. See CloudFolderEvent's doc above.
+    suspend fun notifyCloudFilesAdded(accountId: String, path: String, addedFiles: List<FileItem>) {
+        if (addedFiles.isEmpty()) return
+        val cached = getCloudFolder(accountId, path)
+        val currentFiles = cached?.files ?: emptyList()
+        val existingNames = currentFiles.map { it.name }.toSet()
+        val newOnes = addedFiles.filter { it.name !in existingNames }
+        if (newOnes.isNotEmpty()) {
+            putCloudFolder(accountId, path, currentFiles + newOnes)
+        }
+        _cloudFolderEvents.tryEmit(CloudFolderEvent.FilesAdded(accountId, path, addedFiles))
+    }
+
+    // The removal-side counterpart of notifyCloudFilesAdded above — drops known-gone items from
+    // this path's cache (so the next reader anywhere doesn't see them either) and emits
+    // FilesRemoved so a screen already open on this exact folder can drop them from what it's
+    // showing directly, instead of paying for a refetch via the generic invalidateCloud.
+    suspend fun notifyCloudFilesRemoved(accountId: String, path: String, removedRemotePaths: Set<String>) {
+        if (removedRemotePaths.isEmpty()) return
+        val cached = getCloudFolder(accountId, path)
+        if (cached != null) {
+            val remaining = cached.files.filterNot { it.path in removedRemotePaths }
+            if (remaining.size != cached.files.size) {
+                putCloudFolder(accountId, path, remaining)
+            }
+        }
+        _cloudFolderEvents.tryEmit(CloudFolderEvent.FilesRemoved(accountId, path, removedRemotePaths))
+    }
+
+    // Shared by every "Copy/Move flat local files to a cloud folder, no conflicts" call site
+    // (CategoriesViewModel, FileBrowserViewModel) — was duplicated inline in both. Builds the
+    // FileItem each uploaded local file becomes at its destination, for notifyCloudFilesAdded.
+    // Only valid when the caller has already confirmed no overwrite conflicts and no directories
+    // were in the selection (uploadFiles never renamed/merged anything in that case, so the local
+    // name IS the final remote name).
+    fun buildUploadedFileItems(localPaths: List<String>, skipNames: Set<String>, destPath: String): List<FileItem> {
+        val now = System.currentTimeMillis()
+        return localPaths
+            .map { File(it) }
+            .filter { it.isFile && it.name !in skipNames }
+            .map { file ->
+                val remotePath = if (destPath == "/" || destPath.isBlank()) "/${file.name}" else "${destPath.trimEnd('/')}/${file.name}"
+                val ext = file.extension.lowercase(java.util.Locale.getDefault())
+                FileItem(
+                    id = remotePath,
+                    name = file.name,
+                    path = remotePath,
+                    size = file.length(),
+                    lastModified = now,
+                    isDirectory = false,
+                    mimeType = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*",
+                    extension = ext
+                )
+            }
     }
 
     fun clearAll() {

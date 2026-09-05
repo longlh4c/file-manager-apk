@@ -157,6 +157,32 @@ class CloudExplorerViewModel @Inject constructor(
         } else {
             loadAccountAndFiles("/", listOf("Root" to "/"))
         }
+        // A copy/move "to Dropbox" started from anywhere (this screen's own paste, or
+        // Categories/FileBrowser) changes a folder's cache once it finishes — if this screen is
+        // already sitting open on that exact folder, that alone doesn't touch what's already
+        // painted on screen; it would only catch up the next time the user navigated into/out of
+        // it. Reacting to FolderCacheManager's single event stream here means the change shows up
+        // live instead: FilesAdded splices in the known file(s) directly, FilesRemoved drops the
+        // known-gone one(s) (no network call needed either way — same "already know the answer"
+        // shortcut deleteSelected() uses for its own optimistic removal); Invalidated (an
+        // overwrite, a folder copy, a rename — anything whose exact result isn't known) falls back
+        // to a real refresh().
+        viewModelScope.launch {
+            folderCacheManager.cloudFolderEvents.collect { event ->
+                if (event.accountId != accountId || event.path != _uiState.value.currentPath) return@collect
+                when (event) {
+                    is com.antigravity.filemanager.data.local.cache.FolderCacheManager.CloudFolderEvent.FilesAdded -> {
+                        val existingNames = _uiState.value.files.map { it.name }.toSet()
+                        val merged = _uiState.value.files + event.files.filter { it.name !in existingNames }
+                        _uiState.value = _uiState.value.copy(files = sortCloudFiles(merged, _uiState.value.sortOption))
+                    }
+                    is com.antigravity.filemanager.data.local.cache.FolderCacheManager.CloudFolderEvent.FilesRemoved -> {
+                        _uiState.value = _uiState.value.copy(files = _uiState.value.files.filterNot { it.path in event.removedPaths })
+                    }
+                    is com.antigravity.filemanager.data.local.cache.FolderCacheManager.CloudFolderEvent.Invalidated -> refresh()
+                }
+            }
+        }
         viewModelScope.launch {
             globalClipboardManager.state.collect { clip ->
                 _uiState.value = _uiState.value.copy(
@@ -943,8 +969,23 @@ class CloudExplorerViewModel @Inject constructor(
         val forceFullRefresh = isManual &&
             (provider == com.antigravity.filemanager.domain.model.CloudProvider.DROPBOX ||
                 provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA)
-        folderCacheManager.invalidateCloud(accountId, currentPath)
+        // notify=false: this is this exact screen invalidating its own current folder to re-fetch
+        // it — emitting the change signal here would make this screen's own cloudFolderChanges
+        // collector (below) see it and call refresh() again, invalidating again, forever.
+        folderCacheManager.invalidateCloud(accountId, currentPath, notify = false)
         loadAccountAndFiles(currentPath, _uiState.value.pathStack, forceFullRefresh)
+    }
+
+    // Fast path for "paste plain local file(s) into this cloud folder, no name conflicts": we
+    // already know exactly which files landed and under what name (uploadFiles didn't need to
+    // rename/merge anything). Just hands that off to FolderCacheManager (same shared builder and
+    // cache-merge Categories/FileBrowser use for the same case) — the cloudFolderEvents collector
+    // above applies it to this screen's own listing, the same way it would if the paste had come
+    // from another screen. Avoids the round trip refresh() would otherwise do (invalidate + re-list
+    // this folder from the network) just to redisplay files we already know are there.
+    private suspend fun appendUploadedLocalFiles(localPaths: List<String>, skipNames: Set<String>, targetPath: String) {
+        val newItems = folderCacheManager.buildUploadedFileItems(localPaths, skipNames, targetPath)
+        folderCacheManager.notifyCloudFilesAdded(accountId, targetPath, newItems)
     }
 
     private fun sortCloudFiles(files: List<FileItem>, sort: FileSortOption): List<FileItem> {
@@ -1239,6 +1280,12 @@ class CloudExplorerViewModel @Inject constructor(
                             // (permanent) delete regardless of that dialog choice; passing
                             // moveToTrash=true for it again is at best a no-op and at worst a
                             // silent failure.
+                            // Was only reported AFTER deleteItem returned, so the dialog sat on
+                            // "Preparing to delete..." for the entire network round trip and only
+                            // flashed the real filename/count right as it was about to close —
+                            // for the common single-file case that read as the whole dialog being
+                            // frozen the whole time. Show it going in instead.
+                            setTransferProgress(currentFileName = item.name, currentIndex = completedCounter.get() + 1, totalFiles = toDelete.size, isUpload = false, operationLabel = "Deleting")
                             val result = cloudUseCase.deleteItem(accountId, item.path, effectiveMoveToTrash(item))
                             if (result.isFailure) {
                                 failuresCounter.incrementAndGet()
@@ -1347,6 +1394,10 @@ class CloudExplorerViewModel @Inject constructor(
                 _uiState.value = _uiState.value.copy(isLoading = true)
                 var failures = 0
                 var lastErrorMessage: String? = null
+                // Set true by the local-files-upload fast path once it has already patched the
+                // listing itself, so the unconditional refresh() at the end of doPaste can be
+                // skipped for that case.
+                var skipRefresh = false
                 // Defaults to the clipboard's top-level item count; the cloud-to-cloud branch
                 // below overwrites this with the actual flattened file count once known, so
                 // pasting one folder with 438 files inside reports "438 item(s)", not "1".
@@ -1369,9 +1420,28 @@ class CloudExplorerViewModel @Inject constructor(
                     if (result.isFailure) {
                         failures++
                         lastErrorMessage = result.exceptionOrNull()?.message
+                    } else {
+                        // uploadFiles() returns how many files actually went out — was always
+                        // leaving transferredCount at the original selection size regardless of
+                        // skipNames, so "Skip" on every conflict still said "Pasted N item(s)"
+                        // for zero real uploads.
+                        transferredCount = result.getOrDefault(0)
+                        if (overwriteNames.isEmpty() && sources.none { File(it).isDirectory }) {
+                            // The common case: a flat set of plain local files, no name clash to
+                            // resolve, nothing renamed/merged by uploadFiles(). We already know
+                            // exactly what landed where, so patch the current listing + cache in
+                            // place instead of falling through to refresh() below, which invalidates
+                            // the cache and re-lists the whole folder from the network just to show
+                            // back the same file(s) we just uploaded ourselves.
+                            appendUploadedLocalFiles(sources, skipNames, targetPath)
+                            skipRefresh = true
+                        }
                     }
                     if (isMove && result.isSuccess) {
-                        fileOperationsUseCase.delete(sources, moveToRecycleBin = false)
+                        // Only delete sources that actually transferred — a skipped conflict never
+                        // left this device, so deleting it here would just lose the file outright.
+                        val movedSources = sources.filter { File(it).name !in skipNames }
+                        fileOperationsUseCase.delete(movedSources, moveToRecycleBin = false)
                     }
                 } else if (isMove && sourceCloudAccountId == accountId) {
                     // Same-account Move: every provider has a real server-side move (change
@@ -1381,6 +1451,13 @@ class CloudExplorerViewModel @Inject constructor(
                     // first (a plain server-side move doesn't merge/replace on its own); anything
                     // with no conflict just moves directly.
                     var moved = 0
+                    // A server-side move only ever gets refresh()'d into the DESTINATION folder
+                    // (the one this screen has open right now, via the unconditional refresh() at
+                    // the end of doPaste) — the SOURCE folder's cache was never told anything left
+                    // it, so it kept showing the moved item as still there until something else
+                    // happened to invalidate it. Track successfully-moved sources by parent folder
+                    // so each can be notified once, after the loop.
+                    val movedFromFolders = mutableMapOf<String, MutableSet<String>>()
                     for (sourcePath in sources) {
                         kotlinx.coroutines.currentCoroutineContext().ensureActive()
                         val name = File(sourcePath).name
@@ -1394,8 +1471,14 @@ class CloudExplorerViewModel @Inject constructor(
                         if (moveResult.isFailure) {
                             failures++
                             lastErrorMessage = moveResult.exceptionOrNull()?.message
+                        } else {
+                            val parentPath = sourcePath.substringBeforeLast('/', "/").ifEmpty { "/" }
+                            movedFromFolders.getOrPut(parentPath) { mutableSetOf() }.add(sourcePath)
                         }
                         moved++
+                    }
+                    movedFromFolders.forEach { (parentPath, removedPaths) ->
+                        folderCacheManager.notifyCloudFilesRemoved(accountId, parentPath, removedPaths)
                     }
                     transferredCount = moved
                     _uiState.value = _uiState.value.copy(downloadProgress = null)
@@ -1599,7 +1682,7 @@ class CloudExplorerViewModel @Inject constructor(
                         "Pasted with $failures failure(s)" + (lastErrorMessage?.let { ": $it" } ?: "")
                     }
                 )
-                refresh()
+                if (!skipRefresh) refresh()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 _uiState.value = _uiState.value.copy(downloadProgress = null, isLoading = false, toastMessage = "Transfer cancelled")
             }

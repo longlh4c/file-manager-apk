@@ -45,6 +45,11 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Manifest declares Theme.FileManager.Splash (brand gradient + owl mascot as
+        // windowBackground) so the very first frame isn't a blank window — swap back to the
+        // normal theme now, before Compose draws anything, so the splash background is only ever
+        // visible for that one cold-start frame.
+        setTheme(R.style.Theme_FileManager)
         super.onCreate(savedInstanceState)
         checkAndRequestStoragePermissions()
         handleIncomingShareIntent(intent)

@@ -221,8 +221,24 @@ class DropboxApiClient @Inject constructor() {
         }
     }
 
+    // The SDK's default HTTP requestor has no connect/read timeout at all — on a stalled or very
+    // poor connection, any call (delete, list, upload...) can block the calling coroutine
+    // indefinitely. That call always runs inside withContext(Dispatchers.IO), so it never blocks
+    // the main thread directly, but the screen making the call is left showing an un-dismissable
+    // "in progress" modal (by design, so a real transfer can't be walked away from mid-copy) with
+    // no way out until the call finally gives up — which, with no timeout, means never. From the
+    // user's side that reads as the whole app being frozen, forcing a force-quit. A bounded
+    // OkHttp client here means every Dropbox call fails with a clear timeout error instead.
+    private val dropboxHttpClient = okhttp3.OkHttpClient.Builder()
+        .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
+
     private fun buildClient(account: CloudAccount): DbxClientV2 {
-        val requestConfig = DbxRequestConfig.newBuilder("FileManagerPlus/1.0").build()
+        val requestConfig = DbxRequestConfig.newBuilder("FileManagerPlus/1.0")
+            .withHttpRequestor(com.dropbox.core.http.OkHttp3Requestor(dropboxHttpClient))
+            .build()
         val accessToken = account.accessToken.orEmpty()
         val refreshToken = account.refreshToken
         val expiresAt = account.sessionHandle?.toLongOrNull()
@@ -337,6 +353,13 @@ class DropboxApiClient @Inject constructor() {
                 targetFile.delete()
                 throw e
             }
+            // Unlike listFolder/uploadFile just above, this had no logging at all — a failed
+            // download (bad path, expired token, network drop mid-transfer, ...) surfaced as
+            // Result.failure with zero trace in logcat, and the paste-to-local flow that calls
+            // this (DashboardViewModel.doPasteCloud) didn't check isFailure either, so the whole
+            // thing looked like it silently did nothing.
+            android.util.Log.e("DropboxApiClient", "downloadFile: FAILED for remotePath='$remotePath'", e)
+            targetFile.delete()
             Result.failure(e)
         }
     }

@@ -15,6 +15,7 @@ import com.antigravity.filemanager.domain.usecase.GetCategorizedMediaUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -56,6 +57,12 @@ data class CategoryUiState(
     val localFolderPickerLoading: Boolean = false,
     val clipboardPaths: List<String> = emptyList(),
     val isCutOperation: Boolean = false,
+    // Was missing entirely — paste() had no idea a clipboard entry could be a cloud file (only
+    // ever built for local-to-local copy/move), so pasting something Copied from a Cloud account
+    // into a category subfolder (Images > Pictures, say) silently treated the remote path as if
+    // it were a local one and did nothing.
+    val clipboardSourceCloudAccountId: String? = null,
+    val clipboardItemSizes: Map<String, Long> = emptyMap(),
     val sortOption: FileSortOption = FileSortOption.BY_NAME_ASC,
     val showHiddenFiles: Boolean = false,
     val viewMode: com.antigravity.filemanager.presentation.components.ViewMode = com.antigravity.filemanager.presentation.components.ViewMode.LIST,
@@ -77,6 +84,7 @@ data class CategoryUiState(
 
 @HiltViewModel
 class CategoriesViewModel @Inject constructor(
+    @dagger.hilt.android.qualifiers.ApplicationContext private val context: android.content.Context,
     private val mediaUseCase: GetCategorizedMediaUseCase,
     private val fileOperationsUseCase: FileOperationsUseCase,
     private val cloudStorageUseCase: CloudStorageUseCase,
@@ -140,7 +148,9 @@ class CategoriesViewModel @Inject constructor(
             globalClipboardManager.state.collect { clip ->
                 _uiState.value = _uiState.value.copy(
                     clipboardPaths = clip.paths,
-                    isCutOperation = clip.isCut
+                    isCutOperation = clip.isCut,
+                    clipboardSourceCloudAccountId = clip.sourceCloudAccountId,
+                    clipboardItemSizes = clip.itemSizes
                 )
             }
         }
@@ -234,6 +244,12 @@ class CategoriesViewModel @Inject constructor(
             // exact folder+sort+hidden combination. Previously this ran that full scan
             // unconditionally on every open, even ones visited seconds ago.
             val cached = folderCacheManager.getCategorySubfolder(categoryType, folderPath, savedSort, savedHidden)
+            // On a cache miss (e.g. right after a paste, whose download step wipes the whole
+            // catsub cache via invalidateMediaFolders()), don't blank subfolderFiles to empty —
+            // that produced a visible "all files hide, then reappear" flash once the fresh scan
+            // finished. Keep whatever was already on screen (stale-but-non-empty) until the fresh
+            // list is ready, same as the stale-while-revalidate pattern already used when a cache
+            // entry does exist.
             _uiState.value = _uiState.value.copy(
                 isLoading = cached == null,
                 folderHistory = history,
@@ -242,7 +258,7 @@ class CategoriesViewModel @Inject constructor(
                 sortOption = savedSort,
                 showHiddenFiles = savedHidden,
                 viewMode = savedViewMode,
-                subfolderFiles = cached?.files ?: emptyList()
+                subfolderFiles = cached?.files ?: _uiState.value.subfolderFiles
             )
             if (cached != null && cached.isFresh) return@launch
 
@@ -392,6 +408,11 @@ class CategoriesViewModel @Inject constructor(
         val currentDir = _uiState.value.currentSubfolderPath ?: return
         viewModelScope.launch {
             fileOperationsUseCase.createFolder(currentDir, name)
+            // getCategorySubfolder's reconcile-once cache doesn't know anything changed on its
+            // own — without this, openSubfolder() below just re-painted the same
+            // already-"reconciled" cached list, and the new folder never appeared until something
+            // else happened to invalidate it (e.g. the app process restarting).
+            folderCacheManager.invalidateCategorySubfolder(categoryType, currentDir)
             _uiState.value = _uiState.value.copy(showNewFolderDialog = false)
             openSubfolder(currentDir, _uiState.value.currentSubfolderName)
         }
@@ -457,6 +478,32 @@ class CategoriesViewModel @Inject constructor(
 
     fun paste() {
         val targetDir = _uiState.value.currentSubfolderPath ?: return
+        val cloudAccountId = _uiState.value.clipboardSourceCloudAccountId
+        if (cloudAccountId != null) {
+            // Was always calling pasteFromCloud() straight away regardless of name clashes —
+            // unlike FileBrowserViewModel's own cloud-source paste (which already checks this),
+            // a name collision here silently auto-renamed to "name (1)" instead of ever asking,
+            // since pasteFromCloud only auto-renames when a name isn't in overwriteNames.
+            val sources = _uiState.value.clipboardPaths
+            val itemSizes = _uiState.value.clipboardItemSizes
+            val conflicts = sources.mapNotNull { remotePath ->
+                val name = File(remotePath).name
+                val destFile = File(targetDir, name)
+                if (destFile.exists()) {
+                    com.antigravity.filemanager.domain.model.OverwriteConflict(name = name, existingSize = destFile.length(), newSize = itemSizes[remotePath] ?: 0L)
+                } else null
+            }
+            activeTransferJob?.cancel()
+            if (conflicts.isNotEmpty()) {
+                pendingOverwriteAction = { overwriteNames, skipNames ->
+                    pasteFromCloud(cloudAccountId, targetDir, overwriteNames, skipNames)
+                }
+                _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
+            } else {
+                activeTransferJob = viewModelScope.launch { pasteFromCloud(cloudAccountId, targetDir) }
+            }
+            return
+        }
         viewModelScope.launch {
             val sources = _uiState.value.clipboardPaths
             val isMove = _uiState.value.isCutOperation
@@ -479,6 +526,51 @@ class CategoriesViewModel @Inject constructor(
             } else {
                 doPaste(emptySet(), emptySet())
             }
+        }
+    }
+
+    /**
+     * paste() used to have no cloud branch at all — a clipboard entry Copied from a Cloud account
+     * (a remote path like "/CS/photo.jpg") went straight into fileOperationsUseCase.copy/move,
+     * which only ever knows how to operate on real local java.io.File paths. The remote "file"
+     * simply doesn't exist locally, so copyFiles/findConflicts silently found nothing to do and
+     * returned — no exception, no toast, no file, matching exactly "pressed Paste, nothing
+     * happened" for a Dropbox/MEGA/Drive source pasted into a category subfolder (Images >
+     * Pictures, say), while the same paste worked fine from the plain local file browser (Local >
+     * Downloads), which already had this branch. Mirrors FileBrowserViewModel.pasteFromCloud.
+     */
+    private suspend fun pasteFromCloud(accountId: String, targetDir: String, overwriteNames: Set<String> = emptySet(), skipNames: Set<String> = emptySet()) {
+        val sources = _uiState.value.clipboardPaths
+        val isMove = _uiState.value.isCutOperation
+        val itemSizes = _uiState.value.clipboardItemSizes
+        try {
+            val result = cloudStorageUseCase.downloadFilesToLocal(
+                context = context,
+                accountId = accountId,
+                remotePaths = sources,
+                targetDir = targetDir,
+                itemSizes = itemSizes,
+                isMove = isMove,
+                overwriteNames = overwriteNames,
+                skipNames = skipNames
+            ) { progress -> _uiState.value = _uiState.value.copy(downloadProgress = progress) }
+
+            globalClipboardManager.clear()
+            // result.scannedPaths.size is how many actually got written — was always "Pasted
+            // ${sources.size}" regardless of skipNames, so skipping every conflict still reported
+            // success for files that never actually landed.
+            _uiState.value = _uiState.value.copy(
+                downloadProgress = null,
+                toastMessage = when {
+                    result.failedNames.isNotEmpty() -> "Pasted with ${result.failedNames.size} failure(s)"
+                    result.scannedPaths.isEmpty() -> "No files pasted (all skipped)"
+                    else -> "Pasted ${result.scannedPaths.size} item(s)"
+                }
+            )
+            val currentName = _uiState.value.currentSubfolderName
+            openSubfolder(targetDir, currentName)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            _uiState.value = _uiState.value.copy(downloadProgress = null, toastMessage = "Transfer cancelled")
         }
     }
 
@@ -717,9 +809,29 @@ class CategoriesViewModel @Inject constructor(
                         )
                         return
                     }
-                    folderCacheManager.invalidateCloud(account.id, destPath)
+                    // uploadFiles() now returns how many files actually went out — was always
+                    // reporting the ORIGINAL selection count here regardless of skipNames, so
+                    // choosing "Skip" on every conflict still said "Transferred N successfully"
+                    // for zero real uploads.
+                    val uploadedCount = result.getOrDefault(0)
+                    // A plain flat-file upload with no rename/merge decision (no overwrite
+                    // conflict, nothing in the selection was a folder) means we already know
+                    // exactly what landed under exactly what name — hand that straight to
+                    // FolderCacheManager so a Cloud tab already open on this folder can splice it
+                    // in live instead of paying for a refetch. Anything less certain (a folder in
+                    // the selection, or an overwrite that deleted+replaced a remote item) falls
+                    // back to the generic invalidate, which only triggers a real refresh().
+                    if (overwriteNames.isEmpty() && selected.none { File(it).isDirectory }) {
+                        val addedFiles = folderCacheManager.buildUploadedFileItems(selected, skipNames, destPath)
+                        folderCacheManager.notifyCloudFilesAdded(account.id, destPath, addedFiles)
+                    } else {
+                        folderCacheManager.invalidateCloud(account.id, destPath)
+                    }
                     if (isMove) {
-                        fileOperationsUseCase.delete(selected, moveToRecycleBin = false)
+                        // Only delete sources that actually transferred — a skipped conflict never
+                        // left this device, so deleting it here would just lose the file outright.
+                        val movedSources = selected.filter { File(it).name !in skipNames }
+                        fileOperationsUseCase.delete(movedSources, moveToRecycleBin = false)
                         if (currentDir != null) {
                             openSubfolder(currentDir, _uiState.value.currentSubfolderName)
                         } else {
@@ -729,7 +841,11 @@ class CategoriesViewModel @Inject constructor(
                     _uiState.value = _uiState.value.copy(
                         selectedPaths = emptySet(),
                         isSelectionMode = false,
-                        toastMessage = "Transferred $count file(s) to ${account.accountName} successfully!"
+                        toastMessage = if (uploadedCount > 0) {
+                            "Transferred $uploadedCount file(s) to ${account.accountName} successfully!"
+                        } else {
+                            "No files transferred (all skipped)"
+                        }
                     )
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     _uiState.value = _uiState.value.copy(downloadProgress = null, toastMessage = "Transfer cancelled")

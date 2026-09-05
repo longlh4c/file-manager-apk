@@ -242,7 +242,21 @@ fun ImageViewerScreen(
                             }
                         }
                     }
-                ) { Text(if (isDeleting) "Deleting…" else "Delete", color = Color(0xFFEF5350)) }
+                ) {
+                    // A remote cloud delete (Dropbox/Drive/MEGA) is a real network round trip
+                    // that can take a couple seconds — the "Deleting…" text alone, with nothing
+                    // else in the dialog changing, read as the whole thing being frozen. A visible
+                    // spinner makes it obvious something is actually happening.
+                    if (isDeleting) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = Color(0xFFEF5350))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Deleting…", color = Color(0xFFEF5350))
+                        }
+                    } else {
+                        Text("Delete", color = Color(0xFFEF5350))
+                    }
+                }
             },
             dismissButton = {
                 TextButton(enabled = !isDeleting, onClick = { showDeleteConfirm = false }) { Text("Cancel") }
@@ -596,7 +610,21 @@ fun VideoPlayerScreen(
                             }
                         }
                     }
-                ) { Text(if (isDeleting) "Deleting…" else "Delete", color = Color(0xFFEF5350)) }
+                ) {
+                    // A remote cloud delete (Dropbox/Drive/MEGA) is a real network round trip
+                    // that can take a couple seconds — the "Deleting…" text alone, with nothing
+                    // else in the dialog changing, read as the whole thing being frozen. A visible
+                    // spinner makes it obvious something is actually happening.
+                    if (isDeleting) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = Color(0xFFEF5350))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Deleting…", color = Color(0xFFEF5350))
+                        }
+                    } else {
+                        Text("Delete", color = Color(0xFFEF5350))
+                    }
+                }
             },
             dismissButton = {
                 TextButton(enabled = !isDeleting, onClick = { showDeleteConfirm = false }) { Text("Cancel") }

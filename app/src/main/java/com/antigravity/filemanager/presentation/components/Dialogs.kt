@@ -121,6 +121,80 @@ fun OverwriteConflictDialog(
     onConfirm: (overwriteNames: Set<String>, skipNames: Set<String>) -> Unit,
     onCancel: () -> Unit
 ) {
+    // A single conflicting item has nothing to pick a resolution FOR before confirming — every
+    // other item's choice defaults to "keep both" and applies immediately if there's a whole list
+    // to weigh, but with only one file, "select Overwrite, then tap Confirm" was two taps for a
+    // decision that's really just one. Below, the single-item branch fires onConfirm directly from
+    // each action button instead of going through the select-then-confirm flow.
+    if (conflicts.size == 1) {
+        val conflict = conflicts.first()
+        AlertDialog(
+            onDismissRequest = onCancel,
+            title = {
+                Text(
+                    text = "File already exists",
+                    color = TextPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Column {
+                    Text(text = conflict.name, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        text = if (conflict.isDirectory) {
+                            "A folder with this name already exists"
+                        } else {
+                            "Existing: ${FileItem.formatBytes(conflict.existingSize)}  →  New: ${FileItem.formatBytes(conflict.newSize)}"
+                        },
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Overwrite replaces the existing item. Skip leaves this file out entirely. Keep both saves the new copy under a numbered name.",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = { onConfirm(emptySet(), setOf(conflict.name)) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
+                        Text(text = "SKIP", color = TextSecondary, fontSize = 13.sp, maxLines = 1)
+                    }
+                    TextButton(
+                        onClick = { onConfirm(emptySet(), emptySet()) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
+                        Text(text = "KEEP BOTH", color = TealPrimary, fontSize = 13.sp, maxLines = 1, softWrap = false)
+                    }
+                    Button(
+                        onClick = { onConfirm(setOf(conflict.name), emptySet()) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF5350), contentColor = Color.White),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
+                        Text(text = "OVERWRITE", fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1, softWrap = false)
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onCancel) {
+                    Text(text = "CANCEL", color = TextSecondary)
+                }
+            },
+            containerColor = DarkCard
+        )
+        return
+    }
+
     // Per-file choice, defaulting to "keep both" — matches Overwrite/Skip/Keep Both from the
     // Windows "Destination File Already Exists" dialog. Keyed by name since conflicts are unique by name.
     val resolutionState = remember(conflicts) {
@@ -148,19 +222,26 @@ fun OverwriteConflictDialog(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
-                    TextButton(onClick = { conflicts.forEach { resolutionState[it.name] = ConflictResolution.OVERWRITE } }) {
-                        Text(text = "OVERWRITE ALL", color = Color(0xFFEF5350), fontSize = 13.sp)
+                    TextButton(
+                        onClick = { conflicts.forEach { resolutionState[it.name] = ConflictResolution.OVERWRITE } },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp)
+                    ) {
+                        Text(text = "OVERWRITE ALL", color = Color(0xFFEF5350), fontSize = 12.sp, maxLines = 1, softWrap = false)
                     }
-                    TextButton(onClick = { conflicts.forEach { resolutionState[it.name] = ConflictResolution.SKIP } }) {
-                        Text(text = "SKIP ALL", color = TextSecondary, fontSize = 13.sp)
+                    TextButton(
+                        onClick = { conflicts.forEach { resolutionState[it.name] = ConflictResolution.SKIP } },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp)
+                    ) {
+                        Text(text = "SKIP ALL", color = TextSecondary, fontSize = 12.sp, maxLines = 1, softWrap = false)
                     }
-                    TextButton(onClick = { conflicts.forEach { resolutionState[it.name] = ConflictResolution.KEEP_BOTH } }) {
-                        Text(text = "KEEP ALL", color = TealPrimary, fontSize = 13.sp)
+                    TextButton(
+                        onClick = { conflicts.forEach { resolutionState[it.name] = ConflictResolution.KEEP_BOTH } },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp)
+                    ) {
+                        Text(text = "KEEP ALL", color = TealPrimary, fontSize = 12.sp, maxLines = 1, softWrap = false)
                     }
                 }
                 Spacer(modifier = Modifier.height(4.dp))

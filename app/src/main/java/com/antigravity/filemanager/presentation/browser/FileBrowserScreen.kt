@@ -54,7 +54,7 @@ fun FileBrowserScreen(
     val context = LocalContext.current
 
     var showMoreMenu by remember { mutableStateOf(false) }
-    var showSortBottomSheet by remember { mutableStateOf(false) }
+    var showSortDialog by remember { mutableStateOf(false) }
     val viewMode = uiState.viewMode
 
     LaunchedEffect(uiState.toastMessage) {
@@ -96,23 +96,15 @@ fun FileBrowserScreen(
     }
 
 
-    if (showSortBottomSheet) {
-        SortViewOptionsBottomSheet(
+    // The combined View/Sort/Show-hidden-files bottom sheet was replaced by dedicated top-bar
+    // Sort and View buttons (View just toggles List↔Grid directly, no menu) — see the actions
+    // block below. Only "Sort by" still needs its own dialog; "Show hidden files" moved into the
+    // small top-bar More menu next to them.
+    if (showSortDialog) {
+        SortByDialog(
             currentSort = uiState.sortOption,
-            currentViewMode = viewMode,
-            showHiddenFiles = uiState.showHiddenFiles,
-            onSortChange = { sort, applyToAll ->
-                viewModel.onSortChanged(sort, applyToAll)
-                showSortBottomSheet = false
-            },
-            onViewModeChange = { mode, applyToAll ->
-                viewModel.onViewModeChanged(mode, applyToAll)
-                showSortBottomSheet = false
-            },
-            onShowHiddenFilesChange = { hidden, applyToAll ->
-                viewModel.onShowHiddenChanged(hidden, applyToAll)
-            },
-            onDismiss = { showSortBottomSheet = false }
+            onSortChange = { sort, applyToAll -> viewModel.onSortChanged(sort, applyToAll) },
+            onDismiss = { showSortDialog = false }
         )
     }
 
@@ -342,10 +334,13 @@ fun FileBrowserScreen(
                             Icon(Icons.Default.CreateNewFolder, contentDescription = "New Folder", tint = TextPrimary)
                         }
 
-                        // 3. Sort / View Options Button (Opens BottomSheet matching Screenshot 1:26)
-                        IconButton(onClick = { showSortBottomSheet = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Sort and View", tint = TextPrimary)
-                        }
+                        // 3-4. Sort + View buttons (shared with MediaCategoriesScreen).
+                        SortAndViewTopBarActions(
+                            viewMode = viewMode,
+                            onSortClick = { showSortDialog = true },
+                            onViewModeChange = { mode, applyToAll -> viewModel.onViewModeChanged(mode, applyToAll) }
+                        )
+
                     }
                 )
             }

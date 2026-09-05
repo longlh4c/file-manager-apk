@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.presentation.dashboard
 
 import android.os.Environment
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -15,11 +16,14 @@ import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -48,10 +52,21 @@ fun DashboardScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
+    // A failed paste-from-Cloud (bad path, expired token, network drop mid-download, ...) used to
+    // just quietly close the progress dialog at the end with nothing else shown — the copy looked
+    // like it had worked, with the file(s) it actually failed on simply never appearing locally.
+    val context = LocalContext.current
+    LaunchedEffect(uiState.toastMessage) {
+        uiState.toastMessage?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+            viewModel.clearToast()
+        }
+    }
+
     Scaffold(
         topBar = {
             FileManagerTopBar(
-                title = "File Manager +",
+                title = "Owl File +",
                 showBackButton = false,
                 onNavigationClick = { /* Open Navigation Drawer */ },
                 actions = {
@@ -82,6 +97,15 @@ fun DashboardScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
+        // Cold-boot loading indicator — same circular spinner style as pull-to-refresh's, shown
+        // centered over the grid only for the initial load (uiState.isLoading is set once in
+        // DashboardViewModel's init and never re-armed by refresh(), so it never doubles up with
+        // the pull-to-refresh spinner above).
+        if (uiState.isLoading) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = TealPrimary)
+            }
+        }
         LazyVerticalGrid(
             columns = GridCells.Fixed(3),
             modifier = Modifier

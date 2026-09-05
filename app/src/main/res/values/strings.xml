@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">File Manager +</string>
+    <string name="app_name">Owl File +</string>
     <string name="main_storage">Main storage</string>
     <string name="downloads">Downloads</string>
     <string name="images">Images</string>
@@ -18,7 +18,7 @@
     <string name="stop_service">STOP SERVICE</string>
     <string name="add_cloud_location">Add a cloud location</string>
     <string name="service_running_notification">FTP Service is running</string>
-    <string name="service_tap_to_manage">Tap to open File Manager</string>
+    <string name="service_tap_to_manage">Tap to open Owl File +</string>
     <string name="transfer_running_notification">File transfer in progress</string>
     <string name="transfer_running_notification_text">Copying, moving, uploading or downloading files…</string>
 </resources>

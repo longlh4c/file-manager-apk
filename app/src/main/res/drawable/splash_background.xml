@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cold-boot splash screen background: same brand gradient as the launcher icon
+     (ic_launcher_background), with the owl mascot (ic_launcher_foreground, F badge already
+     removed) centered on top at a fixed size. Set as MainActivity's windowBackground so it
+     paints immediately on process start, before Compose has anything to draw — MainActivity
+     swaps back to the normal theme in onCreate() right before setContent(). -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/ic_launcher_background" />
+    <item
+        android:width="220dp"
+        android:height="220dp"
+        android:gravity="center"
+        android:drawable="@drawable/ic_launcher_foreground" />
+</layer-list>

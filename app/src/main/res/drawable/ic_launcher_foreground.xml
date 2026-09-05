@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Owl File + mascot: a flat-style owl face (two-tone brown, angled brows, round white
+     eyes) with a few sparkle accents. The "F" badge was removed per feedback. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Zoom reverted per feedback ("zoom ra xa lại như cũ") — back to scale 1.0, full owl +
+         sparkles visible like the original. -->
+    <group
+        android:pivotX="54"
+        android:pivotY="58"
+        android:scaleX="1"
+        android:scaleY="1">
+
+        <!-- Sparkles scattered on the background, drawn first so the head sits on top -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M18,14 Q19.5,17.5 23,19 Q19.5,20.5 18,24 Q16.5,20.5 13,19 Q16.5,17.5 18,14 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M56,8 Q57,10.5 59.5,11.5 Q57,12.5 56,15 Q55,12.5 52.5,11.5 Q55,10.5 56,8 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M92,16 Q93.5,19.5 97,21 Q93.5,22.5 92,26 Q90.5,22.5 87,21 Q90.5,19.5 92,16 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M99,70 Q100,72.2 101.2,72.7 Q100,73.2 99,75.4 Q98,73.2 96.8,72.7 Q98,72.2 99,70 Z" />
+
+        <!-- Head/body silhouette, lighter chestnut brown -->
+        <path
+            android:fillColor="#A05A34"
+            android:pathData="M24,18 L34,32 Q54,24 74,32 L84,18 Q98,42 94,66 Q90,94 66,98 Q54,100 42,98 Q18,94 14,66 Q10,42 24,18 Z" />
+
+        <!-- Right-half shading, darker brown, layered on top for the two-tone look -->
+        <path
+            android:fillColor="#7C4526"
+            android:pathData="M55,25 Q66,24 74,32 L84,18 Q98,42 94,66 Q90,94 66,98 Q59,99.5 55,98.5 Z" />
+
+        <!-- Angled eyebrows -->
+        <path
+            android:fillColor="#3E2211"
+            android:pathData="M25,39 L44,32 L46,38 L28,45 Z" />
+        <path
+            android:fillColor="#3E2211"
+            android:pathData="M83,39 L64,32 L62,38 L80,45 Z" />
+
+        <!-- Eyes -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M38,52 m-14,0 a14,14 0 1,0 28,0 a14,14 0 1,0 -28,0" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M72,52 m-14,0 a14,14 0 1,0 28,0 a14,14 0 1,0 -28,0" />
+        <path
+            android:fillColor="#241608"
+            android:pathData="M41,55 m-6.5,0 a6.5,6.5 0 1,0 13,0 a6.5,6.5 0 1,0 -13,0" />
+        <path
+            android:fillColor="#241608"
+            android:pathData="M68,55 m-6.5,0 a6.5,6.5 0 1,0 13,0 a6.5,6.5 0 1,0 -13,0" />
+
+        <!-- Beak -->
+        <path
+            android:fillColor="#E8A33D"
+            android:pathData="M51,66 L59,66 L55,75 Z" />
+
+        <!-- Chest chevron pattern -->
+        <path
+            android:fillColor="#6B3A1A"
+            android:pathData="M39,85 L46,85 L42.5,78 Z" />
+        <path
+            android:fillColor="#6B3A1A"
+            android:pathData="M50,86 L57,86 L53.5,79 Z" />
+        <path
+            android:fillColor="#6B3A1A"
+            android:pathData="M61,85 L68,85 L64.5,78 Z" />
+    </group>
+</vector>

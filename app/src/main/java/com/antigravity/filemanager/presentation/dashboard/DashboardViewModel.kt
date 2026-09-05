@@ -48,7 +48,8 @@ data class DashboardUiState(
     val showBookmarksDialog: Boolean = false,
     val bookmarks: List<Bookmark> = emptyList(),
     val overwriteConflicts: List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList(),
-    val downloadProgress: CloudTransferProgress? = null
+    val downloadProgress: CloudTransferProgress? = null,
+    val toastMessage: String? = null
 )
 
 @HiltViewModel
@@ -70,6 +71,11 @@ class DashboardViewModel @Inject constructor(
     private var loadDataJob: kotlinx.coroutines.Job? = null
 
     init {
+        // Only flipped true here, for the cold-boot load — refresh() below re-triggers the exact
+        // same loadData() but must NOT set this back to true, since a manual pull-to-refresh
+        // already shows its own spinner (PullToRefreshContainer in DashboardScreen) and having
+        // both on screen at once would look like two competing loading indicators.
+        _uiState.value = _uiState.value.copy(isLoading = true)
         loadData()
         observeClipboard()
         observeBookmarks()
@@ -178,6 +184,10 @@ class DashboardViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(downloadProgress = null)
     }
 
+    fun clearToast() {
+        _uiState.value = _uiState.value.copy(toastMessage = null)
+    }
+
     private var pendingOverwriteAction: (suspend (overwriteNames: Set<String>, skipNames: Set<String>) -> Unit)? = null
 
     fun pasteToMainStorage() {
@@ -197,84 +207,25 @@ class DashboardViewModel @Inject constructor(
 
                 suspend fun doPasteCloud(overwriteNames: Set<String>, skipNames: Set<String>) {
                     try {
-                        val totalCount = sources.size
-                        val progressThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
-                        sources.forEachIndexed { index, remotePath ->
-                            kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                            val name = File(remotePath).name
-                            if (name in skipNames) return@forEachIndexed
-                            val destFile = File(targetFolder, name)
-                            val expectedSize = itemSizes[remotePath] ?: 0L
+                        val result = cloudStorageUseCase.downloadFilesToLocal(
+                            context = context,
+                            accountId = cloudAccountId,
+                            remotePaths = sources,
+                            targetDir = target,
+                            itemSizes = itemSizes,
+                            isMove = isMove,
+                            overwriteNames = overwriteNames,
+                            skipNames = skipNames
+                        ) { progress -> _uiState.value = _uiState.value.copy(downloadProgress = progress) }
 
-                            _uiState.value = _uiState.value.copy(
-                                downloadProgress = CloudTransferProgress(
-                                    currentFileName = name,
-                                    currentIndex = index + 1,
-                                    totalFiles = totalCount,
-                                    bytesTransferred = 0L,
-                                    totalBytes = expectedSize,
-                                    isIndeterminate = expectedSize <= 0,
-                                    isUpload = false
-                                )
-                            )
-
-                            val tempDir = File(context.cacheDir, "cloud_paste_temp_${System.nanoTime()}").apply { mkdirs() }
-                            val result = cloudStorageUseCase.downloadFile(cloudAccountId, remotePath, tempDir.absolutePath) { bytesRead, totalBytes ->
-                                val effTotal = if (totalBytes > 0) totalBytes else expectedSize
-                                if (progressThrottler.shouldEmit(bytesRead, effTotal)) {
-                                    _uiState.value = _uiState.value.copy(
-                                        downloadProgress = CloudTransferProgress(
-                                            currentFileName = name,
-                                            currentIndex = index + 1,
-                                            totalFiles = totalCount,
-                                            bytesTransferred = bytesRead,
-                                            totalBytes = effTotal,
-                                            isIndeterminate = effTotal <= 0,
-                                            isUpload = false
-                                        )
-                                    )
-                                }
+                        _uiState.value = _uiState.value.copy(
+                            downloadProgress = null,
+                            toastMessage = when {
+                                result.failedNames.isEmpty() -> _uiState.value.toastMessage
+                                result.failedNames.size == 1 -> "Failed to copy \"${result.failedNames.first()}\""
+                                else -> "Failed to copy ${result.failedNames.size} file(s)"
                             }
-                            if (result.isSuccess) {
-                                val downloaded = result.getOrNull()
-                                if (downloaded != null && downloaded.exists() && downloaded.isFile) {
-                                    val finalFile = if (name in overwriteNames) {
-                                        destFile
-                                    } else if (destFile.exists()) {
-                                        var candidate = File(targetFolder, name)
-                                        val dotIndex = name.lastIndexOf('.')
-                                        val base = if (dotIndex > 0) name.substring(0, dotIndex) else name
-                                        val ext = if (dotIndex > 0) name.substring(dotIndex) else ""
-                                        var counter = 1
-                                        while (candidate.exists()) {
-                                            candidate = File(targetFolder, "$base ($counter)$ext")
-                                            counter++
-                                        }
-                                        candidate
-                                    } else {
-                                        destFile
-                                    }
-                                    if (finalFile.exists()) {
-                                        finalFile.delete()
-                                    }
-                                    downloaded.inputStream().use { input ->
-                                        finalFile.outputStream().use { output ->
-                                            val buf = ByteArray(64 * 1024)
-                                            var read: Int
-                                            while (input.read(buf).also { read = it } != -1) {
-                                                kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                                                output.write(buf, 0, read)
-                                            }
-                                        }
-                                    }
-                                    if (isMove) {
-                                        cloudStorageUseCase.deleteItem(cloudAccountId, remotePath)
-                                    }
-                                }
-                            }
-                            tempDir.deleteRecursively()
-                        }
-                        _uiState.value = _uiState.value.copy(downloadProgress = null)
+                        )
                         globalClipboardManager.clear()
                         refresh()
                     } catch (e: kotlinx.coroutines.CancellationException) {

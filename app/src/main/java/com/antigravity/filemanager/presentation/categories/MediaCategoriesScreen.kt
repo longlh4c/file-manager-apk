@@ -54,7 +54,7 @@ fun MediaCategoriesScreen(
     val context = LocalContext.current
 
     var showMoreMenu by remember { mutableStateOf(false) }
-    var showSortBottomSheet by remember { mutableStateOf(false) }
+    var showSortDialog by remember { mutableStateOf(false) }
     val viewMode = uiState.viewMode
 
     LaunchedEffect(uiState.toastMessage) {
@@ -75,23 +75,15 @@ fun MediaCategoriesScreen(
         }
     }
 
-    if (showSortBottomSheet) {
-        SortViewOptionsBottomSheet(
+    // The combined View/Sort/Show-hidden-files bottom sheet was replaced by dedicated top-bar
+    // Sort and View buttons (View just toggles List↔Grid directly, no menu) — see the actions
+    // block below. Only "Sort by" still needs its own dialog; "Show hidden files" moved into the
+    // small top-bar More menu next to them.
+    if (showSortDialog) {
+        SortByDialog(
             currentSort = uiState.sortOption,
-            currentViewMode = viewMode,
-            showHiddenFiles = uiState.showHiddenFiles,
-            onSortChange = { sort, applyToAll ->
-                viewModel.onSortChanged(sort, applyToAll)
-                showSortBottomSheet = false
-            },
-            onViewModeChange = { mode, applyToAll ->
-                viewModel.onViewModeChanged(mode, applyToAll)
-                showSortBottomSheet = false
-            },
-            onShowHiddenFilesChange = { hidden, applyToAll ->
-                viewModel.onShowHiddenChanged(hidden, applyToAll)
-            },
-            onDismiss = { showSortBottomSheet = false }
+            onSortChange = { sort, applyToAll -> viewModel.onSortChanged(sort, applyToAll) },
+            onDismiss = { showSortDialog = false }
         )
     }
 
@@ -134,14 +126,9 @@ fun MediaCategoriesScreen(
         )
     }
 
-    if (uiState.showNewFolderDialog) {
-        TextInputDialog(
-            title = "New Folder",
-            confirmButtonText = "CREATE",
-            onConfirm = { viewModel.createFolder(it) },
-            onDismiss = { viewModel.setShowNewFolderDialog(false) }
-        )
-    }
+    // The New Folder button that used to set showNewFolderDialog=true was removed from this
+    // screen's top bar (see the comment where it used to be, further down) — nothing sets this
+    // flag anymore, so the dialog it would show is dropped too.
 
     if (uiState.showPropertiesDialog && uiState.itemForProperties != null) {
         PropertiesDialog(
@@ -304,17 +291,20 @@ fun MediaCategoriesScreen(
                             Icon(Icons.Default.Search, contentDescription = "Search", tint = TextPrimary)
                         }
 
-                        // 2. New Folder Button
-                        if (uiState.folderHistory.isNotEmpty()) {
-                            IconButton(onClick = { viewModel.setShowNewFolderDialog(true) }) {
-                                Icon(Icons.Default.CreateNewFolder, contentDescription = "New Folder", tint = TextPrimary)
-                            }
-                        }
+                        // New Folder was removed from this screen: a category subfolder
+                        // (Images > Pictures, say) deliberately shows a flat, file-only listing
+                        // with every subfolder hidden (see filterFilesForCategory) to avoid
+                        // duplicating what's already broken out as its own bucket. A folder
+                        // created here would never actually appear in this view, which read as
+                        // "New Folder doesn't work" — it's not that it silently failed, there was
+                        // just nowhere for it to show up.
 
-                        // 3. Sort / View Options Button (Opens BottomSheet matching Screenshot 1:26)
-                        IconButton(onClick = { showSortBottomSheet = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Sort and View", tint = TextPrimary)
-                        }
+                        // Sort + View buttons (shared with FileBrowserScreen).
+                        SortAndViewTopBarActions(
+                            viewMode = viewMode,
+                            onSortClick = { showSortDialog = true },
+                            onViewModeChange = { mode, applyToAll -> viewModel.onViewModeChanged(mode, applyToAll) }
+                        )
                     }
                 )
             }

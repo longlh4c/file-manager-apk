@@ -26,6 +26,35 @@ enum class ViewMode {
     DETAILED_LIST
 }
 
+// Was duplicated verbatim in MediaCategoriesScreen and FileBrowserScreen's top bar actions after
+// the combined View/Sort/Show-hidden-files sheet was split up — same Sort icon opening a "Sort by"
+// dialog, same View icon toggling List↔Grid directly with no menu. One shared composable now,
+// each caller just wires up its own onSortClick/onViewModeChange.
+@Composable
+fun SortAndViewTopBarActions(
+    viewMode: ViewMode,
+    onSortClick: () -> Unit,
+    onViewModeChange: (ViewMode, applyToAll: Boolean) -> Unit
+) {
+    IconButton(onClick = onSortClick) {
+        Icon(Icons.Default.SwapVert, contentDescription = "Sort", tint = TextPrimary)
+    }
+
+    // DETAILED_LIST (a third mode the old combined sheet also offered) counts as "List" for this
+    // toggle's purposes and switches to Grid like List does — this toggle only ever knows two
+    // states, List and Grid.
+    IconButton(onClick = {
+        val next = if (viewMode == ViewMode.GRID) ViewMode.LIST else ViewMode.GRID
+        onViewModeChange(next, false)
+    }) {
+        Icon(
+            imageVector = if (viewMode == ViewMode.GRID) Icons.Default.GridView else Icons.Default.FormatListBulleted,
+            contentDescription = "Switch to ${if (viewMode == ViewMode.GRID) "List" else "Grid"} view",
+            tint = TextPrimary
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SortViewOptionsBottomSheet(
@@ -265,6 +294,87 @@ fun SortViewOptionsBottomSheet(
             Spacer(modifier = Modifier.height(16.dp))
         }
     }
+}
+
+// Standalone "Sort by" dialog — the Sort section of SortViewOptionsBottomSheet above, pulled out
+// so it can be opened directly from a dedicated top-bar Sort button instead of only reachable
+// through the full View/Sort/Show-hidden-files sheet. Content and behavior are otherwise
+// unchanged, "Apply to all folders" included.
+@Composable
+fun SortByDialog(
+    currentSort: FileSortOption,
+    onSortChange: (FileSortOption, applyToAll: Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var applyToAllFolders by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Sort by", color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { applyToAllFolders = !applyToAllFolders }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(text = "Apply to all folders", color = TextPrimary, fontSize = 15.sp)
+                    Checkbox(
+                        checked = applyToAllFolders,
+                        onCheckedChange = { applyToAllFolders = it },
+                        colors = CheckboxDefaults.colors(checkedColor = TealPrimary, uncheckedColor = TextSecondary, checkmarkColor = PureBlack)
+                    )
+                }
+                HorizontalDivider(color = Color(0xFF333333), thickness = 1.dp)
+                listOf(
+                    FileSortOption.BY_DATE_DESC to "Date (Newest first) ▼",
+                    FileSortOption.BY_DATE_ASC to "Date (Oldest first) ▲",
+                    FileSortOption.BY_NAME_ASC to "Name (A to Z) ▲",
+                    FileSortOption.BY_NAME_DESC to "Name (Z to A) ▼",
+                    FileSortOption.BY_SIZE_DESC to "Size (Largest first) ▼",
+                    FileSortOption.BY_SIZE_ASC to "Size (Smallest first) ▲",
+                    FileSortOption.BY_TYPE to "Type"
+                ).forEach { (option, label) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                onSortChange(option, applyToAllFolders)
+                                onDismiss()
+                            }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (currentSort == option) TealPrimary else TextPrimary,
+                            fontWeight = if (currentSort == option) FontWeight.Bold else FontWeight.Normal,
+                            fontSize = 16.sp
+                        )
+                        RadioButton(
+                            selected = currentSort == option,
+                            onClick = {
+                                onSortChange(option, applyToAllFolders)
+                                onDismiss()
+                            },
+                            colors = RadioButtonDefaults.colors(selectedColor = TealPrimary, unselectedColor = TextSecondary)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("CANCEL", color = TealPrimary)
+            }
+        },
+        containerColor = Color(0xFF2C2C2C)
+    )
 }
 
 @Composable

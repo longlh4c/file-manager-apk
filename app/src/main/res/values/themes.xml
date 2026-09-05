@@ -6,6 +6,12 @@
         <item name="android:windowBackground">#FF121212</item>
     </style>
 
+    <!-- Shown only for the instant between process start and MainActivity.onCreate() calling
+         setTheme() back to Theme.FileManager — see splash_background.xml. -->
+    <style name="Theme.FileManager.Splash" parent="Theme.FileManager">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+    </style>
+
     <style name="Theme.FileManager.Transparent" parent="android:Theme.Translucent.NoTitleBar">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>

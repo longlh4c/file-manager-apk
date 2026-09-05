@@ -2,6 +2,7 @@ package com.antigravity.filemanager.domain.usecase
 
 import com.antigravity.filemanager.domain.model.*
 import com.antigravity.filemanager.domain.repository.*
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import java.io.File
 import javax.inject.Inject
@@ -185,10 +186,24 @@ class CloudStorageUseCase @Inject constructor(
     suspend fun moveWithinAccount(accountId: String, sourcePath: String, targetDir: String): Result<Unit> =
         cloudRepository.moveCloudFileWithinAccount(accountId, sourcePath, targetDir)
 
-    // Finds conflicting names in remoteDir on the given cloud account before upload.
+    // Finds conflicting names in remoteDir on the given cloud account before upload. Used to
+    // always call cloudRepository.getCloudFiles() directly — a real network listing every single
+    // time, even though the "Copy to > pick a Dropbox folder" flow right before this had just
+    // fetched (and cached, via FolderCacheManager) that exact same folder while the user was
+    // browsing to it. That made every "SELECT THIS FOLDER" tap pay for a redundant network round
+    // trip for data already sitting in cache from seconds earlier. Now it reuses that cache first
+    // — same reconcile-once contract as everywhere else this cache is read — and only falls back
+    // to a live fetch when there's nothing cached yet for this folder.
     suspend fun findConflicts(accountId: String, remoteDir: String, items: List<Pair<String, Long>>): List<com.antigravity.filemanager.domain.model.OverwriteConflict> {
-        val existing = cloudRepository.getCloudFiles(accountId, remoteDir).getOrDefault(emptyList())
-        android.util.Log.d("CloudStorageUseCase", "findConflicts: remoteDir='$remoteDir' existing=${existing.map { it.name }} checking=${items.map { it.first }}")
+        val cached = folderCacheManager.getCloudFolder(accountId, remoteDir)
+        val existing = if (cached != null && cached.isFresh) {
+            cached.files
+        } else {
+            val fetched = cloudRepository.getCloudFiles(accountId, remoteDir).getOrDefault(emptyList())
+            folderCacheManager.putCloudFolder(accountId, remoteDir, fetched)
+            fetched
+        }
+        android.util.Log.d("CloudStorageUseCase", "findConflicts: remoteDir='$remoteDir' fromCache=${cached?.isFresh == true} existing=${existing.map { it.name }} checking=${items.map { it.first }}")
         return items.mapNotNull { (name, size) ->
             val match = existing.find { it.name == name }
             if (match != null) {
@@ -209,37 +224,51 @@ class CloudStorageUseCase @Inject constructor(
         overwriteNames: Set<String> = emptySet(),
         skipNames: Set<String> = emptySet(),
         onFileProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesSent: Long, totalBytes: Long) -> Unit)? = null
-    ): Result<Unit> {
+    ): Result<Int> {
         transferGuard.begin(initialLabel = "Uploading")
         try {
         return try {
             // Directories in localPaths have no single "upload" call — recursively create a
             // matching remote folder tree first, then flatten every real file underneath into
             // (file, itsResolvedTargetDir) pairs. Files passed in directly keep target=remoteDir.
-            android.util.Log.d("CloudStorageUseCase", "uploadFiles: accountId=$accountId remoteDir='$remoteDir' localPaths=$localPaths")
             val flatFiles = mutableListOf<Pair<File, String>>()
             for (path in localPaths) {
                 val entry = File(path)
-                android.util.Log.d("CloudStorageUseCase", "uploadFiles: entry='$path' exists=${entry.exists()} isFile=${entry.isFile} isDirectory=${entry.isDirectory}")
                 if (entry.isDirectory) {
                     flattenDirectoryForUpload(accountId, entry, remoteDir, flatFiles)
                 } else if (entry.isFile) {
                     flatFiles.add(entry to remoteDir)
                 }
             }
-            android.util.Log.d("CloudStorageUseCase", "uploadFiles: flatFiles.size=${flatFiles.size}")
 
             val existingByDir = mutableMapOf<String, MutableSet<String>>()
             val existingItemsByDir = mutableMapOf<String, List<com.antigravity.filemanager.domain.model.FileItem>>()
+            // Was an unconditional live getCloudFiles() call per target dir, every single upload —
+            // completely redundant right after findConflicts() (see above) had just done the exact
+            // same listing (and cached it) moments earlier to build the overwrite-conflict list
+            // the caller is now resolving. Reuse that cache first, same as findConflicts does, and
+            // only hit the network if nothing's cached for this dir yet.
             suspend fun existingNamesFor(dir: String): MutableSet<String> = existingByDir.getOrPut(dir) {
-                val listResult = cloudRepository.getCloudFiles(accountId, dir)
-                android.util.Log.d("CloudStorageUseCase", "uploadFiles: getCloudFiles('$dir') isSuccess=${listResult.isSuccess} error=${listResult.exceptionOrNull()}")
-                val items = listResult.getOrDefault(emptyList())
+                val cached = folderCacheManager.getCloudFolder(accountId, dir)
+                val items = if (cached != null && cached.isFresh) {
+                    cached.files
+                } else {
+                    val listResult = cloudRepository.getCloudFiles(accountId, dir)
+                    android.util.Log.d("CloudStorageUseCase", "uploadFiles: getCloudFiles('$dir') isSuccess=${listResult.isSuccess} error=${listResult.exceptionOrNull()}")
+                    val fetched = listResult.getOrDefault(emptyList())
+                    folderCacheManager.putCloudFolder(accountId, dir, fetched)
+                    fetched
+                }
                 existingItemsByDir[dir] = items
                 items.map { it.name }.toMutableSet()
             }
 
             val totalFiles = flatFiles.size
+            // Was Result<Unit> — every caller's "success" toast just repeated the ORIGINAL
+            // selection count regardless of how many were actually skipped here, so picking
+            // "Skip" on every conflict still reported "Transferred N file(s) successfully" for
+            // zero real uploads. Track what actually went out and hand that back instead.
+            var uploadedCount = 0
             flatFiles.forEachIndexed { index, (file, targetDir) ->
                 if (file.name in skipNames) return@forEachIndexed
 
@@ -275,8 +304,9 @@ class CloudStorageUseCase @Inject constructor(
                     // so stop here instead of silently reporting success for a partial batch.
                     throw uploadResult.exceptionOrNull() ?: Exception("Upload failed for ${uploadSource.name}")
                 }
+                uploadedCount++
             }
-            Result.success(Unit)
+            Result.success(uploadedCount)
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(e)
@@ -356,6 +386,149 @@ class CloudStorageUseCase @Inject constructor(
         } finally {
             if (notifyTransfer) transferGuard.end()
         }
+    }
+
+    data class CloudDownloadToLocalResult(val scannedPaths: List<String>, val failedNames: List<String>)
+
+    // Was near-identically duplicated three times (CategoriesViewModel.pasteFromCloud,
+    // FileBrowserViewModel.pasteFromCloud, DashboardViewModel's doPasteCloud) — same download loop,
+    // same overwrite/skip/unique-name handling, same per-item try/catch/finally hardening (a local
+    // write failure after a successful download used to throw uncaught right here and silently
+    // kill the whole paste with no toast, no error, nothing), same MediaScannerConnection.scanFile
+    // call at the end (writing straight to a java.io.File never tells MediaStore anything happened,
+    // so a pasted photo's folder thumbnail/count on the category root grid never updated without
+    // this). Each of the three callers keeps its own wrapper for whatever's specific to that screen
+    // (its own toast wording, what to reload/clear afterward) but delegates the actual work here.
+    suspend fun downloadFilesToLocal(
+        context: android.content.Context,
+        accountId: String,
+        remotePaths: List<String>,
+        targetDir: String,
+        itemSizes: Map<String, Long>,
+        isMove: Boolean,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onProgress: (com.antigravity.filemanager.domain.model.CloudTransferProgress) -> Unit
+    ): CloudDownloadToLocalResult {
+        val targetFolder = File(targetDir)
+        val totalCount = remotePaths.size
+        val progressThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
+        val scannedPaths = mutableListOf<String>()
+        val failedNames = mutableListOf<String>()
+        // A Move deletes the remote source item below, but that only patches DropboxApiClient's
+        // own whole-account tree cache (see patchTreeAfterDelete) — it never touches
+        // FolderCacheManager's per-folder listing cache, the one the Cloud tab actually paints
+        // from. Without telling it too, a folder open in the Cloud tab kept showing the "moved"
+        // file as still there until something else happened to invalidate it. We already know
+        // exactly which remote paths just disappeared, grouped by parent folder, so this can drop
+        // them straight out of a listening screen's list (see notifyCloudFilesRemoved) rather than
+        // forcing a refetch the way a plain invalidate would.
+        val movedFromFolders = mutableMapOf<String, MutableSet<String>>()
+
+        remotePaths.forEachIndexed { index, remotePath ->
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            val name = File(remotePath).name
+            if (name in skipNames) return@forEachIndexed
+            val destFile = File(targetFolder, name)
+            val expectedSize = itemSizes[remotePath] ?: 0L
+
+            onProgress(
+                com.antigravity.filemanager.domain.model.CloudTransferProgress(
+                    currentFileName = name,
+                    currentIndex = index + 1,
+                    totalFiles = totalCount,
+                    bytesTransferred = 0L,
+                    totalBytes = expectedSize,
+                    isIndeterminate = expectedSize <= 0,
+                    isUpload = false
+                )
+            )
+
+            val tempDir = File(context.cacheDir, "cloud_paste_temp_${System.nanoTime()}").apply { mkdirs() }
+            try {
+                val result = downloadFile(accountId, remotePath, tempDir.absolutePath) { bytesRead, totalBytes ->
+                    val effTotal = if (totalBytes > 0) totalBytes else expectedSize
+                    if (progressThrottler.shouldEmit(bytesRead, effTotal)) {
+                        onProgress(
+                            com.antigravity.filemanager.domain.model.CloudTransferProgress(
+                                currentFileName = name,
+                                currentIndex = index + 1,
+                                totalFiles = totalCount,
+                                bytesTransferred = bytesRead,
+                                totalBytes = effTotal,
+                                isIndeterminate = effTotal <= 0,
+                                isUpload = false
+                            )
+                        )
+                    }
+                }
+                if (result.isSuccess) {
+                    val downloaded = result.getOrNull()
+                    if (downloaded != null && downloaded.exists() && downloaded.isFile) {
+                        val finalFile = if (name in overwriteNames) {
+                            destFile
+                        } else if (destFile.exists()) {
+                            uniqueLocalDestination(targetFolder, name)
+                        } else {
+                            destFile
+                        }
+                        if (finalFile.exists()) {
+                            finalFile.delete()
+                        }
+                        downloaded.inputStream().use { input ->
+                            finalFile.outputStream().use { output ->
+                                val buf = ByteArray(64 * 1024)
+                                var read: Int
+                                while (input.read(buf).also { read = it } != -1) {
+                                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                                    output.write(buf, 0, read)
+                                }
+                            }
+                        }
+                        scannedPaths.add(finalFile.absolutePath)
+                        if (isMove) {
+                            deleteItem(accountId, remotePath)
+                            val parentPath = remotePath.substringBeforeLast('/', "/").ifEmpty { "/" }
+                            movedFromFolders.getOrPut(parentPath) { mutableSetOf() }.add(remotePath)
+                        }
+                    } else {
+                        failedNames.add(name)
+                    }
+                } else {
+                    android.util.Log.e("CloudStorageUseCase", "downloadFilesToLocal: download failed for '$remotePath'", result.exceptionOrNull())
+                    failedNames.add(name)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("CloudStorageUseCase", "downloadFilesToLocal: failed for '$remotePath'", e)
+                failedNames.add(name)
+            } finally {
+                tempDir.deleteRecursively()
+            }
+        }
+
+        if (scannedPaths.isNotEmpty()) {
+            android.media.MediaScannerConnection.scanFile(context, scannedPaths.toTypedArray(), null, null)
+        }
+        movedFromFolders.forEach { (parentPath, removedPaths) ->
+            folderCacheManager.notifyCloudFilesRemoved(accountId, parentPath, removedPaths)
+        }
+        return CloudDownloadToLocalResult(scannedPaths, failedNames)
+    }
+
+    private fun uniqueLocalDestination(targetFolder: File, name: String): File {
+        var candidate = File(targetFolder, name)
+        if (!candidate.exists()) return candidate
+        val dotIndex = name.lastIndexOf('.')
+        val base = if (dotIndex > 0) name.substring(0, dotIndex) else name
+        val ext = if (dotIndex > 0) name.substring(dotIndex) else ""
+        var counter = 1
+        while (candidate.exists()) {
+            candidate = File(targetFolder, "$base ($counter)$ext")
+            counter++
+        }
+        return candidate
     }
 
     suspend fun downloadThumbnail(accountId: String, nodeId: String): Result<ByteArray> =
