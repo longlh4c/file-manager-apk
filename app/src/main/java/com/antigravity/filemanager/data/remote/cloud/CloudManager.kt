@@ -11,6 +11,7 @@ import com.antigravity.filemanager.domain.model.FolderBadgeType
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.*
@@ -25,6 +26,14 @@ class CloudManager @Inject constructor(
     private val dropboxApi: DropboxApiClient,
     private val megaApi: MegaApiClient
 ) {
+
+    init {
+        // Also run once at startup (not just after each new download — see trimCloudDownloadsCache
+        // below) so whatever already piled up in cloud_downloads/ before this cap existed gets
+        // trimmed down immediately, instead of only shrinking gradually the next time each account
+        // happens to download something new.
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { trimCloudDownloadsCache() }
+    }
 
     private val folderIdCache = ConcurrentHashMap<String, String>()
     private val nodeKeyCache = ConcurrentHashMap<String, String>()
@@ -41,6 +50,31 @@ class CloudManager @Inject constructor(
         val t: Int,
         val k: String = ""
     )
+
+    // cloud_downloads/<accountId> (see downloadFile below) is used as a permanent "already viewed,
+    // don't re-fetch" cache for the media viewer/preview — nothing ever capped its size or evicted
+    // old entries, so every full-resolution photo/video ever opened from any connected cloud
+    // account piled up here forever. A system storage-cleaner reporting this app using tens of GB
+    // was this directory, not anything the user could see or manage from inside the app itself.
+    // Trimmed after every successful download into it: oldest-by-last-modified files removed first
+    // until back under the cap, so a photo/video you looked at recently stays cached but one from
+    // months ago eventually makes room for newer ones.
+    private val cloudDownloadsCacheMaxBytes = 500L * 1024 * 1024 // 500 MB
+
+    private suspend fun trimCloudDownloadsCache() = withContext(Dispatchers.IO) {
+        try {
+            val root = File(context.cacheDir, "cloud_downloads")
+            if (!root.exists()) return@withContext
+            val files = root.walkTopDown().filter { it.isFile }.toList()
+            var total = files.sumOf { it.length() }
+            if (total <= cloudDownloadsCacheMaxBytes) return@withContext
+            for (f in files.sortedBy { it.lastModified() }) {
+                if (total <= cloudDownloadsCacheMaxBytes) break
+                val size = f.length()
+                if (f.delete()) total -= size
+            }
+        } catch (e: Exception) {}
+    }
 
     //region Account storage & session payload
     fun getAccountStorageDir(accountId: String, relativePath: String = ""): File {
@@ -537,6 +571,7 @@ class CloudManager @Inject constructor(
                 } else {
                     onProgress?.invoke(destFile.length(), destFile.length())
                 }
+                trimCloudDownloadsCache()
                 return@withContext Result.success(destFile)
             }
 
@@ -590,7 +625,7 @@ class CloudManager @Inject constructor(
                 }
             }
 
-            if (remoteResult.isSuccess) {
+            val result = if (remoteResult.isSuccess) {
                 remoteResult
             } else {
                 // Fallback to any matching file in account directory or cache directory if available
@@ -623,6 +658,8 @@ class CloudManager @Inject constructor(
                     remoteResult
                 }
             }
+            if (result.isSuccess) trimCloudDownloadsCache()
+            result
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             android.util.Log.e("CloudManager", "downloadFile failed for account=${account.id}, remotePath=$remotePath: ${e.message}", e)

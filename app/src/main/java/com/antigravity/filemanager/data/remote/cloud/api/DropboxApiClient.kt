@@ -1,5 +1,6 @@
 package com.antigravity.filemanager.data.remote.cloud.api
 
+import android.content.Context
 import com.antigravity.filemanager.domain.model.CloudAccount
 import com.antigravity.filemanager.domain.model.FileItem
 import com.dropbox.core.DbxRequestConfig
@@ -11,6 +12,7 @@ import com.dropbox.core.v2.files.FolderMetadata
 import com.dropbox.core.v2.files.ListRevisionsMode
 import com.dropbox.core.v2.files.Metadata
 import com.dropbox.core.v2.files.WriteMode
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -18,6 +20,8 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -27,13 +31,18 @@ import javax.inject.Singleton
 
 // Dropbox API v2 client using official dropbox-core-sdk with OAuth2/PKCE tokens.
 @Singleton
-class DropboxApiClient @Inject constructor() {
+class DropboxApiClient @Inject constructor(
+    @ApplicationContext private val context: Context
+) {
 
     // Dropbox's list_folder has no "children of X with descendant counts" mode — like MEGA,
     // the only way to avoid an N+1 fan-out (one API call per subfolder just to get its item
     // count) is to fetch the WHOLE account tree once via recursive=true and slice it in memory.
-    // Cached per account indefinitely — it never expires on its own, only [invalidateTree] (a
-    // manual refresh at the account root, or after a mutation) forces the next call to re-fetch.
+    // Cached per account in RAM, backed by a disk copy (see [persistTreeToDisk]/[loadTreeFromDisk])
+    // so it survives a process restart instead of forcing a full recursive re-fetch every time the
+    // app is reopened — unlike MEGA's SDK, Dropbox's SDK has no local persistence of its own.
+    // Expires after [treeTtlMillis] or on [invalidateTree] (a manual refresh at the account root,
+    // or after a mutation), whichever comes first.
     private data class DropboxEntry(
         val path: String,
         val parentPath: String,
@@ -47,11 +56,79 @@ class DropboxApiClient @Inject constructor() {
     private val treeCache = ConcurrentHashMap<String, TreeCache>()
     private val treeMutexes = ConcurrentHashMap<String, Mutex>()
 
+    // 24h: long enough that reopening the app (or a process the OS killed in the background)
+    // doesn't pay for a full recursive re-fetch just to redraw the same folder, short enough that
+    // a change made from another device won't sit stale for more than a day without the user
+    // needing to know — a manual pull-to-refresh always bypasses this anyway.
+    private val treeTtlMillis = 24L * 60 * 60 * 1000
+
     private fun treeMutexFor(accountId: String): Mutex = treeMutexes.getOrPut(accountId) { Mutex() }
+
+    private fun treeCacheDir(): File = File(context.filesDir, "dropbox_tree_cache").apply { mkdirs() }
+    private fun treeCacheFile(accountId: String): File = File(treeCacheDir(), "$accountId.json")
+
+    private fun persistTreeToDisk(accountId: String, cache: TreeCache) {
+        try {
+            val entriesJson = JSONArray()
+            cache.entries.forEach { e ->
+                entriesJson.put(
+                    JSONObject().apply {
+                        put("path", e.path)
+                        put("parentPath", e.parentPath)
+                        put("name", e.name)
+                        put("isDirectory", e.isDirectory)
+                        put("size", e.size)
+                        put("lastModified", e.lastModified)
+                        put("id", e.id)
+                    }
+                )
+            }
+            val root = JSONObject().apply {
+                put("timestamp", cache.timestamp)
+                put("entries", entriesJson)
+            }
+            treeCacheFile(accountId).writeText(root.toString())
+        } catch (e: Exception) {
+            android.util.Log.e("DropboxApiClient", "persistTreeToDisk: FAILED for $accountId", e)
+        }
+    }
+
+    private fun loadTreeFromDisk(accountId: String): TreeCache? {
+        return try {
+            val file = treeCacheFile(accountId)
+            if (!file.exists()) return null
+            val root = JSONObject(file.readText())
+            val timestamp = root.getLong("timestamp")
+            if (System.currentTimeMillis() - timestamp > treeTtlMillis) {
+                // Expired — delete so a corrupt/ancient file doesn't linger around forever.
+                file.delete()
+                return null
+            }
+            val entriesJson = root.getJSONArray("entries")
+            val entries = (0 until entriesJson.length()).map { i ->
+                val o = entriesJson.getJSONObject(i)
+                DropboxEntry(
+                    path = o.getString("path"),
+                    parentPath = o.getString("parentPath"),
+                    name = o.getString("name"),
+                    isDirectory = o.getBoolean("isDirectory"),
+                    size = o.getLong("size"),
+                    lastModified = o.getLong("lastModified"),
+                    id = o.getString("id")
+                )
+            }
+            TreeCache(entries, timestamp)
+        } catch (e: Exception) {
+            android.util.Log.e("DropboxApiClient", "loadTreeFromDisk: FAILED for $accountId, discarding", e)
+            treeCacheFile(accountId).delete()
+            null
+        }
+    }
 
     /** Call after any mutation (create/delete/rename) so the next listing re-fetches. */
     fun invalidateTree(accountId: String) {
         treeCache.remove(accountId)
+        treeCacheFile(accountId).delete()
     }
 
     /** Patches a freshly uploaded file into the cached tree in place, so the folder listing that
@@ -71,7 +148,9 @@ class DropboxApiClient @Inject constructor() {
         // counting down from whenever it was first fetched regardless of being patched, and a
         // listing shortly after several patches can still land past the original TTL and pay for
         // a full recursive re-fetch anyway, which is exactly what an upload here should avoid.
-        treeCache[accountId] = TreeCache(updated, System.currentTimeMillis())
+        val newCache = TreeCache(updated, System.currentTimeMillis())
+        treeCache[accountId] = newCache
+        persistTreeToDisk(accountId, newCache)
     }
 
     /** Same idea as [patchTreeAfterUpload] but for a freshly created folder — a recursive
@@ -90,7 +169,9 @@ class DropboxApiClient @Inject constructor() {
         // whenever the list was sorted by date, since every other folder sits at epoch 0.
         val entry = DropboxEntry(path, parent, name, true, 0L, 0L, id)
         val updated = cached.entries.filterNot { it.path == path } + entry
-        treeCache[accountId] = TreeCache(updated, System.currentTimeMillis())
+        val newCache = TreeCache(updated, System.currentTimeMillis())
+        treeCache[accountId] = newCache
+        persistTreeToDisk(accountId, newCache)
     }
 
     /** Removes one deleted item from the cached tree in place instead of the full [invalidateTree]
@@ -107,8 +188,13 @@ class DropboxApiClient @Inject constructor() {
         val normalized = path.trimEnd('/')
         val updated = cached.entries.filterNot { it.path == normalized || it.path.startsWith("$normalized/") }
         android.util.Log.d("DropboxApiClient", "patchTreeAfterDelete: path='$normalized' removed ${cached.entries.size - updated.size} entries (${cached.entries.size} -> ${updated.size})")
-        treeCache[accountId] = TreeCache(updated, System.currentTimeMillis())
+        val newCache = TreeCache(updated, System.currentTimeMillis())
+        treeCache[accountId] = newCache
+        persistTreeToDisk(accountId, newCache)
     }
+
+    private fun isFreshAndNonEmpty(cache: TreeCache): Boolean =
+        cache.entries.isNotEmpty() && System.currentTimeMillis() - cache.timestamp <= treeTtlMillis
 
     private suspend fun getOrFetchTree(account: CloudAccount): Result<List<DropboxEntry>> {
         treeCache[account.id]?.let { cached ->
@@ -116,23 +202,35 @@ class DropboxApiClient @Inject constructor() {
             // migration, or a token that was valid but scoped to zero content at that instant) used
             // to get served back silently forever after — no log, no retry, indistinguishable from
             // a genuinely empty Dropbox account. Treat an empty cached tree as not-actually-cached
-            // so it gets one real re-fetch instead of being trusted permanently.
-            if (cached.entries.isNotEmpty()) {
+            // so it gets one real re-fetch instead of being trusted permanently. A tree past
+            // treeTtlMillis is treated the same way — old enough it should just re-fetch.
+            if (isFreshAndNonEmpty(cached)) {
                 return Result.success(cached.entries)
             }
-            android.util.Log.d("DropboxApiClient", "getOrFetchTree: cached tree for ${account.id} is EMPTY — treating as stale, re-fetching")
+            android.util.Log.d("DropboxApiClient", "getOrFetchTree: cached tree for ${account.id} is empty/expired — treating as stale, re-fetching")
         }
         return treeMutexFor(account.id).withLock {
             treeCache[account.id]?.let { recheck ->
-                if (recheck.entries.isNotEmpty()) {
+                if (isFreshAndNonEmpty(recheck)) {
                     return@withLock Result.success(recheck.entries)
                 }
+            }
+            // In-memory cache is cold (first call this process, or it just expired) — try the
+            // on-disk copy before paying for a full recursive network re-fetch. This is what
+            // makes search/browsing instant again right after reopening the app instead of
+            // rebuilding the whole tree from scratch every time, same as before the app was killed.
+            loadTreeFromDisk(account.id)?.let { fromDisk ->
+                android.util.Log.d("DropboxApiClient", "getOrFetchTree: loaded ${fromDisk.entries.size} entries from disk cache for ${account.id}")
+                treeCache[account.id] = fromDisk
+                return@withLock Result.success(fromDisk.entries)
             }
             android.util.Log.d("DropboxApiClient", "getOrFetchTree: cache MISS — fetching fresh tree from network for ${account.id}")
             val fetched = fetchTreeFromNetwork(account)
             fetched.onSuccess { entries ->
                 android.util.Log.d("DropboxApiClient", "getOrFetchTree: fetch completed with ${entries.size} entries for ${account.id}")
-                treeCache[account.id] = TreeCache(entries, System.currentTimeMillis())
+                val newCache = TreeCache(entries, System.currentTimeMillis())
+                treeCache[account.id] = newCache
+                persistTreeToDisk(account.id, newCache)
             }
             fetched
         }

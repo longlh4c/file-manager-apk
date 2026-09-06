@@ -15,11 +15,13 @@ import com.antigravity.filemanager.domain.usecase.GetCategorizedMediaUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -74,6 +76,14 @@ data class CategoryUiState(
     val viewMode: com.antigravity.filemanager.presentation.components.ViewMode = com.antigravity.filemanager.presentation.components.ViewMode.LIST,
     val searchQuery: String = "",
     val isSearchActive: Boolean = false,
+    // A blank query means "not searching" — the screen falls back to whatever's already loaded
+    // (folders/subfolderFiles) in that case, same convention as Cloud/FileBrowser's own search.
+    // Populated by onSearchQueryChanged with a real recursive, whole-device search matching this
+    // category's file types — searching used to just filter the folder-name grid you happened to
+    // already be looking at, so typing an actual file name at the category root (not a folder
+    // name) always came back with nothing, regardless of whether that file existed.
+    val searchResults: List<FileItem> = emptyList(),
+    val isSearching: Boolean = false,
     val toastMessage: String? = null,
     val overwriteConflicts: List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList(),
     val downloadProgress: CloudTransferProgress? = null
@@ -399,14 +409,48 @@ class CategoriesViewModel @Inject constructor(
         }
     }
 
+    private var searchJob: kotlinx.coroutines.Job? = null
+
     fun onSearchQueryChanged(query: String) {
         _uiState.value = _uiState.value.copy(searchQuery = query)
+        searchJob?.cancel()
+        if (query.isBlank()) {
+            _uiState.value = _uiState.value.copy(searchResults = emptyList(), isSearching = false)
+            return
+        }
+        searchJob = viewModelScope.launch {
+            // Debounce so fast typing doesn't kick off a new device-wide walk per keystroke.
+            delay(350)
+            _uiState.value = _uiState.value.copy(searchResults = emptyList(), isSearching = true)
+            try {
+                // fileOperationsUseCase.search() itself already existed (bounded: 500 results,
+                // depth 12) but nothing in the app ever actually called it — search here just
+                // filtered whatever was already on screen (a folder-name grid at the category
+                // root, or one subfolder's own file list), which only ever matched a query typed
+                // for a folder name, never an actual file living anywhere else in the category.
+                // Scope to the folder the user is currently inside (e.g. searching from within
+                // Camera only searches Camera), same as browsing already only shows that folder's
+                // own files — falls back to the whole category when at the root grid.
+                val currentFolder = _uiState.value.currentSubfolderPath
+                val allMatches = fileOperationsUseCase.search(query, rootPath = currentFolder, category = categoryType)
+                val filtered = filterFilesForCategory(allMatches.filterNot { it.isDirectory })
+                    .sortedByDescending { it.lastModified }
+                _uiState.value = _uiState.value.copy(searchResults = filtered)
+            } finally {
+                if (searchJob === kotlinx.coroutines.currentCoroutineContext().job) {
+                    _uiState.value = _uiState.value.copy(isSearching = false)
+                }
+            }
+        }
     }
 
     fun setSearchActive(active: Boolean) {
+        searchJob?.cancel()
         _uiState.value = _uiState.value.copy(
             isSearchActive = active,
-            searchQuery = if (!active) "" else _uiState.value.searchQuery
+            searchQuery = if (!active) "" else _uiState.value.searchQuery,
+            searchResults = emptyList(),
+            isSearching = false
         )
     }
 

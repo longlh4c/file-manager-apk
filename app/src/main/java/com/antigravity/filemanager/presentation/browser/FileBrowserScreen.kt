@@ -190,6 +190,7 @@ fun FileBrowserScreen(
             title = "Rename",
             initialValue = uiState.itemToRename?.name ?: "",
             confirmButtonText = "RENAME",
+            selectNameWithoutExtension = uiState.itemToRename?.isDirectory == false,
             onConfirm = { viewModel.renameItem(it) },
             onDismiss = { viewModel.setShowRenameDialog(null) }
         )

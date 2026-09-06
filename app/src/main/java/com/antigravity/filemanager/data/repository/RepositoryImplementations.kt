@@ -253,9 +253,42 @@ class FileRepositoryImpl @Inject constructor(
     override suspend fun getAllDocuments(sortOption: FileSortOption): List<FileItem> =
         scanner.getAllDocumentFiles(sortOption)
 
+    private val searchImageExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng")
+    private val searchVideoExts = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v", "mpg", "mpeg", "vob", "ogv", "f4v")
+    private val searchAudioExts = setOf("mp3", "m4a", "wav", "flac", "aac", "ogg", "wma", "opus", "amr", "mid", "midi")
+    private val searchDocExts = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "rtf", "epub")
+
     override suspend fun searchFiles(query: String, rootPath: String?, categoryType: CategoryType?): List<FileItem> = withContext(Dispatchers.IO) {
+        // Category-scoped search (Images/Videos/Audio/Documents) goes through MediaStore instead
+        // of a raw java.io.File recursion — see searchMediaByCategory's comment for why: some OEM
+        // ROMs restrict/virtualize direct filesystem access to camera/media folders in ways that
+        // silently made a plain dir.listFiles() walk skip DCIM/Camera entirely, while MediaStore
+        // (the same index the category grids themselves are built from) always sees it correctly.
+        // rootPath, when set, scopes results to that one folder (the user searching from inside a
+        // specific bucket like Camera) instead of the whole category.
+        if (categoryType != null) {
+            return@withContext scanner.searchMediaByCategory(query, categoryType, folderPath = rootPath)
+        }
+
         val root = if (rootPath != null) File(rootPath) else Environment.getExternalStorageDirectory()
         val results = mutableListOf<FileItem>()
+
+        // categoryType-specific extension filter, applied *during* the walk rather than after —
+        // previously categoryType was accepted but never actually used here, so the 500-match
+        // budget below was spent on every filename match anywhere on the device (docs, apks,
+        // videos...) regardless of the category being searched. On a device with many
+        // same-named/non-matching-type files, that budget could be exhausted before the walk
+        // ever reached folders like DCIM/Camera, making genuine image matches there silently
+        // disappear even though the device had plenty of storage left to search. Filtering by
+        // extension up front means the cap only ever counts files that could actually show up
+        // in this category's results.
+        val allowedExts: Set<String>? = when (categoryType) {
+            CategoryType.IMAGES -> searchImageExts
+            CategoryType.VIDEOS -> searchVideoExts
+            CategoryType.AUDIO -> searchAudioExts
+            CategoryType.DOCUMENTS -> searchDocExts
+            else -> null
+        }
 
         // Bounded so a broad query on a huge device can't turn into an unlimited-depth,
         // unlimited-result full-storage walk — stop once we have enough matches to show.
@@ -267,7 +300,8 @@ class FileRepositoryImpl @Inject constructor(
             val list = dir.listFiles() ?: return
             for (f in list) {
                 if (results.size >= maxResults) return
-                if (f.name.contains(query, ignoreCase = true)) {
+                val matchesType = f.isDirectory || allowedExts == null || f.extension.lowercase() in allowedExts
+                if (matchesType && f.name.contains(query, ignoreCase = true)) {
                     val isDir = f.isDirectory
                     results.add(
                         FileItem(
@@ -277,7 +311,14 @@ class FileRepositoryImpl @Inject constructor(
                             size = if (isDir) 0L else f.length(),
                             lastModified = f.lastModified(),
                             isDirectory = isDir,
-                            extension = if (isDir) "" else f.extension
+                            extension = if (isDir) "" else f.extension,
+                            // Was never set here — every search result showed only its generic
+                            // type icon, never a real thumbnail. Coil's registered fetchers
+                            // (image decoding, VideoThumbnailFetcher, PdfThumbnailFetcher,
+                            // ApkIconFetcher, AudioArtFetcher) already handle "not actually one of
+                            // my types" by producing nothing, which FileListItem's `error` painter
+                            // falls back from — safe to just point every file at its own path.
+                            thumbnailUri = if (isDir) null else f.absolutePath
                         )
                     )
                 }

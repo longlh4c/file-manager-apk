@@ -27,6 +27,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -66,10 +67,26 @@ fun TextInputDialog(
     title: String,
     initialValue: String = "",
     confirmButtonText: String = "OK",
+    // true for renaming a file (not a folder, not a brand-new name with nothing to preserve) —
+    // the field opens with just the name part selected/focused, extension excluded, matching how
+    // Windows/most file managers handle Rename so overwriting the whole "name.ext" by accident
+    // (or having to manually re-select just the name first) isn't the default.
+    selectNameWithoutExtension: Boolean = false,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var text by remember { mutableStateOf(initialValue) }
+    var textFieldValue by remember {
+        val dotIndex = initialValue.lastIndexOf('.')
+        val selectionEnd = if (selectNameWithoutExtension && dotIndex > 0) dotIndex else initialValue.length
+        mutableStateOf(
+            androidx.compose.ui.text.input.TextFieldValue(
+                text = initialValue,
+                selection = androidx.compose.ui.text.TextRange(0, selectionEnd)
+            )
+        )
+    }
+    val focusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -83,8 +100,8 @@ fun TextInputDialog(
         },
         text = {
             OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
+                value = textFieldValue,
+                onValueChange = { textFieldValue = it },
                 singleLine = true,
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = TextPrimary,
@@ -93,12 +110,14 @@ fun TextInputDialog(
                     unfocusedBorderColor = TextSecondary,
                     cursorColor = TealPrimary
                 ),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester)
             )
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(text.trim()) },
+                onClick = { onConfirm(textFieldValue.text.trim()) },
                 colors = ButtonDefaults.buttonColors(containerColor = TealPrimary, contentColor = Color.Black)
             ) {
                 Text(text = confirmButtonText, fontWeight = FontWeight.Bold)

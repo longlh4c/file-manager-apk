@@ -23,9 +23,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -56,6 +59,15 @@ fun MediaCategoriesScreen(
     var showMoreMenu by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }
     val viewMode = uiState.viewMode
+
+    val searchFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    LaunchedEffect(uiState.isSearchActive) {
+        if (uiState.isSearchActive) {
+            searchFocusRequester.requestFocus()
+            keyboardController?.show()
+        }
+    }
 
     LaunchedEffect(uiState.toastMessage) {
         uiState.toastMessage?.let {
@@ -143,6 +155,7 @@ fun MediaCategoriesScreen(
         TextInputDialog(
             title = "Rename",
             initialValue = uiState.itemForRename!!.name,
+            selectNameWithoutExtension = !uiState.itemForRename!!.isDirectory,
             onConfirm = { viewModel.renameFile(it) },
             onDismiss = { viewModel.setShowRenameDialog(null) }
         )
@@ -203,14 +216,17 @@ fun MediaCategoriesScreen(
 
     val currentTitle = if (uiState.currentSubfolderName.isNotEmpty()) uiState.currentSubfolderName else title
 
+    // A non-blank query means real (recursive, device-wide) search results from the ViewModel —
+    // see CategoriesViewModel.onSearchQueryChanged — not a plain filter of whatever's already on
+    // screen. Folders don't apply here since search results are always flat files; the file list
+    // (below) switches to showing them regardless of whether you were at the category root or
+    // already inside a subfolder when you started typing.
     val filteredFolders = remember(uiState.folders, uiState.searchQuery) {
-        if (uiState.searchQuery.isBlank()) uiState.folders
-        else uiState.folders.filter { it.name.contains(uiState.searchQuery, ignoreCase = true) }
+        if (uiState.searchQuery.isBlank()) uiState.folders else emptyList()
     }
 
-    val filteredFiles = remember(uiState.subfolderFiles, uiState.searchQuery) {
-        if (uiState.searchQuery.isBlank()) uiState.subfolderFiles
-        else uiState.subfolderFiles.filter { it.name.contains(uiState.searchQuery, ignoreCase = true) }
+    val filteredFiles = remember(uiState.subfolderFiles, uiState.searchResults, uiState.searchQuery) {
+        if (uiState.searchQuery.isBlank()) uiState.subfolderFiles else uiState.searchResults
     }
 
     Scaffold(
@@ -260,7 +276,9 @@ fun MediaCategoriesScreen(
                                 focusedIndicatorColor = Color.Transparent,
                                 unfocusedIndicatorColor = Color.Transparent
                             ),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(searchFocusRequester)
                         )
                     },
                     navigationIcon = {
@@ -505,18 +523,29 @@ fun MediaCategoriesScreen(
                 onRefresh = { viewModel.refresh() },
                 modifier = Modifier.fillMaxSize()
             ) {
-            if (uiState.folderHistory.isNotEmpty()) {
-                if (filteredFiles.isEmpty() && !uiState.isLoading) {
+            if (uiState.folderHistory.isNotEmpty() || uiState.searchQuery.isNotBlank()) {
+                if (uiState.isSearching && filteredFiles.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = TealPrimary)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(text = "Searching…", color = TextSecondary, fontSize = 14.sp)
+                        }
+                    }
+                } else if (filteredFiles.isEmpty() && !uiState.isLoading) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(
-                            text = "No files found",
+                            text = if (uiState.searchQuery.isNotBlank()) "No results for \"${uiState.searchQuery}\"" else "No files found",
                             color = TextSecondary,
                             fontSize = 15.sp
                         )
                     }
                 } else {
-                    // Nested folder contents, with ViewMode support
-                    when (viewMode) {
+                    // Nested folder contents, with ViewMode support. Search results always render
+                    // as the plain list (with each result's path shown, since a device-wide search
+                    // spans many different folders) regardless of whatever view mode the current
+                    // folder happens to be set to — same as Cloud's own search results.
+                    when (if (uiState.searchQuery.isNotBlank()) ViewMode.LIST else viewMode) {
                         ViewMode.GRID -> {
                             LazyVerticalGrid(
                                 // Adaptive so column count follows actual screen width instead
@@ -580,28 +609,39 @@ fun MediaCategoriesScreen(
                         }
                         else -> {
                             // Standard List view
-                            LazyColumn(modifier = Modifier.fillMaxSize()) {
-                                items(filteredFiles, key = { it.path }) { file ->
-                                    FileListItem(
-                                        file = file,
-                                        isSelectionMode = uiState.isSelectionMode,
-                                        isSelected = uiState.selectedPaths.contains(file.path),
-                                        onClick = {
-                                            if (uiState.isSelectionMode) {
-                                                viewModel.toggleFileSelection(file.path)
-                                            } else {
-                                                if (file.isDirectory) {
-                                                    viewModel.openSubfolder(file.path, file.name)
-                                                } else {
-                                                    onOpenFile(file, uiState.sortOption, null)
-                                                }
-                                            }
-                                        },
-                                        onLongClick = {
-                                            viewModel.toggleFileSelection(file.path)
-                                        }
+                            Column(modifier = Modifier.fillMaxSize()) {
+                                if (uiState.searchQuery.isNotBlank()) {
+                                    Text(
+                                        text = "${filteredFiles.size} " + if (filteredFiles.size == 1) "result" else "results",
+                                        color = TextSecondary,
+                                        fontSize = 13.sp,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                                     )
-                                    HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
+                                }
+                                LazyColumn(modifier = Modifier.fillMaxSize().weight(1f)) {
+                                    items(filteredFiles, key = { it.path }) { file ->
+                                        FileListItem(
+                                            file = file,
+                                            isSelectionMode = uiState.isSelectionMode,
+                                            isSelected = uiState.selectedPaths.contains(file.path),
+                                            onClick = {
+                                                if (uiState.isSelectionMode) {
+                                                    viewModel.toggleFileSelection(file.path)
+                                                } else {
+                                                    if (file.isDirectory) {
+                                                        viewModel.openSubfolder(file.path, file.name)
+                                                    } else {
+                                                        onOpenFile(file, uiState.sortOption, null)
+                                                    }
+                                                }
+                                            },
+                                            onLongClick = {
+                                                viewModel.toggleFileSelection(file.path)
+                                            },
+                                            showPath = uiState.searchQuery.isNotBlank()
+                                        )
+                                        HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
+                                    }
                                 }
                             }
                         }

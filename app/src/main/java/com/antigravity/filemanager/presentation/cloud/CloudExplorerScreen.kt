@@ -105,6 +105,7 @@ fun CloudExplorerScreen(
             title = "Rename",
             initialValue = uiState.itemToRename?.name ?: "",
             confirmButtonText = "RENAME",
+            selectNameWithoutExtension = uiState.itemToRename?.isDirectory == false,
             onConfirm = { newName -> viewModel.renameSelected(newName) },
             onDismiss = { viewModel.setShowRenameDialog(null) }
         )
@@ -578,7 +579,18 @@ fun CloudExplorerScreen(
                 onRefresh = { viewModel.refresh(isManual = true) },
                 modifier = Modifier.fillMaxSize()
             ) {
-                if (filteredFiles.isEmpty() && !uiState.isLoading && !uiState.isSearching) {
+                if (uiState.isSearching && filteredFiles.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = TealPrimary)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(text = "Searching…", color = TextSecondary, fontSize = 14.sp)
+                        }
+                    }
+                } else if (filteredFiles.isEmpty() && !uiState.isLoading && !uiState.isSearching) {
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -595,7 +607,11 @@ fun CloudExplorerScreen(
                             )
                             Spacer(modifier = Modifier.height(16.dp))
                             Text(
-                                text = if (uiState.isInsideTrashView) "Trash is empty" else "This cloud folder is empty",
+                                text = when {
+                                    uiState.searchQuery.isNotBlank() -> "No results for \"${uiState.searchQuery}\""
+                                    uiState.isInsideTrashView -> "Trash is empty"
+                                    else -> "This cloud folder is empty"
+                                },
                                 color = TextSecondary,
                                 fontSize = 16.sp,
                                 textAlign = TextAlign.Center
@@ -603,7 +619,16 @@ fun CloudExplorerScreen(
                         }
                     }
                 } else {
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        if (uiState.searchQuery.isNotBlank()) {
+                            Text(
+                                text = "${filteredFiles.size} " + if (filteredFiles.size == 1) "result" else "results",
+                                color = TextSecondary,
+                                fontSize = 13.sp,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
+                        LazyColumn(modifier = Modifier.fillMaxSize().weight(1f)) {
                         items(filteredFiles, key = { it.id }) { file ->
                             FileListItem(
                                 file = file,
@@ -648,6 +673,7 @@ fun CloudExplorerScreen(
                                 onVisible = { viewModel.requestThumbnail(it) },
                                 showPath = uiState.searchQuery.isNotBlank()
                             )
+                        }
                         }
                     }
                 }

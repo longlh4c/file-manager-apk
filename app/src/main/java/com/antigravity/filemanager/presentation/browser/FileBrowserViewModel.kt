@@ -380,7 +380,8 @@ class FileBrowserViewModel @Inject constructor(
                 if (matches.isNotEmpty()) {
                     resultsMutex.withLock {
                         found.addAll(matches)
-                        _uiState.value = _uiState.value.copy(searchResults = found.toList())
+                        // Default sort: newest first, matching Cloud/Media category search.
+                        _uiState.value = _uiState.value.copy(searchResults = found.sortedByDescending { it.lastModified })
                     }
                 }
                 val subfolders = children.filter { it.isDirectory }

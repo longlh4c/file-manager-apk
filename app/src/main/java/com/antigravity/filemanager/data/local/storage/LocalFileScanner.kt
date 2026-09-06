@@ -665,6 +665,117 @@ class LocalFileScanner @Inject constructor(
         }
     }
 
+    /** Category-scoped, name-matching search backed by MediaStore's own index instead of a raw
+     * java.io.File recursion. Some OEM ROMs (seen on this app's Vivo test device, likely others)
+     * virtualize/restrict direct filesystem access to well-known camera/media directories in ways
+     * that made a plain recursive dir.listFiles() walk silently skip DCIM/Camera entirely, even
+     * with MANAGE_EXTERNAL_STORAGE granted — while MediaStore, the same index the category grids
+     * themselves are built from (see queryImageFolders/queryAudioFolders/etc.), always sees it
+     * correctly since it doesn't depend on direct filesystem visibility at all. Also naturally
+     * fixes the old bug where a device-wide file-name search wasted its whole result budget on
+     * files of unrelated types before ever reaching the folder actually being searched. */
+    suspend fun searchMediaByCategory(query: String, categoryType: CategoryType, folderPath: String? = null, maxResults: Int = 500): List<FileItem> = withContext(Dispatchers.IO) {
+        val likeArgs = if (folderPath != null) arrayOf("%$query%", "${folderPath.trimEnd('/')}/%") else arrayOf("%$query%")
+        // Scope to one folder (non-recursive — DATA LIKE 'folder/%' also matches nested
+        // subfolders' files, but a category folder is already meant to be a flat bucket, same
+        // assumption filterFilesForCategory makes) when the user searched from inside it, instead
+        // of always searching the whole category regardless of where they currently are.
+        fun scoped(nameSelection: String) = if (folderPath != null) "($nameSelection) AND ${MediaStore.Files.FileColumns.DATA} LIKE ?" else nameSelection
+        when (categoryType) {
+            CategoryType.IMAGES -> queryMediaStoreByName(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                MediaStore.Images.Media.DATA, MediaStore.Images.Media.DISPLAY_NAME,
+                MediaStore.Images.Media.SIZE, MediaStore.Images.Media.DATE_MODIFIED,
+                scoped("${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?"), likeArgs, maxResults
+            )
+            CategoryType.VIDEOS -> queryMediaStoreByName(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                MediaStore.Video.Media.DATA, MediaStore.Video.Media.DISPLAY_NAME,
+                MediaStore.Video.Media.SIZE, MediaStore.Video.Media.DATE_MODIFIED,
+                scoped("${MediaStore.Video.Media.DISPLAY_NAME} LIKE ?"), likeArgs, maxResults
+            )
+            CategoryType.AUDIO -> queryMediaStoreByName(
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                MediaStore.Audio.Media.DATA, MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.SIZE, MediaStore.Audio.Media.DATE_MODIFIED,
+                scoped("${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?"), likeArgs, maxResults
+            )
+            CategoryType.DOCUMENTS -> {
+                val mimeTypes = listOf(
+                    "application/pdf", "application/msword",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/vnd.ms-excel",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "application/vnd.ms-powerpoint",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    "text/plain", "text/csv", "text/rtf", "application/rtf", "application/epub+zip"
+                )
+                val typeSelection = mimeTypes.joinToString(" OR ") { "${MediaStore.Files.FileColumns.MIME_TYPE} = '$it'" } +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.pdf'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.doc%'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.xls%'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.ppt%'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.txt'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.epub'"
+                val nameSelection = "($typeSelection) AND ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE ?"
+                queryMediaStoreByName(
+                    MediaStore.Files.getContentUri("external"),
+                    MediaStore.Files.FileColumns.DATA, MediaStore.Files.FileColumns.DISPLAY_NAME,
+                    MediaStore.Files.FileColumns.SIZE, MediaStore.Files.FileColumns.DATE_MODIFIED,
+                    if (folderPath != null) "($nameSelection) AND ${MediaStore.Files.FileColumns.DATA} LIKE ?" else nameSelection,
+                    likeArgs, maxResults
+                )
+            }
+            else -> emptyList()
+        }
+    }
+
+    private fun queryMediaStoreByName(
+        contentUri: android.net.Uri,
+        dataCol: String,
+        nameCol: String,
+        sizeCol: String,
+        dateCol: String,
+        selection: String,
+        selectionArgs: Array<String>,
+        maxResults: Int
+    ): List<FileItem> {
+        val results = mutableListOf<FileItem>()
+        try {
+            val projection = arrayOf(dataCol, nameCol, sizeCol, dateCol)
+            val cursor: Cursor? = context.contentResolver.query(
+                contentUri, projection, selection, selectionArgs, "$dateCol DESC"
+            )
+            cursor?.use {
+                val dataIdx = it.getColumnIndex(dataCol)
+                val nameIdx = it.getColumnIndex(nameCol)
+                val sizeIdx = it.getColumnIndex(sizeCol)
+                val dateIdx = it.getColumnIndex(dateCol)
+                while (it.moveToNext() && results.size < maxResults) {
+                    val path = if (dataIdx >= 0) it.getString(dataIdx) else null ?: continue
+                    val name = (if (nameIdx >= 0) it.getString(nameIdx) else null) ?: path.substringAfterLast('/')
+                    val size = if (sizeIdx >= 0) it.getLong(sizeIdx) else 0L
+                    val dateSec = if (dateIdx >= 0) it.getLong(dateIdx) else 0L
+                    results.add(
+                        FileItem(
+                            id = path,
+                            name = name,
+                            path = path,
+                            size = size,
+                            lastModified = if (dateSec > 0) dateSec * 1000L else 0L,
+                            isDirectory = false,
+                            extension = name.substringAfterLast('.', ""),
+                            thumbnailUri = path
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return results
+    }
+
     val documentExtensions = setOf(
         "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub",
         "rtf", "csv", "mobi", "azw", "azw3", "prc", "odt", "ods", "odp", "wps"

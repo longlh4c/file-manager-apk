@@ -84,6 +84,7 @@ fun LargeFilesScreen(
             title = "Rename",
             initialValue = itemToRename!!.name,
             confirmButtonText = "OK",
+            selectNameWithoutExtension = !itemToRename!!.isDirectory,
             onConfirm = { newName ->
                 viewModel.rename(itemToRename!!.path, newName) {
                     selectedPaths = emptySet()

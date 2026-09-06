@@ -158,6 +158,16 @@ class CloudExplorerViewModel @Inject constructor(
         } catch (e: Exception) {}
     }
 
+    // Dropbox images never get saved to disk for a thumbnail (see fetchThumbnailFor's Dropbox
+    // branch) — only a pre-signed streamable link is fetched and handed straight to Coil. Without
+    // caching that link here, every re-search/re-visit of the same file had to re-request a fresh
+    // link from the network even though the previous one (valid ~4h) was still perfectly usable,
+    // which is why a second search for the same query still felt as slow as the first. RAM-only,
+    // by request — not persisted to disk, unlike the tree cache: the link is a smaller, short-
+    // lived convenience, not worth the extra state to keep across a process restart.
+    private val streamableLinkCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
+    private val streamableLinkTtlMillis = 3L * 60 * 60 * 1000 // conservatively under Dropbox's ~4h expiry
+
     init {
         val persistedStack = loadPersistedPathStack()
         if (persistedStack != null) {
@@ -318,25 +328,7 @@ class CloudExplorerViewModel @Inject constructor(
                     }
                     val rawFilesList = result.getOrDefault(emptyList())
 
-                    // Match already downloaded thumbnail files on disk. Images only — Coil can
-                    // render those directly, but handing it a raw video file to decode itself is
-                    // unreliable on some devices (see fetchThumbnailFor), so videos always go
-                    // through requestThumbnail()'s proper frame-extraction path instead.
-                    val targetDir = File(context.cacheDir, "cloud_downloads/$accountId")
-                    val filesList = rawFilesList.map { file ->
-                        if (!file.isDirectory && file.thumbnailUri == null &&
-                            file.extension.lowercase() in thumbnailImageExtensions
-                        ) {
-                            val local = File(targetDir, file.name)
-                            if (local.exists() && local.length() > 0) {
-                                file.copy(thumbnailUri = local.absolutePath)
-                            } else {
-                                file
-                            }
-                        } else {
-                            file
-                        }
-                    }
+                    val filesList = applyLocalThumbnailCache(rawFilesList, accountId)
 
                     val sortedFiles = sortCloudFiles(filesList, _uiState.value.sortOption)
 
@@ -572,6 +564,33 @@ class CloudExplorerViewModel @Inject constructor(
      * more than 12 videos left everything past #12 without a thumbnail forever, no matter how
      * far the user scrolled.
      */
+    // Match already downloaded thumbnail files on disk. Images only — Coil can render those
+    // directly, but handing it a raw video file to decode itself is unreliable on some devices
+    // (see fetchThumbnailFor), so videos always go through requestThumbnail()'s proper
+    // frame-extraction path instead. Shared by both normal folder loading and search: search
+    // results used to skip this check entirely and always call requestThumbnail() — even for a
+    // file whose thumbnail was already sitting in this exact cache from browsing earlier — which
+    // made every search result's thumbnail noticeably slower to appear than a plain folder's.
+    private fun applyLocalThumbnailCache(files: List<FileItem>, accountId: String): List<FileItem> {
+        val targetDir = File(context.cacheDir, "cloud_downloads/$accountId")
+        return files.map { file ->
+            if (!file.isDirectory && file.thumbnailUri == null &&
+                file.extension.lowercase() in thumbnailImageExtensions
+            ) {
+                val local = File(targetDir, file.name)
+                val cachedLink = streamableLinkCache[file.id]
+                when {
+                    local.exists() && local.length() > 0 -> file.copy(thumbnailUri = local.absolutePath)
+                    cachedLink != null && System.currentTimeMillis() - cachedLink.second <= streamableLinkTtlMillis ->
+                        file.copy(thumbnailUri = cachedLink.first)
+                    else -> file
+                }
+            } else {
+                file
+            }
+        }
+    }
+
     fun requestThumbnail(file: FileItem) {
         val ext = file.extension.lowercase()
         // A video's thumbnailUri is only ever set to a real extracted JPEG (cloud_thumbs/*.jpg)
@@ -754,6 +773,7 @@ class CloudExplorerViewModel @Inject constructor(
                 // videos — no local download, and not size-capped.
                 val link = cloudUseCase.getStreamableLink(accountId, item.path).getOrNull()
                 if (link != null) {
+                    streamableLinkCache[item.id] = link to System.currentTimeMillis()
                     withContext(Dispatchers.Main) { updateThumbnailUriInState(item.id, link) }
                     return
                 }
@@ -778,10 +798,15 @@ class CloudExplorerViewModel @Inject constructor(
     }
 
     private fun updateThumbnailUriInState(fileId: String, thumbPath: String) {
-        val updated = _uiState.value.files.map {
-            if (it.id == fileId) it.copy(thumbnailUri = thumbPath) else it
-        }
-        _uiState.value = _uiState.value.copy(files = updated)
+        // Was only ever patching `files` — search results render from the separate
+        // `searchResults` list (see visibleFiles()/filteredFiles), so a thumbnail fetched while
+        // scrolling through search results landed in a list nothing was actually showing,
+        // leaving every search-result row stuck on its fallback icon forever.
+        fun patch(list: List<FileItem>) = list.map { if (it.id == fileId) it.copy(thumbnailUri = thumbPath) else it }
+        _uiState.value = _uiState.value.copy(
+            files = patch(_uiState.value.files),
+            searchResults = patch(_uiState.value.searchResults)
+        )
     }
 
     private var activeTransferJob: kotlinx.coroutines.Job? = null
@@ -1084,13 +1109,25 @@ class CloudExplorerViewModel @Inject constructor(
                 // CloudManager's Trash branch to do the complete (uncapped) scan instead, only for
                 // this one search call.
                 val isDropboxTrash = path == "/Trash" || path.startsWith("/Trash/")
+                // Reverted per user request: forcing a full tree rebuild at the start of every
+                // search made each Dropbox search feel heavier ("quá cầu kỳ" — too roundabout) than
+                // it should for what's meant to be a quick lookup against what's already cached.
+                // Back to trusting the existing tree cache like a normal listing does; a manual
+                // pull-to-refresh (or a mutation) is still what rebuilds it.
                 val listResult = semaphore.withPermit { cloudUseCase.getFiles(accountId, path, forceFullRefresh = isDropboxTrash) }
                 val children = listResult.getOrDefault(emptyList())
-                val matches = children.filter { it.id != "__trash__" && it.name.contains(query, ignoreCase = true) }
+                val rawMatches = children.filter { it.id != "__trash__" && it.name.contains(query, ignoreCase = true) }
+                // Same local-thumbnail-cache check normal folder loading gets — without it every
+                // search result always had to hit the network for its thumbnail even when it was
+                // already cached on disk from browsing this file's folder earlier.
+                val matches = applyLocalThumbnailCache(rawMatches, accountId)
                 if (matches.isNotEmpty()) {
                     resultsMutex.withLock {
                         found.addAll(matches)
-                        _uiState.value = _uiState.value.copy(searchResults = found.toList())
+                        // Default sort: newest first, so results stay meaningful as they stream in
+                        // from many folders concurrently rather than in whatever order those folder
+                        // listings happened to return.
+                        _uiState.value = _uiState.value.copy(searchResults = found.sortedByDescending { it.lastModified })
                     }
                 }
                 // The Trash/Rubbish Bin virtual folder is a flat, whole-account view of deleted
