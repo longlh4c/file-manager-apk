@@ -565,19 +565,23 @@ fun SelectionPropertiesDialog(
                     }.joinToString(", ")
                     PropertyRow(label = "Selected", value = "${items.size} item(s) — $summary")
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                        Text(text = "Size", color = TextSecondary, fontSize = 12.sp)
+                Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                    Text(text = "Size", color = TextSecondary, fontSize = 12.sp)
+                    // Spinner used to sit in a Row alongside this whole Column (label + value),
+                    // so CenterVertically centered it against both lines' combined height instead
+                    // of lining up with the value text itself — nesting it in a Row with just the
+                    // value line keeps it level with that line specifically.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = FileItem.formatBytes(totalSize) + if (isComputing) " (calculating…)" else "",
                             color = TextPrimary,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Normal
                         )
-                    }
-                    if (isComputing) {
-                        Spacer(modifier = Modifier.width(8.dp))
-                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = TealPrimary)
+                        if (isComputing) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = TealPrimary)
+                        }
                     }
                 }
             }
