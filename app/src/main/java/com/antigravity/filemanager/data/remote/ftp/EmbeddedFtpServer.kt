@@ -28,6 +28,25 @@ class EmbeddedFtpServer @Inject constructor() {
     var isRunning: Boolean = false
         private set
 
+    private var previousUncaughtExceptionHandler: Thread.UncaughtExceptionHandler? = null
+
+    // Defense in depth for the shared-CharsetEncoder race described where maxThreads is set,
+    // below — if it ever fires again despite that, this stops it from being fatal for the whole
+    // app. Only swallows exceptions whose stack trace actually runs through org.apache.ftpserver
+    // or org.apache.mina (this library's own packages), so it can only ever mask a bug in this
+    // embedded FTP server — never a real crash elsewhere in the app, which still falls through to
+    // whatever handler was already installed (Android's default process-kill included).
+    private val ftpUncaughtExceptionHandler = Thread.UncaughtExceptionHandler { thread, throwable ->
+        val isFromFtpLibrary = generateSequence(throwable) { it.cause }
+            .any { t -> t.stackTrace.any { frame -> frame.className.startsWith("org.apache.ftpserver") || frame.className.startsWith("org.apache.mina") } }
+        if (isFromFtpLibrary) {
+            android.util.Log.e("EmbeddedFtpServer", "Caught (non-fatal) exception on FTP worker thread '${thread.name}' — dropping this connection instead of the whole app", throwable)
+        } else {
+            previousUncaughtExceptionHandler?.uncaughtException(thread, throwable)
+                ?: android.os.Process.killProcess(android.os.Process.myPid())
+        }
+    }
+
     fun start(
         port: Int = 1524,
         password: String = "",
@@ -47,6 +66,9 @@ class EmbeddedFtpServer @Inject constructor() {
     ): Boolean {
         if (isRunning) return true
 
+        previousUncaughtExceptionHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler(ftpUncaughtExceptionHandler)
+
         return try {
             val serverFactory = FtpServerFactory()
 
@@ -60,19 +82,21 @@ class EmbeddedFtpServer @Inject constructor() {
                 // across this pool's worker threads when encoding responses (e.g. "227 Entering
                 // Passive Mode ..." for PASV, or STOR's own reply). CharsetEncoder is NOT
                 // thread-safe, so >1 thread means two connections (or parallel data-connection
-                // requests from one client) can encode a response at the same time, corrupt the
-                // shared encoder's internal state, and crash with a CoderMalfunctionError /
-                // IllegalArgumentException on whatever MINA worker thread hit it — which Android's
-                // default uncaught-exception handler treats as fatal for the whole app, killing it
-                // mid-transfer. Raising this to 4 was tried before to let several connections make
-                // real progress in parallel; it only narrowed the race's window, not eliminated it,
-                // and it reproduced again during a real transfer. Back to 1 to fully serialize
-                // every command (control AND data) through this pool, removing the race outright —
-                // the tradeoff is multiple simultaneous transfers queue instead of running in
-                // parallel, but a slower transfer beats a crashed app. See the UncaughtExceptionHandler
-                // set on this pool's thread factory below for defense in depth if this library
-                // finds another way to throw from a worker thread.
-                maxThreads = 1
+                // requests from one client) can encode a response at the same time and corrupt the
+                // shared encoder's internal state. maxThreads=1 (tried right before this) avoids
+                // that race by fully serializing every command through this one pool — but that
+                // pool ALSO runs each command's own handling, including STOR/RETR's file-copy loop,
+                // not just response encoding. With only 1 thread, any other command the client
+                // sends while a transfer is in progress (many clients poll/refresh during a
+                // transfer) sits blocked until the transfer finishes, and can hit the CLIENT's own
+                // timeout waiting — trading the crash for "connection times out mid-transfer".
+                // Back to a real thread pool so commands can actually run concurrently; the
+                // encoder race this used to risk is now caught (not fatal) by the
+                // UncaughtExceptionHandler installed in start(), below — it targets exactly
+                // exceptions from org.apache.ftpserver/org.apache.mina, dropping just that one
+                // connection instead of the whole app, while genuine app bugs elsewhere still
+                // crash normally.
+                maxThreads = 4
                 isAnonymousLoginEnabled = true
             }
             serverFactory.connectionConfig = connectionConfigFactory.createConnectionConfig()
@@ -109,6 +133,7 @@ class EmbeddedFtpServer @Inject constructor() {
         } catch (e: Exception) {
             e.printStackTrace()
             isRunning = false
+            Thread.setDefaultUncaughtExceptionHandler(previousUncaughtExceptionHandler)
             false
         }
     }
@@ -118,6 +143,7 @@ class EmbeddedFtpServer @Inject constructor() {
             server?.stop()
             server = null
             isRunning = false
+            Thread.setDefaultUncaughtExceptionHandler(previousUncaughtExceptionHandler)
         } catch (e: Exception) {
             e.printStackTrace()
         }
