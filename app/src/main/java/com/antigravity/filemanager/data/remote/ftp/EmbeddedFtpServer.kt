@@ -56,24 +56,23 @@ class EmbeddedFtpServer @Inject constructor() {
                 maxAnonymousLogins = 100
                 maxLoginFailures = 100
                 loginFailureDelay = 0
-                // Trade-off, not a free perf knob: apache-ftpserver 1.2.0 (unmaintained since
-                // 2011) shares a single CharsetEncoder across this pool's worker threads when
-                // encoding responses (e.g. "227 Entering Passive Mode ..." for PASV).
-                // CharsetEncoder is NOT thread-safe, so >1 thread means two connections (or
-                // parallel data-connection requests from one client) can encode a response at the
-                // same time, corrupt the shared encoder's internal state, and trigger a native
-                // ICU NullPointerException that JNI escalates into an uncatchable process abort
-                // (SIGABRT) — killing the app mid-transfer. This pool ALSO runs each command's own
-                // handling (including STOR/RETR's actual file-copy loop, not just response
-                // encoding) — maxThreads=1 fully serializes that too, so a client uploading/
-                // downloading several files at once (common for FTP clients with a transfer queue)
-                // has every connection but the active one sit idle waiting for a turn, and can hit
-                // its own client-side timeout waiting — "server says active, still times out".
-                // Raised to 4 to let a few connections make real progress in parallel — this
-                // narrows the crash race's window but does not eliminate it (still shared, still
-                // not thread-safe, just less contended). If SIGABRT reproduces again, drop back to
-                // 1 and have the client limit itself to one simultaneous transfer instead.
-                maxThreads = 4
+                // apache-ftpserver 1.2.0 (unmaintained since 2011) shares a single CharsetEncoder
+                // across this pool's worker threads when encoding responses (e.g. "227 Entering
+                // Passive Mode ..." for PASV, or STOR's own reply). CharsetEncoder is NOT
+                // thread-safe, so >1 thread means two connections (or parallel data-connection
+                // requests from one client) can encode a response at the same time, corrupt the
+                // shared encoder's internal state, and crash with a CoderMalfunctionError /
+                // IllegalArgumentException on whatever MINA worker thread hit it — which Android's
+                // default uncaught-exception handler treats as fatal for the whole app, killing it
+                // mid-transfer. Raising this to 4 was tried before to let several connections make
+                // real progress in parallel; it only narrowed the race's window, not eliminated it,
+                // and it reproduced again during a real transfer. Back to 1 to fully serialize
+                // every command (control AND data) through this pool, removing the race outright —
+                // the tradeoff is multiple simultaneous transfers queue instead of running in
+                // parallel, but a slower transfer beats a crashed app. See the UncaughtExceptionHandler
+                // set on this pool's thread factory below for defense in depth if this library
+                // finds another way to throw from a worker thread.
+                maxThreads = 1
                 isAnonymousLoginEnabled = true
             }
             serverFactory.connectionConfig = connectionConfigFactory.createConnectionConfig()
