@@ -749,7 +749,21 @@ class CloudManager @Inject constructor(
                         } else {
                             account
                         }
-                        val parentHandle = if (remoteTargetDir == "/" || remoteTargetDir.isBlank()) null else folderIdCache[remoteTargetDir] ?: remoteTargetDir
+                        // folderIdCache is only populated by actually listing/visiting a folder in
+                        // this process — copying straight into a MEGA folder without having
+                        // browsed into it first this session (a cold cache) used to fall straight
+                        // back to the raw display-path STRING as the "parentHandle", which MEGA's
+                        // API can't resolve to a real node — the upload command then had nothing
+                        // valid to attach to and just hung until it timed out. Every other MEGA
+                        // path resolution (listCloudFiles above, resolveHandleForDisplayPath's own
+                        // callers) already falls back to walking the real node tree instead; this
+                        // was the one spot that didn't, which is exactly why a manual refresh
+                        // (which populates folderIdCache via a fresh listing) made the retry work.
+                        val parentHandle = if (remoteTargetDir == "/" || remoteTargetDir.isBlank()) {
+                            null
+                        } else {
+                            folderIdCache[remoteTargetDir] ?: megaApi.resolveHandleForDisplayPath(effectiveAccount, remoteTargetDir) ?: remoteTargetDir
+                        }
                         val megaRes = megaApi.uploadFile(effectiveAccount, srcFile, parentHandle, onProgress)
                         if (megaRes.isSuccess) {
                             remoteFileId = megaRes.getOrNull()?.id ?: ""

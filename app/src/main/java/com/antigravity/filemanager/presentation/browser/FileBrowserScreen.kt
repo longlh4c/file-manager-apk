@@ -57,6 +57,19 @@ fun FileBrowserScreen(
     var showSortDialog by remember { mutableStateOf(false) }
     val viewMode = uiState.viewMode
 
+    // Shared across the GRID/LIST/DETAILED_LIST branches below so switching view mode doesn't
+    // reset scroll, but a real folder navigation does. Without this, opening a folder kept
+    // whatever scroll offset was left over from the last time this same LazyColumn/Grid instance
+    // scrolled — most noticeable right after pasting a file that sorts to the top: the folder
+    // reopened already scrolled past it, looking like the paste hadn't happened until manually
+    // scrolled up.
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+    LaunchedEffect(uiState.currentPath) {
+        listState.scrollToItem(0)
+        gridState.scrollToItem(0)
+    }
+
     LaunchedEffect(uiState.toastMessage) {
         uiState.toastMessage?.let {
             Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
@@ -581,6 +594,7 @@ fun FileBrowserScreen(
                         // narrow phone gets fewer, rather than the same fixed count stretched or
                         // squeezed on every device.
                         columns = GridCells.Adaptive(minSize = 100.dp),
+                        state = gridState,
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(horizontal = 6.dp, vertical = 6.dp),
@@ -611,7 +625,7 @@ fun FileBrowserScreen(
                     }
                 }
                 ViewMode.DETAILED_LIST -> {
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         items(filteredFiles, key = { it.path }) { file ->
                             FileDetailedListItem(
                                 file = file,
@@ -639,7 +653,7 @@ fun FileBrowserScreen(
                 }
                 else -> {
                     // Standard List
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         items(filteredFiles, key = { it.path }) { file ->
                             FileListItem(
                                 file = file,
