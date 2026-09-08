@@ -197,8 +197,16 @@ class CloudExplorerViewModel @Inject constructor(
                 when (event) {
                     is com.antigravity.filemanager.data.local.cache.FolderCacheManager.CloudFolderEvent.FilesAdded -> {
                         val existingNames = _uiState.value.files.map { it.name }.toSet()
-                        val merged = _uiState.value.files + event.files.filter { it.name !in existingNames }
-                        _uiState.value = _uiState.value.copy(files = sortCloudFiles(merged, _uiState.value.sortOption))
+                        val newFiles = event.files.filter { it.name !in existingNames }
+                        val merged = _uiState.value.files + newFiles
+                        // Bumps folderOpenSeq too (when something genuinely new was spliced in) so
+                        // CloudExplorerScreen's scroll-to-top effect fires here as well — otherwise
+                        // a file copied in from elsewhere while this folder was already open landed
+                        // wherever it sorted to without ever being scrolled into view.
+                        _uiState.value = _uiState.value.copy(
+                            files = sortCloudFiles(merged, _uiState.value.sortOption),
+                            folderOpenSeq = if (newFiles.isNotEmpty()) _uiState.value.folderOpenSeq + 1 else _uiState.value.folderOpenSeq
+                        )
                     }
                     is com.antigravity.filemanager.data.local.cache.FolderCacheManager.CloudFolderEvent.FilesRemoved -> {
                         _uiState.value = _uiState.value.copy(files = _uiState.value.files.filterNot { it.path in event.removedPaths })

@@ -152,7 +152,16 @@ class CategoriesViewModel @Inject constructor(
                     val filtered = filterFilesForCategory(allFiles)
                     folderCacheManager.putCategorySubfolder(categoryType, subfolderPath, sort, hidden, filtered)
                     if (_uiState.value.currentSubfolderPath == subfolderPath) {
-                        _uiState.value = _uiState.value.copy(subfolderFiles = filtered)
+                        // A genuinely new file (not just an existing one being modified/removed)
+                        // bumps folderOpenSeq too, so MediaCategoriesScreen's scroll-to-top effect
+                        // fires here as well — otherwise a file created while this folder was
+                        // already open (e.g. taking a photo, a download finishing) landed wherever
+                        // it sorted to without ever being scrolled into view.
+                        val isNewFileAdded = filtered.size > _uiState.value.subfolderFiles.size
+                        _uiState.value = _uiState.value.copy(
+                            subfolderFiles = filtered,
+                            folderOpenSeq = if (isNewFileAdded) _uiState.value.folderOpenSeq + 1 else _uiState.value.folderOpenSeq
+                        )
                     }
                 } else {
                     val folders = mediaUseCase.getFolders(categoryType, sort)

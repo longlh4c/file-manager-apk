@@ -314,7 +314,16 @@ class FileBrowserViewModel @Inject constructor(
                 val files = fileOperationsUseCase.getFiles(path, sort, showHidden = hidden)
                 folderCacheManager.putLocalFolder(path, sort, hidden, files)
                 if (_uiState.value.currentPath == path) {
-                    _uiState.value = _uiState.value.copy(files = files)
+                    // A genuinely new file (not just an existing one being modified/removed) bumps
+                    // folderOpenSeq too, so FileBrowserScreen's scroll-to-top effect fires here as
+                    // well — otherwise a file created while this folder was already open (another
+                    // app writing here, a download finishing) landed wherever it sorted to without
+                    // ever being scrolled into view.
+                    val isNewFileAdded = files.size > _uiState.value.files.size
+                    _uiState.value = _uiState.value.copy(
+                        files = files,
+                        folderOpenSeq = if (isNewFileAdded) _uiState.value.folderOpenSeq + 1 else _uiState.value.folderOpenSeq
+                    )
                 }
             }
         }
