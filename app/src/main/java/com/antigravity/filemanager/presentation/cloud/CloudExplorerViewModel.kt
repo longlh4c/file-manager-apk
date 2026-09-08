@@ -355,7 +355,16 @@ class CloudExplorerViewModel @Inject constructor(
                         files = sortedFiles,
                         pathSegments = segments,
                         selectedPaths = emptySet(),
-                        isSelectionMode = false
+                        isSelectionMode = false,
+                        // Bumped again here, not just at the top of loadAccountAndFiles — on the
+                        // very first visit to a folder (no cache yet), `files` still held the
+                        // PREVIOUS folder's stale list at that point (the no-cache branch above
+                        // never touches `files`), so the scroll-to-top effect fired against the
+                        // wrong list. The real content for THIS folder only lands here, a moment
+                        // later, with no bump of its own. Reopening the same folder a second time
+                        // worked because by then it was cached, so the earlier bump already had
+                        // the right data.
+                        folderOpenSeq = _uiState.value.folderOpenSeq + 1
                     )
 
                     // Trigger background asynchronous folder item counts; thumbnails are fetched

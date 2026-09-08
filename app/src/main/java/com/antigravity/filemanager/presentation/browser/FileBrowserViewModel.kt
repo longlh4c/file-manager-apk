@@ -287,7 +287,15 @@ class FileBrowserViewModel @Inject constructor(
 
             _uiState.value = _uiState.value.copy(
                 isLoading = false,
-                files = files
+                files = files,
+                // Bumped again here, not just at the top of loadDirectory — on the very first
+                // visit to a folder (no fresh cache yet), `files` still held the PREVIOUS folder's
+                // stale list at that point (the no-cache branch above never touches `files`), so
+                // the scroll-to-top effect fired against the wrong list. The real content for THIS
+                // folder only lands here, a moment later, with no bump of its own, so the effect
+                // never refired for it. Reopening the same folder a second time worked because by
+                // then it was cached, so the earlier bump already had the right data.
+                folderOpenSeq = _uiState.value.folderOpenSeq + 1
             )
 
             watchDirectory(path)

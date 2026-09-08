@@ -303,7 +303,17 @@ class CategoriesViewModel @Inject constructor(
             folderCacheManager.putCategorySubfolder(categoryType, folderPath, savedSort, savedHidden, filteredFiles)
             _uiState.value = _uiState.value.copy(
                 isLoading = false,
-                subfolderFiles = filteredFiles
+                subfolderFiles = filteredFiles,
+                // Bumped again here, not just at the optimistic phase above — on the very first
+                // visit to a folder (no cache yet), that first bump fired the scroll-to-top effect
+                // while subfolderFiles still held the PREVIOUS folder's stale list (this folder's
+                // own cache was null, so the "don't blank the list" fallback kept whatever was
+                // already on screen). The real content for THIS folder only lands here, a moment
+                // later, with no bump of its own — so the effect never refired for it, and the
+                // scroll reset that already happened was against the wrong list. Reopening the
+                // same folder a second time worked because by then it was cached, so the single
+                // bump in the optimistic phase above already had the right data.
+                folderOpenSeq = _uiState.value.folderOpenSeq + 1
             )
         }
     }
