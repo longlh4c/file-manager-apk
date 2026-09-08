@@ -30,6 +30,13 @@ class FtpServerService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var screenWakeLock: PowerManager.WakeLock? = null
+    // Neither wake lock above keeps the WiFi radio itself awake — Android independently puts WiFi
+    // into a low-power/sleep state once the screen turns off or the app is backgrounded, unless
+    // something holds a WifiLock. Without one, the process (and this foreground service) keeps
+    // running fine, but incoming packets on the FTP listening socket get delayed/dropped by the
+    // radio itself — exactly "service says running, but switching to another app drops the
+    // connection". WIFI_MODE_FULL_HIGH_PERF keeps it fully awake for as long as this is held.
+    private var wifiLock: WifiManager.WifiLock? = null
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     companion object {
@@ -38,7 +45,6 @@ class FtpServerService : Service() {
         const val EXTRA_PORT = "EXTRA_PORT"
         const val EXTRA_PASSWORD = "EXTRA_PASSWORD"
         const val EXTRA_RANDOM_PASS = "EXTRA_RANDOM_PASS"
-        const val EXTRA_SHOW_HIDDEN = "EXTRA_SHOW_HIDDEN"
         const val NOTIFICATION_CHANNEL_ID = "ftp_server_channel"
         const val NOTIFICATION_ID = 1524
 
@@ -58,6 +64,9 @@ class FtpServerService : Service() {
             PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
             "FileManager::FtpScreenWakeLock"
         )
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        @Suppress("DEPRECATION")
+        wifiLock = wifiManager?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "FileManager::FtpWifiLock")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -66,9 +75,8 @@ class FtpServerService : Service() {
                 val port = intent.getIntExtra(EXTRA_PORT, 1524)
                 val randomPass = intent.getBooleanExtra(EXTRA_RANDOM_PASS, false)
                 val password = if (randomPass) generateRandomPassword() else intent.getStringExtra(EXTRA_PASSWORD) ?: ""
-                val showHidden = intent.getBooleanExtra(EXTRA_SHOW_HIDDEN, false)
 
-                startServer(port, password, randomPass, showHidden)
+                startServer(port, password, randomPass)
             }
             ACTION_STOP -> {
                 stopServer()
@@ -77,20 +85,22 @@ class FtpServerService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun startServer(port: Int, pass: String, random: Boolean, showHidden: Boolean) {
+    private fun startServer(port: Int, pass: String, random: Boolean) {
         serviceScope.launch {
             val ip = getLocalIpAddress()
-            val success = ftpServer.start(port, pass, showHidden, externalIpAddress = ip)
+            val success = ftpServer.start(port, pass, externalIpAddress = ip)
             if (success) {
                 wakeLock?.acquire(24 * 60 * 60 * 1000L) // 24h max
                 screenWakeLock?.acquire(24 * 60 * 60 * 1000L) // keep screen from timing out while FTP is on
+                if (wifiLock?.isHeld != true) {
+                    wifiLock?.acquire()
+                }
                 _ftpState.value = FtpServerState(
                     isRunning = true,
                     ipAddress = ip,
                     port = port,
                     password = pass,
-                    isRandomPassword = random,
-                    showHiddenFiles = showHidden
+                    isRandomPassword = random
                 )
                 startForegroundNotification("ftp://$ip:$port")
             } else {
@@ -108,6 +118,9 @@ class FtpServerService : Service() {
             }
             if (screenWakeLock?.isHeld == true) {
                 screenWakeLock?.release()
+            }
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
             }
             _ftpState.value = _ftpState.value.copy(isRunning = false)
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -226,6 +239,7 @@ class FtpServerService : Service() {
         ftpServer.stop()
         if (wakeLock?.isHeld == true) wakeLock?.release()
         if (screenWakeLock?.isHeld == true) screenWakeLock?.release()
+        if (wifiLock?.isHeld == true) wifiLock?.release()
         _ftpState.value = _ftpState.value.copy(isRunning = false)
         serviceScope.cancel()
         super.onDestroy()

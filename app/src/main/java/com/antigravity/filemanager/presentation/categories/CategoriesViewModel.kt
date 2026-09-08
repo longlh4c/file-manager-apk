@@ -30,12 +30,6 @@ import javax.inject.Inject
 
 data class CategoryUiState(
     val categoryType: CategoryType = CategoryType.IMAGES,
-    // Bumped on every openSubfolder() call, including re-opening the exact same folder — see
-    // MediaCategoriesScreen's LaunchedEffect, which resets scroll on this instead of on
-    // currentSubfolderPath: keying on the path alone missed the "reopen the same folder" case
-    // (the value never actually changed), and keying on isLoading was unreliable too — a fresh
-    // cache hit returns before isLoading is ever flipped back to false, so it never toggles.
-    val folderOpenSeq: Int = 0,
     val isLoading: Boolean = true,
     val folders: List<MediaFolder> = emptyList(),
     val folderHistory: List<Pair<String, String>> = emptyList(), // Stack of (path, name)
@@ -152,16 +146,7 @@ class CategoriesViewModel @Inject constructor(
                     val filtered = filterFilesForCategory(allFiles)
                     folderCacheManager.putCategorySubfolder(categoryType, subfolderPath, sort, hidden, filtered)
                     if (_uiState.value.currentSubfolderPath == subfolderPath) {
-                        // A genuinely new file (not just an existing one being modified/removed)
-                        // bumps folderOpenSeq too, so MediaCategoriesScreen's scroll-to-top effect
-                        // fires here as well — otherwise a file created while this folder was
-                        // already open (e.g. taking a photo, a download finishing) landed wherever
-                        // it sorted to without ever being scrolled into view.
-                        val isNewFileAdded = filtered.size > _uiState.value.subfolderFiles.size
-                        _uiState.value = _uiState.value.copy(
-                            subfolderFiles = filtered,
-                            folderOpenSeq = if (isNewFileAdded) _uiState.value.folderOpenSeq + 1 else _uiState.value.folderOpenSeq
-                        )
+                        _uiState.value = _uiState.value.copy(subfolderFiles = filtered)
                     }
                 } else {
                     val folders = mediaUseCase.getFolders(categoryType, sort)
@@ -283,7 +268,6 @@ class CategoriesViewModel @Inject constructor(
             // entry does exist.
             _uiState.value = _uiState.value.copy(
                 isLoading = cached == null,
-                folderOpenSeq = _uiState.value.folderOpenSeq + 1,
                 folderHistory = history,
                 selectedPaths = emptySet(),
                 isSelectionMode = false,
@@ -303,17 +287,7 @@ class CategoriesViewModel @Inject constructor(
             folderCacheManager.putCategorySubfolder(categoryType, folderPath, savedSort, savedHidden, filteredFiles)
             _uiState.value = _uiState.value.copy(
                 isLoading = false,
-                subfolderFiles = filteredFiles,
-                // Bumped again here, not just at the optimistic phase above — on the very first
-                // visit to a folder (no cache yet), that first bump fired the scroll-to-top effect
-                // while subfolderFiles still held the PREVIOUS folder's stale list (this folder's
-                // own cache was null, so the "don't blank the list" fallback kept whatever was
-                // already on screen). The real content for THIS folder only lands here, a moment
-                // later, with no bump of its own — so the effect never refired for it, and the
-                // scroll reset that already happened was against the wrong list. Reopening the
-                // same folder a second time worked because by then it was cached, so the single
-                // bump in the optimistic phase above already had the right data.
-                folderOpenSeq = _uiState.value.folderOpenSeq + 1
+                subfolderFiles = filteredFiles
             )
         }
     }

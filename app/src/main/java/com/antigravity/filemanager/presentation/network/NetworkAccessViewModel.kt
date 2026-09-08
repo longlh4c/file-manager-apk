@@ -16,8 +16,7 @@ data class NetworkAccessUiState(
     val isRunning: Boolean = false,
     val ipAddress: String? = null,
     val port: Int = 1524,
-    val password: String = "",
-    val showHiddenFiles: Boolean = false
+    val password: String = ""
 ) {
     val accessUrl: String
         get() = if (ipAddress != null) "ftp://$ipAddress:$port" else ""
@@ -41,11 +40,6 @@ class NetworkAccessViewModel @Inject constructor(
         viewModelScope.launch {
             preferenceManager.ftpPasswordFlow.collectLatest { pass ->
                 _uiState.value = _uiState.value.copy(password = pass)
-            }
-        }
-        viewModelScope.launch {
-            preferenceManager.ftpShowHiddenFlow.collectLatest { hidden ->
-                _uiState.value = _uiState.value.copy(showHiddenFiles = hidden)
             }
         }
         viewModelScope.launch {
@@ -73,13 +67,6 @@ class NetworkAccessViewModel @Inject constructor(
         }
     }
 
-    fun onShowHiddenToggled(checked: Boolean) {
-        _uiState.value = _uiState.value.copy(showHiddenFiles = checked)
-        viewModelScope.launch {
-            saveConfig()
-        }
-    }
-
     fun toggleService() {
         viewModelScope.launch {
             val state = _uiState.value
@@ -89,8 +76,7 @@ class NetworkAccessViewModel @Inject constructor(
                 ftpServerUseCase.start(
                     port = state.port,
                     pass = state.password,
-                    random = false,
-                    showHidden = state.showHiddenFiles
+                    random = false
                 )
             }
         }
@@ -98,6 +84,6 @@ class NetworkAccessViewModel @Inject constructor(
 
     private suspend fun saveConfig() {
         val s = _uiState.value
-        preferenceManager.saveFtpConfig(s.port, s.password, false, s.showHiddenFiles)
+        preferenceManager.saveFtpConfig(s.port, s.password, false)
     }
 }

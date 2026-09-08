@@ -60,15 +60,6 @@ fun CloudExplorerScreen(
     var showSortMenu by remember { mutableStateOf(false) }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
 
-    // Reset scroll on real folder navigation (not on view-mode-less this screen's single list
-    // itself re-rendering) — otherwise reopening a folder kept whatever scroll offset the same
-    // LazyColumn instance was left at, most noticeable right after pasting a file that sorts to
-    // the top: reopening the folder still showed it scrolled past that file until scrolled up.
-    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(uiState.folderOpenSeq) {
-        listState.scrollToItem(0)
-    }
-
     if (showCreateFolderDialog) {
         com.antigravity.filemanager.presentation.components.TextInputDialog(
             title = "New Folder",
@@ -637,7 +628,7 @@ fun CloudExplorerScreen(
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                             )
                         }
-                        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().weight(1f)) {
+                        LazyColumn(modifier = Modifier.fillMaxSize().weight(1f)) {
                         items(filteredFiles, key = { it.id }) { file ->
                             FileListItem(
                                 file = file,

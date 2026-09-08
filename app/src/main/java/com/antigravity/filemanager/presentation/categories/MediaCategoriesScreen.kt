@@ -60,18 +60,6 @@ fun MediaCategoriesScreen(
     var showSortDialog by remember { mutableStateOf(false) }
     val viewMode = uiState.viewMode
 
-    // Shared by the subfolder GRID/LIST/DETAILED_LIST branches below so switching view mode
-    // doesn't reset scroll, but opening a (sub)folder does — otherwise reopening a folder kept
-    // whatever scroll offset the same LazyColumn/Grid instance was left at, which was most
-    // noticeable right after pasting a file that sorts to the top: reopening the folder still
-    // showed it scrolled past that file until manually scrolled up.
-    val subfolderListState = androidx.compose.foundation.lazy.rememberLazyListState()
-    val subfolderGridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
-    LaunchedEffect(uiState.folderOpenSeq) {
-        subfolderListState.scrollToItem(0)
-        subfolderGridState.scrollToItem(0)
-    }
-
     val searchFocusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
     LaunchedEffect(uiState.isSearchActive) {
@@ -564,7 +552,6 @@ fun MediaCategoriesScreen(
                                 // of a hardcoded number — see FileBrowserScreen's identical grid
                                 // for the full rationale.
                                 columns = GridCells.Adaptive(minSize = 100.dp),
-                                state = subfolderGridState,
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .padding(horizontal = 4.dp, vertical = 6.dp),
@@ -595,7 +582,7 @@ fun MediaCategoriesScreen(
                             }
                         }
                         ViewMode.DETAILED_LIST -> {
-                            LazyColumn(state = subfolderListState, modifier = Modifier.fillMaxSize()) {
+                            LazyColumn(modifier = Modifier.fillMaxSize()) {
                                 items(filteredFiles, key = { it.path }) { file ->
                                     FileDetailedListItem(
                                         file = file,
@@ -631,7 +618,7 @@ fun MediaCategoriesScreen(
                                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                                     )
                                 }
-                                LazyColumn(state = subfolderListState, modifier = Modifier.fillMaxSize().weight(1f)) {
+                                LazyColumn(modifier = Modifier.fillMaxSize().weight(1f)) {
                                     items(filteredFiles, key = { it.path }) { file ->
                                         FileListItem(
                                             file = file,

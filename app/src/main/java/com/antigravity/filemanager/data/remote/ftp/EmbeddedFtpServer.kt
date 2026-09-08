@@ -50,7 +50,6 @@ class EmbeddedFtpServer @Inject constructor() {
     fun start(
         port: Int = 1524,
         password: String = "",
-        showHidden: Boolean = false,
         // The LAN IP FtpServerService already computes for the "ftp://ip:port" it shows the user
         // — reused here for the exact same reason it needed getLocalIpAddress() in the first
         // place: MINA's default PASV configuration announces whatever local address the JVM's

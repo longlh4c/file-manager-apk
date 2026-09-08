@@ -307,8 +307,7 @@ data class FtpServerState(
     val ipAddress: String? = null,
     val port: Int = 1524,
     val password: String = "",
-    val isRandomPassword: Boolean = false,
-    val showHiddenFiles: Boolean = false
+    val isRandomPassword: Boolean = false
 ) {
     val accessUrl: String
         get() = if (ipAddress != null) "ftp://$ipAddress:$port" else ""

@@ -575,15 +575,13 @@ class FtpServerRepositoryImpl @Inject constructor(
     override suspend fun startFtpServer(
         port: Int,
         password: String,
-        isRandomPassword: Boolean,
-        showHidden: Boolean
+        isRandomPassword: Boolean
     ): Result<Unit> {
         val intent = Intent(context, FtpServerService::class.java).apply {
             action = FtpServerService.ACTION_START
             putExtra(FtpServerService.EXTRA_PORT, port)
             putExtra(FtpServerService.EXTRA_PASSWORD, password)
             putExtra(FtpServerService.EXTRA_RANDOM_PASS, isRandomPassword)
-            putExtra(FtpServerService.EXTRA_SHOW_HIDDEN, showHidden)
         }
         context.startService(intent)
         return Result.success(Unit)
@@ -600,10 +598,9 @@ class FtpServerRepositoryImpl @Inject constructor(
     override suspend fun updateConfig(
         port: Int,
         password: String,
-        isRandomPassword: Boolean,
-        showHidden: Boolean
+        isRandomPassword: Boolean
     ) {
-        prefManager.saveFtpConfig(port, password, isRandomPassword, showHidden)
+        prefManager.saveFtpConfig(port, password, isRandomPassword)
     }
 }
 

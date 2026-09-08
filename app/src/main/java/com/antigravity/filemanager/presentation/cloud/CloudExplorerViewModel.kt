@@ -37,12 +37,6 @@ data class CloudExplorerUiState(
     val accountId: String = "",
     val account: CloudAccount? = null,
     val title: String = "Cloud Storage",
-    // Bumped on every loadAccountAndFiles() call, including re-opening the exact same folder —
-    // see CloudExplorerScreen's LaunchedEffect, which resets scroll on this instead of on
-    // currentPath: keying on the path alone missed the "reopen the same folder" case (the value
-    // never actually changed), and keying on isLoading was unreliable too — a folder cache hit
-    // sets isLoading straight to false without ever flipping it true first, so it never toggles.
-    val folderOpenSeq: Int = 0,
     val currentPath: String = "/",
     val pathSegments: List<String> = listOf("Root"),
     val pathStack: List<Pair<String, String>> = listOf("Root" to "/"),
@@ -197,16 +191,8 @@ class CloudExplorerViewModel @Inject constructor(
                 when (event) {
                     is com.antigravity.filemanager.data.local.cache.FolderCacheManager.CloudFolderEvent.FilesAdded -> {
                         val existingNames = _uiState.value.files.map { it.name }.toSet()
-                        val newFiles = event.files.filter { it.name !in existingNames }
-                        val merged = _uiState.value.files + newFiles
-                        // Bumps folderOpenSeq too (when something genuinely new was spliced in) so
-                        // CloudExplorerScreen's scroll-to-top effect fires here as well — otherwise
-                        // a file copied in from elsewhere while this folder was already open landed
-                        // wherever it sorted to without ever being scrolled into view.
-                        _uiState.value = _uiState.value.copy(
-                            files = sortCloudFiles(merged, _uiState.value.sortOption),
-                            folderOpenSeq = if (newFiles.isNotEmpty()) _uiState.value.folderOpenSeq + 1 else _uiState.value.folderOpenSeq
-                        )
+                        val merged = _uiState.value.files + event.files.filter { it.name !in existingNames }
+                        _uiState.value = _uiState.value.copy(files = sortCloudFiles(merged, _uiState.value.sortOption))
                     }
                     is com.antigravity.filemanager.data.local.cache.FolderCacheManager.CloudFolderEvent.FilesRemoved -> {
                         _uiState.value = _uiState.value.copy(files = _uiState.value.files.filterNot { it.path in event.removedPaths })
@@ -273,7 +259,6 @@ class CloudExplorerViewModel @Inject constructor(
         // showed up as folders randomly appearing empty/missing: A's stale (or even correct-but-
         // for-the-wrong-path) result landing after B's, overwriting what should've stayed on screen.
         activeLoadJob?.cancel()
-        _uiState.value = _uiState.value.copy(folderOpenSeq = _uiState.value.folderOpenSeq + 1)
         activeLoadJob = viewModelScope.launch {
             val segments = stack.map { it.first }
             // Sort is remembered per folder (keyed by account + path), same as local file browsing.
@@ -355,16 +340,7 @@ class CloudExplorerViewModel @Inject constructor(
                         files = sortedFiles,
                         pathSegments = segments,
                         selectedPaths = emptySet(),
-                        isSelectionMode = false,
-                        // Bumped again here, not just at the top of loadAccountAndFiles — on the
-                        // very first visit to a folder (no cache yet), `files` still held the
-                        // PREVIOUS folder's stale list at that point (the no-cache branch above
-                        // never touches `files`), so the scroll-to-top effect fired against the
-                        // wrong list. The real content for THIS folder only lands here, a moment
-                        // later, with no bump of its own. Reopening the same folder a second time
-                        // worked because by then it was cached, so the earlier bump already had
-                        // the right data.
-                        folderOpenSeq = _uiState.value.folderOpenSeq + 1
+                        isSelectionMode = false
                     )
 
                     // Trigger background asynchronous folder item counts; thumbnails are fetched

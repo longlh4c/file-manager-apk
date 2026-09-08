@@ -142,11 +142,11 @@ class FtpServerUseCase @Inject constructor(
 ) {
     fun observeState(): Flow<FtpServerState> = ftpRepository.observeFtpServerState()
     suspend fun getState(): FtpServerState = ftpRepository.getFtpServerState()
-    suspend fun start(port: Int, pass: String, random: Boolean, showHidden: Boolean): Result<Unit> =
-        ftpRepository.startFtpServer(port, pass, random, showHidden)
+    suspend fun start(port: Int, pass: String, random: Boolean): Result<Unit> =
+        ftpRepository.startFtpServer(port, pass, random)
     suspend fun stop(): Result<Unit> = ftpRepository.stopFtpServer()
-    suspend fun saveConfig(port: Int, pass: String, random: Boolean, showHidden: Boolean) =
-        ftpRepository.updateConfig(port, pass, random, showHidden)
+    suspend fun saveConfig(port: Int, pass: String, random: Boolean) =
+        ftpRepository.updateConfig(port, pass, random)
 }
 
 class CloudStorageUseCase @Inject constructor(

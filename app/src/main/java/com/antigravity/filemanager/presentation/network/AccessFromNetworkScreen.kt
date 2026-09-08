@@ -134,33 +134,6 @@ fun AccessFromNetworkScreen(
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Show hidden files checkbox row
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { viewModel.onShowHiddenToggled(!uiState.showHiddenFiles) }
-                            .padding(vertical = 6.dp)
-                    ) {
-                        Spacer(modifier = Modifier.width(48.dp))
-                        Checkbox(
-                            checked = uiState.showHiddenFiles,
-                            onCheckedChange = { viewModel.onShowHiddenToggled(it) },
-                            colors = CheckboxDefaults.colors(
-                                checkedColor = TealPrimary,
-                                uncheckedColor = TextSecondary,
-                                checkmarkColor = PureBlack
-                            )
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Show hidden files",
-                            color = TextPrimary,
-                            fontSize = 16.sp
-                        )
-                    }
 
                     Spacer(modifier = Modifier.height(20.dp))
                     HorizontalDivider(color = Color(0xFF2E6171), thickness = 1.dp)
