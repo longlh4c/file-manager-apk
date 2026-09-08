@@ -37,6 +37,12 @@ data class CloudExplorerUiState(
     val accountId: String = "",
     val account: CloudAccount? = null,
     val title: String = "Cloud Storage",
+    // Bumped on every loadAccountAndFiles() call, including re-opening the exact same folder —
+    // see CloudExplorerScreen's LaunchedEffect, which resets scroll on this instead of on
+    // currentPath: keying on the path alone missed the "reopen the same folder" case (the value
+    // never actually changed), and keying on isLoading was unreliable too — a folder cache hit
+    // sets isLoading straight to false without ever flipping it true first, so it never toggles.
+    val folderOpenSeq: Int = 0,
     val currentPath: String = "/",
     val pathSegments: List<String> = listOf("Root"),
     val pathStack: List<Pair<String, String>> = listOf("Root" to "/"),
@@ -259,6 +265,7 @@ class CloudExplorerViewModel @Inject constructor(
         // showed up as folders randomly appearing empty/missing: A's stale (or even correct-but-
         // for-the-wrong-path) result landing after B's, overwriting what should've stayed on screen.
         activeLoadJob?.cancel()
+        _uiState.value = _uiState.value.copy(folderOpenSeq = _uiState.value.folderOpenSeq + 1)
         activeLoadJob = viewModelScope.launch {
             val segments = stack.map { it.first }
             // Sort is remembered per folder (keyed by account + path), same as local file browsing.

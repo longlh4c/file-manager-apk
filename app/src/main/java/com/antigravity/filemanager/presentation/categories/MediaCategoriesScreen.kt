@@ -67,7 +67,7 @@ fun MediaCategoriesScreen(
     // showed it scrolled past that file until manually scrolled up.
     val subfolderListState = androidx.compose.foundation.lazy.rememberLazyListState()
     val subfolderGridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
-    LaunchedEffect(uiState.currentSubfolderPath) {
+    LaunchedEffect(uiState.folderOpenSeq) {
         subfolderListState.scrollToItem(0)
         subfolderGridState.scrollToItem(0)
     }

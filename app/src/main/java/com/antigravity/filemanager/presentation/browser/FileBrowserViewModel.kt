@@ -35,6 +35,11 @@ import javax.inject.Inject
 
 data class FileBrowserUiState(
     val currentPath: String = "",
+    // Bumped on every loadDirectory() call, including re-opening the exact same path (e.g.
+    // navigating out and back into the same folder) — see FileBrowserScreen's LaunchedEffect,
+    // which resets scroll on this instead of on currentPath: keying on the path alone missed the
+    // "reopen the same folder" case entirely, since the key never actually changed.
+    val folderOpenSeq: Int = 0,
     val rootBoundaryPath: String = "",
     val categoryType: com.antigravity.filemanager.domain.model.CategoryType = com.antigravity.filemanager.domain.model.CategoryType.MAIN_STORAGE,
     val title: String = "Main storage",
@@ -218,7 +223,7 @@ class FileBrowserViewModel @Inject constructor(
         // isLoading=false + files=emptyList(), which briefly paints the "empty folder" icon right
         // before real content (or even cached content) replaces it. Most noticeable on a folder
         // like Downloads that's opened straight from the dashboard with nothing pre-rendered yet.
-        _uiState.value = _uiState.value.copy(isLoading = true)
+        _uiState.value = _uiState.value.copy(isLoading = true, folderOpenSeq = _uiState.value.folderOpenSeq + 1)
 
         // Navigating anywhere (including tapping a folder found via recursive search) must leave
         // search mode — otherwise this correctly loads the target folder's real contents into

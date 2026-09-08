@@ -65,7 +65,7 @@ fun FileBrowserScreen(
     // scrolled up.
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
-    LaunchedEffect(uiState.currentPath) {
+    LaunchedEffect(uiState.folderOpenSeq) {
         listState.scrollToItem(0)
         gridState.scrollToItem(0)
     }

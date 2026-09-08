@@ -65,7 +65,7 @@ fun CloudExplorerScreen(
     // LazyColumn instance was left at, most noticeable right after pasting a file that sorts to
     // the top: reopening the folder still showed it scrolled past that file until scrolled up.
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(uiState.currentPath) {
+    LaunchedEffect(uiState.folderOpenSeq) {
         listState.scrollToItem(0)
     }
 

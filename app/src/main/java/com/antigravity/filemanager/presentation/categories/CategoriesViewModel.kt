@@ -30,6 +30,12 @@ import javax.inject.Inject
 
 data class CategoryUiState(
     val categoryType: CategoryType = CategoryType.IMAGES,
+    // Bumped on every openSubfolder() call, including re-opening the exact same folder — see
+    // MediaCategoriesScreen's LaunchedEffect, which resets scroll on this instead of on
+    // currentSubfolderPath: keying on the path alone missed the "reopen the same folder" case
+    // (the value never actually changed), and keying on isLoading was unreliable too — a fresh
+    // cache hit returns before isLoading is ever flipped back to false, so it never toggles.
+    val folderOpenSeq: Int = 0,
     val isLoading: Boolean = true,
     val folders: List<MediaFolder> = emptyList(),
     val folderHistory: List<Pair<String, String>> = emptyList(), // Stack of (path, name)
@@ -268,6 +274,7 @@ class CategoriesViewModel @Inject constructor(
             // entry does exist.
             _uiState.value = _uiState.value.copy(
                 isLoading = cached == null,
+                folderOpenSeq = _uiState.value.folderOpenSeq + 1,
                 folderHistory = history,
                 selectedPaths = emptySet(),
                 isSelectionMode = false,
