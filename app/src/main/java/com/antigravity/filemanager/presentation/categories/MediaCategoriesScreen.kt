@@ -218,15 +218,43 @@ fun MediaCategoriesScreen(
 
     // A non-blank query means real (recursive, device-wide) search results from the ViewModel —
     // see CategoriesViewModel.onSearchQueryChanged — not a plain filter of whatever's already on
-    // screen. Folders don't apply here since search results are always flat files; the file list
-    // (below) switches to showing them regardless of whether you were at the category root or
-    // already inside a subfolder when you started typing.
+    // screen. The file list (below) switches to showing them regardless of whether you were at
+    // the category root or already inside a subfolder when you started typing.
     val filteredFolders = remember(uiState.folders, uiState.searchQuery) {
         if (uiState.searchQuery.isBlank()) uiState.folders else emptyList()
     }
 
-    val filteredFiles = remember(uiState.subfolderFiles, uiState.searchResults, uiState.searchQuery) {
-        if (uiState.searchQuery.isBlank()) uiState.subfolderFiles else uiState.searchResults
+    // MediaStore (what onSearchQueryChanged's device-wide search is built on) indexes individual
+    // files only — it has no notion of a folder/bucket, so a query matching a folder's own NAME
+    // (e.g. typing "Camera" at the category root) could never turn up in searchResults no matter
+    // what, even though the bucket is sitting right there in `folders`. Matched here client-side
+    // against the already-loaded bucket list instead, and folded into the same flat result list
+    // as synthetic directory entries — FileListItem's existing isDirectory branch already opens
+    // them via openSubfolder(), same as tapping a normal folder card would. Root-only: `folders`
+    // isn't meaningfully populated once inside a subfolder (this category's buckets are already
+    // one level deep — there's no further nesting to search folder names within).
+    val matchingFolders = remember(uiState.folders, uiState.searchQuery, uiState.folderHistory) {
+        if (uiState.searchQuery.isBlank() || uiState.folderHistory.isNotEmpty()) {
+            emptyList()
+        } else {
+            uiState.folders.filter { it.name.contains(uiState.searchQuery, ignoreCase = true) }
+                .map { folder ->
+                    FileItem(
+                        id = folder.path,
+                        name = folder.name,
+                        path = folder.path,
+                        size = folder.totalSizeBytes,
+                        lastModified = folder.lastModified,
+                        isDirectory = true,
+                        extension = "",
+                        thumbnailUri = folder.latestThumbnailUri
+                    )
+                }
+        }
+    }
+
+    val filteredFiles = remember(uiState.subfolderFiles, uiState.searchResults, uiState.searchQuery, matchingFolders) {
+        if (uiState.searchQuery.isBlank()) uiState.subfolderFiles else matchingFolders + uiState.searchResults
     }
 
     Scaffold(
