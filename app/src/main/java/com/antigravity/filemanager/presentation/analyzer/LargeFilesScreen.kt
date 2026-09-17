@@ -101,10 +101,12 @@ fun LargeFilesScreen(
 
     if (showCompressDialog) {
         val parentDir = selectedPaths.firstOrNull()?.let { File(it).parent } ?: android.os.Environment.getExternalStorageDirectory().absolutePath
+        val singleSelectedName = selectedPaths.singleOrNull()?.let { path -> largeFiles.find { it.path == path }?.name }
         TextInputDialog(
             title = "Compress to Zip",
-            initialValue = "Archive.zip",
+            initialValue = com.antigravity.filemanager.presentation.components.defaultZipFileName(selectedPaths.size, singleSelectedName),
             confirmButtonText = "COMPRESS",
+            selectNameWithoutExtension = true,
             onConfirm = { zipName ->
                 viewModel.compress(selectedPaths.toList(), zipName, parentDir) {
                     selectedPaths = emptySet()

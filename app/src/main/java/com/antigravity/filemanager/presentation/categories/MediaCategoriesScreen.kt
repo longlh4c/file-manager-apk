@@ -162,10 +162,12 @@ fun MediaCategoriesScreen(
     }
 
     if (uiState.showCompressDialog) {
+        val singleSelectedName = uiState.selectedPaths.singleOrNull()?.let { path -> uiState.subfolderFiles.find { it.path == path }?.name }
         TextInputDialog(
             title = "Compress to Zip",
-            initialValue = "Archive.zip",
+            initialValue = defaultZipFileName(uiState.selectedPaths.size, singleSelectedName),
             confirmButtonText = "COMPRESS",
+            selectNameWithoutExtension = true,
             onConfirm = { viewModel.compressSelected(it) },
             onDismiss = { viewModel.setShowCompressDialog(false) }
         )

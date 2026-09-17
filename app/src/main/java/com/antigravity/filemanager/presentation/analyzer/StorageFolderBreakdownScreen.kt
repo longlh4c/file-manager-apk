@@ -151,10 +151,12 @@ fun StorageFolderBreakdownScreen(
     }
 
     if (showCompressDialog) {
+        val singleSelectedName = selectedPaths.singleOrNull()?.let { path -> folderItems.find { it.path == path }?.name }
         TextInputDialog(
             title = "Compress to Zip",
-            initialValue = "Archive.zip",
+            initialValue = com.antigravity.filemanager.presentation.components.defaultZipFileName(selectedPaths.size, singleSelectedName),
             confirmButtonText = "COMPRESS",
+            selectNameWithoutExtension = true,
             onConfirm = { zipName ->
                 viewModel.compress(selectedPaths.toList(), zipName, currentPath) {
                     selectedPaths = emptySet()
