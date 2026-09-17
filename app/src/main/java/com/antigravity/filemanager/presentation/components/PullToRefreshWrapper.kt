@@ -10,23 +10,47 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import com.antigravity.filemanager.presentation.theme.DarkCard
+import com.antigravity.filemanager.presentation.theme.TealPrimary
 import kotlinx.coroutines.delay
 
-// Wraps content with pull-to-refresh, auto-hiding the spinner after a short delay.
+// Wraps content with pull-to-refresh, supporting both external isRefreshing control
+// and self-managed delay-based pull gestures.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PullToRefreshWrapper(
     onRefresh: () -> Unit,
     modifier: Modifier = Modifier,
+    isRefreshing: Boolean? = null,
     content: @Composable BoxScope.() -> Unit
 ) {
     val state = rememberPullToRefreshState()
 
-    if (state.isRefreshing) {
-        LaunchedEffect(true) {
-            onRefresh()
-            delay(1000)
-            state.endRefresh()
+    if (isRefreshing != null) {
+        // Sync external refresh state
+        LaunchedEffect(isRefreshing) {
+            if (isRefreshing) {
+                state.startRefresh()
+            } else {
+                state.endRefresh()
+            }
+        }
+
+        // When triggered by user gesture, notify onRefresh only if not already refreshing
+        if (state.isRefreshing) {
+            LaunchedEffect(state.isRefreshing) {
+                if (!isRefreshing) {
+                    onRefresh()
+                }
+            }
+        }
+    } else {
+        if (state.isRefreshing) {
+            LaunchedEffect(true) {
+                onRefresh()
+                delay(1000)
+                state.endRefresh()
+            }
         }
     }
 
@@ -37,7 +61,9 @@ fun PullToRefreshWrapper(
         if (state.isRefreshing || state.progress > 0f) {
             PullToRefreshContainer(
                 state = state,
-                modifier = Modifier.align(Alignment.TopCenter)
+                modifier = Modifier.align(Alignment.TopCenter),
+                containerColor = DarkCard,
+                contentColor = TealPrimary
             )
         }
     }

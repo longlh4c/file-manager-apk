@@ -43,6 +43,7 @@ import coil.compose.AsyncImage
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FileSortOption
 import com.antigravity.filemanager.presentation.theme.PureBlack
+import com.antigravity.filemanager.presentation.theme.TealPrimary
 import com.antigravity.filemanager.presentation.theme.TextPrimary
 import com.antigravity.filemanager.presentation.theme.TextSecondary
 import com.antigravity.filemanager.utils.FileOpener
@@ -249,7 +250,7 @@ fun ImageViewerScreen(
                     // spinner makes it obvious something is actually happening.
                     if (isDeleting) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = Color(0xFFEF5350))
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = TealPrimary)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("Deleting…", color = Color(0xFFEF5350))
                         }
@@ -304,7 +305,7 @@ fun ImageViewerScreen(
                             }
                         ) {
                             if (isPreparingAction) {
-                                CircularProgressIndicator(modifier = Modifier.size(20.dp), color = TextPrimary, strokeWidth = 2.dp)
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp), color = TealPrimary, strokeWidth = 2.dp)
                             } else {
                                 Icon(Icons.Default.Share, contentDescription = "Share", tint = TextPrimary)
                             }
@@ -377,7 +378,7 @@ fun ImageViewerScreen(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        CircularProgressIndicator(color = TextSecondary)
+                        CircularProgressIndicator(color = TealPrimary)
                     }
                 } else {
                     ZoomableImagePage(
@@ -621,7 +622,7 @@ fun VideoPlayerScreen(
                     // spinner makes it obvious something is actually happening.
                     if (isDeleting) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = Color(0xFFEF5350))
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = TealPrimary)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("Deleting…", color = Color(0xFFEF5350))
                         }
@@ -671,7 +672,7 @@ fun VideoPlayerScreen(
                         }
                     ) {
                         if (isPreparingAction) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp), color = TextPrimary, strokeWidth = 2.dp)
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), color = TealPrimary, strokeWidth = 2.dp)
                         } else {
                             Icon(Icons.Default.Share, contentDescription = "Share", tint = TextPrimary)
                         }
@@ -744,7 +745,7 @@ fun VideoPlayerScreen(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        CircularProgressIndicator(color = TextSecondary)
+                        CircularProgressIndicator(color = TealPrimary)
                     }
                 } else if (isCurrent) {
                     val playbackUri = when (resolvedMedia) {

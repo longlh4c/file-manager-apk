@@ -551,6 +551,7 @@ fun MediaCategoriesScreen(
 
             PullToRefreshWrapper(
                 onRefresh = { viewModel.refresh() },
+                isRefreshing = uiState.isLoading,
                 modifier = Modifier.fillMaxSize()
             ) {
             if (uiState.folderHistory.isNotEmpty() || uiState.searchQuery.isNotBlank()) {
@@ -561,10 +562,6 @@ fun MediaCategoriesScreen(
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(text = "Searching…", color = TextSecondary, fontSize = 14.sp)
                         }
-                    }
-                } else if (uiState.isLoading && filteredFiles.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = TealPrimary)
                     }
                 } else if (filteredFiles.isEmpty() && !uiState.isLoading) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -695,11 +692,7 @@ fun MediaCategoriesScreen(
                     CategoryType.DOCUMENTS -> Icons.Default.Article to Color(0xFF42A5F5)
                     else -> Icons.Default.Folder to Color(0xFFFFB74D)
                 }
-                if (uiState.isLoading && filteredFolders.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = TealPrimary)
-                    }
-                } else if (filteredFolders.isEmpty() && !uiState.isLoading) {
+                if (filteredFolders.isEmpty() && !uiState.isLoading) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(text = "No folders found", color = TextSecondary, fontSize = 15.sp)
                     }
