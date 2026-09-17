@@ -292,6 +292,7 @@ class FolderCacheManager @Inject constructor(
     fun invalidateMediaFolders() {
         dashboardSummaryCache = null
         ioScope.launch { dashboardCacheFile.delete() }
+        markMediaCachesUnreconciled()
         val mediaKeys = mediaFoldersCache.keys.toList()
         mediaFoldersCache.clear()
         val keysToRemove = cacheRemoveByPrefix("docs_") + cacheRemoveByPrefix("catsub_") + mediaKeys

@@ -183,8 +183,10 @@ class CategoriesViewModel @Inject constructor(
     fun refresh() {
         val currentPath = _uiState.value.currentSubfolderPath
         if (currentPath != null) {
+            folderCacheManager.invalidateCategorySubfolder(categoryType, currentPath)
             openSubfolder(currentPath, _uiState.value.currentSubfolderName)
         } else {
+            folderCacheManager.invalidateMediaFolders()
             loadFolders()
         }
     }

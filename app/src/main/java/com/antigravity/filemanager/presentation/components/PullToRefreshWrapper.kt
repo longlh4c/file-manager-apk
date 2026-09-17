@@ -7,10 +7,14 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import com.antigravity.filemanager.presentation.theme.DarkCard
+import com.antigravity.filemanager.presentation.theme.DarkBackground
 import com.antigravity.filemanager.presentation.theme.TealPrimary
 import kotlinx.coroutines.delay
 
@@ -25,32 +29,27 @@ fun PullToRefreshWrapper(
     content: @Composable BoxScope.() -> Unit
 ) {
     val state = rememberPullToRefreshState()
+    var isProgrammaticRefresh by remember { mutableStateOf(false) }
 
     if (isRefreshing != null) {
-        // Sync external refresh state
+        // Sync external programmatic refresh state (e.g. folder loading)
         LaunchedEffect(isRefreshing) {
             if (isRefreshing) {
+                isProgrammaticRefresh = true
                 state.startRefresh()
             } else {
                 state.endRefresh()
+                isProgrammaticRefresh = false
             }
         }
+    }
 
-        // When triggered by user gesture, notify onRefresh only if not already refreshing
-        if (state.isRefreshing) {
-            LaunchedEffect(state.isRefreshing) {
-                if (!isRefreshing) {
-                    onRefresh()
-                }
-            }
-        }
-    } else {
-        if (state.isRefreshing) {
-            LaunchedEffect(true) {
-                onRefresh()
-                delay(1000)
-                state.endRefresh()
-            }
+    // Handle user pull gesture
+    if (state.isRefreshing && !isProgrammaticRefresh) {
+        LaunchedEffect(true) {
+            onRefresh()
+            delay(1000)
+            state.endRefresh()
         }
     }
 
@@ -62,7 +61,7 @@ fun PullToRefreshWrapper(
             PullToRefreshContainer(
                 state = state,
                 modifier = Modifier.align(Alignment.TopCenter),
-                containerColor = DarkCard,
+                containerColor = DarkBackground,
                 contentColor = TealPrimary
             )
         }
