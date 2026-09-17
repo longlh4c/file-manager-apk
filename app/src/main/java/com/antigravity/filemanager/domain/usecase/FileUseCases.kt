@@ -2,8 +2,10 @@ package com.antigravity.filemanager.domain.usecase
 
 import com.antigravity.filemanager.domain.model.*
 import com.antigravity.filemanager.domain.repository.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -50,10 +52,29 @@ class FileOperationsUseCase @Inject constructor(
     suspend fun getFiles(directoryPath: String, sort: FileSortOption, showHidden: Boolean): List<FileItem> =
         fileRepository.getFilesInDirectory(directoryPath, sort, showHidden)
 
-    suspend fun copy(sourcePaths: List<String>, targetDir: String, overwriteNames: Set<String> = emptySet(), skipNames: Set<String> = emptySet()): Result<Unit> {
+    suspend fun copy(
+        sourcePaths: List<String>,
+        targetDir: String,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
+    ): Result<Unit> {
         transferGuard.begin(initialLabel = "Copying")
         try {
-            val result = fileRepository.copyFiles(sourcePaths, targetDir, overwriteNames, skipNames)
+            val result = fileRepository.copyFiles(sourcePaths, targetDir, overwriteNames, skipNames) { currentFile, currentIndex, totalFiles ->
+                onProgress?.invoke(currentFile, currentIndex, totalFiles)
+                transferGuard.updateProgress(
+                    com.antigravity.filemanager.data.service.TransferProgressInfo(
+                        currentFileName = currentFile,
+                        currentIndex = currentIndex,
+                        totalFiles = totalFiles,
+                        bytesTransferred = 0L,
+                        totalBytes = 0L,
+                        isUpload = true,
+                        operationLabel = "Copying"
+                    )
+                )
+            }
             if (result.isSuccess) folderCacheManager.invalidateMediaFolders()
             return result
         } finally {
@@ -61,10 +82,29 @@ class FileOperationsUseCase @Inject constructor(
         }
     }
 
-    suspend fun move(sourcePaths: List<String>, targetDir: String, overwriteNames: Set<String> = emptySet(), skipNames: Set<String> = emptySet()): Result<Unit> {
+    suspend fun move(
+        sourcePaths: List<String>,
+        targetDir: String,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
+    ): Result<Unit> {
         transferGuard.begin(initialLabel = "Moving")
         try {
-            val result = fileRepository.moveFiles(sourcePaths, targetDir, overwriteNames, skipNames)
+            val result = fileRepository.moveFiles(sourcePaths, targetDir, overwriteNames, skipNames) { currentFile, currentIndex, totalFiles ->
+                onProgress?.invoke(currentFile, currentIndex, totalFiles)
+                transferGuard.updateProgress(
+                    com.antigravity.filemanager.data.service.TransferProgressInfo(
+                        currentFileName = currentFile,
+                        currentIndex = currentIndex,
+                        totalFiles = totalFiles,
+                        bytesTransferred = 0L,
+                        totalBytes = 0L,
+                        isUpload = true,
+                        operationLabel = "Moving"
+                    )
+                )
+            }
             if (result.isSuccess) folderCacheManager.invalidateMediaFolders()
             return result
         } finally {
@@ -87,15 +127,48 @@ class FileOperationsUseCase @Inject constructor(
         onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null
     ): Result<Int> {
         val result = if (moveToRecycleBin) {
+            // Moving to the Recycle Bin is (usually) a single atomic renameTo() per top-level
+            // path even for a folder with many files inside — same-partition renames don't walk
+            // the tree at all, so per-top-level-item progress is already the real granularity
+            // here; it only falls back to a real recursive copy+delete on a renameTo() failure
+            // (cross-filesystem, permission issue), same unavoidable gap as extracting a single
+            // zip archive.
             recycleBinRepository.moveToTrash(paths, onProgress)
-        } else {
-            var count = 0
-            paths.forEachIndexed { index, path ->
-                val f = java.io.File(path)
-                onProgress?.invoke(f.name, index + 1, paths.size)
-                if (f.deleteRecursively()) count++
+        } else withContext(Dispatchers.IO) {
+            // Permanent delete has no such shortcut — File.deleteRecursively() really does walk
+            // the whole tree for each top-level path, so a single large folder used to report
+            // "1/1" for the entire operation (see zipFiles' addFolder() replacement above for the
+            // identical bug and why). Flattened into one bottom-up (files, then their now-empty
+            // parent directories) delete order across every selected path, so progress reflects
+            // every real file/folder actually being removed, not just how many top-level items
+            // were selected.
+            //
+            // withContext(Dispatchers.IO) matters here for more than just "don't block the UI
+            // thread with disk I/O" — this whole function is called directly from
+            // viewModelScope.launch { }, which defaults to Dispatchers.Main.immediate. Without
+            // switching dispatcher, every onProgress state update below would be written from,
+            // and this entire synchronous loop would run on, the main thread with nothing to ever
+            // yield it back to Compose in between — so no frame showing the progress dialog could
+            // ever actually get drawn until the whole delete had already finished, making a
+            // real, working progress mechanism look like it wasn't there at all.
+            data class WorkItem(val file: java.io.File, val topLevelIndex: Int)
+            val work = mutableListOf<WorkItem>()
+            fun collect(f: java.io.File, topLevelIndex: Int) {
+                if (f.isDirectory) {
+                    f.listFiles()?.forEach { collect(it, topLevelIndex) }
+                }
+                work.add(WorkItem(f, topLevelIndex)) // post-order: contents before the folder itself
             }
-            Result.success(count)
+            paths.forEachIndexed { index, path -> collect(java.io.File(path), index) }
+
+            val total = work.size
+            val topLevelFailed = BooleanArray(paths.size)
+            work.forEachIndexed { index, item ->
+                ensureActive()
+                onProgress?.invoke(item.file.name, index + 1, total)
+                if (!item.file.delete() && item.file.exists()) topLevelFailed[item.topLevelIndex] = true
+            }
+            Result.success(paths.indices.count { !topLevelFailed[it] })
         }
         // A delete only ever shrinks folders that are already cached — unlike copy/move/rename,
         // it can't land a file in a folder the cache doesn't know about yet — so it can patch
@@ -128,8 +201,8 @@ class RecycleBinUseCase @Inject constructor(
 ) {
     fun observeTrash(): Flow<List<TrashItem>> = recycleBinRepository.observeTrashItems()
     suspend fun getTrash(): List<TrashItem> = recycleBinRepository.getTrashItems()
-    suspend fun restore(ids: List<Long>): Result<Int> =
-        recycleBinRepository.restoreFromTrash(ids).also { if (it.isSuccess) folderCacheManager.invalidateMediaFolders() }
+    suspend fun restore(ids: List<Long>, onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null): Result<Int> =
+        recycleBinRepository.restoreFromTrash(ids, onProgress).also { if (it.isSuccess) folderCacheManager.invalidateMediaFolders() }
     suspend fun deletePermanently(ids: List<Long>, onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null): Result<Int> =
         recycleBinRepository.deletePermanently(ids, onProgress)
     suspend fun empty(onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null): Result<Unit> =

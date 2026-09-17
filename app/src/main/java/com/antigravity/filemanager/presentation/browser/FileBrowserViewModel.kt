@@ -547,19 +547,43 @@ class FileBrowserViewModel @Inject constructor(
             val conflicts = fileOperationsUseCase.findConflicts(sources, target)
             if (conflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames ->
-                    if (isMove) fileOperationsUseCase.move(sources, target, overwriteNames, skipNames) else fileOperationsUseCase.copy(sources, target, overwriteNames, skipNames)
+                    runLocalCopyOrMove(sources, target, isMove, overwriteNames, skipNames)
                     globalClipboardManager.clear()
                     invalidateLocalCacheForPaste(sources, target, isMove)
                     loadDirectory(target)
                 }
                 _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
             } else {
-                if (isMove) fileOperationsUseCase.move(sources, target) else fileOperationsUseCase.copy(sources, target)
+                runLocalCopyOrMove(sources, target, isMove)
                 globalClipboardManager.clear()
                 invalidateLocalCacheForPaste(sources, target, isMove)
                 loadDirectory(target)
             }
         }
+    }
+
+    /** Local-to-local copy/move with the same progress dialog compress/extract/delete already
+     * show — this used to run silently with no feedback at all for however long it took, which
+     * for a large batch looked exactly like the app hanging. */
+    private suspend fun runLocalCopyOrMove(
+        sources: List<String>,
+        target: String,
+        isMove: Boolean,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet()
+    ) {
+        val operationLabel = if (isMove) "Moving" else "Copying"
+        val onProgress: (String, Int, Int) -> Unit = { currentFile, currentIndex, totalFiles ->
+            _uiState.value = _uiState.value.copy(
+                downloadProgress = CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = operationLabel)
+            )
+        }
+        if (isMove) {
+            fileOperationsUseCase.move(sources, target, overwriteNames, skipNames, onProgress)
+        } else {
+            fileOperationsUseCase.copy(sources, target, overwriteNames, skipNames, onProgress)
+        }
+        _uiState.value = _uiState.value.copy(downloadProgress = null)
     }
 
     /** After a local copy/move, both the destination and (on move) each source's parent may have stale cache entries. */
@@ -771,11 +795,7 @@ class FileBrowserViewModel @Inject constructor(
         val count = selected.size
         viewModelScope.launch {
             suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>) {
-                if (isMove) {
-                    fileOperationsUseCase.move(selected, destPath, overwriteNames, skipNames)
-                } else {
-                    fileOperationsUseCase.copy(selected, destPath, overwriteNames, skipNames)
-                }
+                runLocalCopyOrMove(selected, destPath, isMove, overwriteNames, skipNames)
                 folderCacheManager.invalidateLocal(destPath)
                 if (isMove) {
                     folderCacheManager.invalidateLocal(_uiState.value.currentPath)
@@ -928,18 +948,23 @@ class FileBrowserViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(showDeleteDialog = false)
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
-            // Deleting (or permanently deleting) a large batch of files is a synchronous
-            // recursive filesystem walk with no built-in progress callback until now — from the
-            // user's side that looked exactly like the app hanging, with zero feedback for
-            // however long it took. Same progress-dialog treatment as compress/extract below.
+            // Shown immediately, before delete() even starts: moving to Recycle Bin is (usually)
+            // a quick per-item renameTo() with no progress ticks in between at all — for several
+            // items that's still enough small synchronous work (rename + a DB insert, each) to
+            // take a moment with nothing on screen the whole time, which read as the app hanging
+            // even though nothing was actually blocked. Replaced by real per-file progress the
+            // moment (if ever) the slow copy fallback below actually kicks in.
+            _uiState.value = _uiState.value.copy(
+                downloadProgress = CloudTransferProgress(
+                    isUpload = false,
+                    isIndeterminate = true,
+                    operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
+                )
+            )
             fileOperationsUseCase.delete(paths, moveToRecycleBin) { currentName, currentIndex, total ->
                 _uiState.value = _uiState.value.copy(
-                    downloadProgress = CloudTransferProgress(
-                        currentFileName = currentName,
-                        currentIndex = currentIndex,
-                        totalFiles = total,
-                        isIndeterminate = false,
-                        isUpload = false,
+                    downloadProgress = CloudTransferProgress.forItemCount(
+                        currentName, currentIndex, total, isUpload = false,
                         operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
                     )
                 )
@@ -989,15 +1014,12 @@ class FileBrowserViewModel @Inject constructor(
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
             fileOperationsUseCase.zip(sources, targetZip) { currentFile, currentIndex, totalFiles ->
+                // A real per-item count (which top-level source is being added), not a truly
+                // unknowable progress — hasDeterminateProgress on the model itself still falls
+                // back to a spinner when totalFiles is 1, so a single file/folder compress isn't
+                // misleadingly shown as "1/1 (100%)" the whole time.
                 _uiState.value = _uiState.value.copy(
-                    downloadProgress = CloudTransferProgress(
-                        currentFileName = currentFile,
-                        currentIndex = currentIndex,
-                        totalFiles = totalFiles,
-                        isIndeterminate = true,
-                        isUpload = true,
-                        operationLabel = "Compressing"
-                    )
+                    downloadProgress = CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = "Compressing")
                 )
             }
             _uiState.value = _uiState.value.copy(downloadProgress = null)
@@ -1016,15 +1038,12 @@ class FileBrowserViewModel @Inject constructor(
             var count = 0
             selected.forEachIndexed { index, path ->
                 val archiveName = File(path).name
+                // Real progress across multiple archives (which one is being extracted); still no
+                // visibility into entries *within* one archive (zip4j's extractAll() has no
+                // progress callback), so a single-archive extract still falls back to a spinner
+                // via hasDeterminateProgress's totalFiles>1 requirement.
                 _uiState.value = _uiState.value.copy(
-                    downloadProgress = CloudTransferProgress(
-                        currentFileName = archiveName,
-                        currentIndex = index + 1,
-                        totalFiles = selected.size,
-                        isIndeterminate = true,
-                        isUpload = false,
-                        operationLabel = "Extracting"
-                    )
+                    downloadProgress = CloudTransferProgress.forItemCount(archiveName, index + 1, selected.size, isUpload = false, operationLabel = "Extracting")
                 )
                 val res = fileOperationsUseCase.unzip(path, targetDir)
                 if (res.isSuccess) count++

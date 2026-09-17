@@ -559,11 +559,7 @@ class CategoriesViewModel @Inject constructor(
             val isMove = _uiState.value.isCutOperation
 
             suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>) {
-                if (isMove) {
-                    fileOperationsUseCase.move(sources, targetDir, overwriteNames, skipNames)
-                } else {
-                    fileOperationsUseCase.copy(sources, targetDir, overwriteNames, skipNames)
-                }
+                runLocalCopyOrMove(sources, targetDir, isMove, overwriteNames, skipNames)
                 globalClipboardManager.clear()
                 val currentName = _uiState.value.currentSubfolderName
                 openSubfolder(targetDir, currentName)
@@ -622,6 +618,30 @@ class CategoriesViewModel @Inject constructor(
         } catch (e: kotlinx.coroutines.CancellationException) {
             _uiState.value = _uiState.value.copy(downloadProgress = null, toastMessage = "Transfer cancelled")
         }
+    }
+
+    /** Local-to-local copy/move with the same progress dialog compress/extract/delete already
+     * show — this used to run silently with no feedback at all for however long it took, which
+     * for a large batch looked exactly like the app hanging. */
+    private suspend fun runLocalCopyOrMove(
+        sources: List<String>,
+        target: String,
+        isMove: Boolean,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet()
+    ) {
+        val operationLabel = if (isMove) "Moving" else "Copying"
+        val onProgress: (String, Int, Int) -> Unit = { currentFile, currentIndex, totalFiles ->
+            _uiState.value = _uiState.value.copy(
+                downloadProgress = CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = operationLabel)
+            )
+        }
+        if (isMove) {
+            fileOperationsUseCase.move(sources, target, overwriteNames, skipNames, onProgress)
+        } else {
+            fileOperationsUseCase.copy(sources, target, overwriteNames, skipNames, onProgress)
+        }
+        _uiState.value = _uiState.value.copy(downloadProgress = null)
     }
 
     private var activeTransferJob: kotlinx.coroutines.Job? = null
@@ -717,11 +737,7 @@ class CategoriesViewModel @Inject constructor(
         val currentDir = _uiState.value.currentSubfolderPath
         viewModelScope.launch {
             suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>) {
-                if (isMove) {
-                    fileOperationsUseCase.move(selected, destPath, overwriteNames, skipNames)
-                } else {
-                    fileOperationsUseCase.copy(selected, destPath, overwriteNames, skipNames)
-                }
+                runLocalCopyOrMove(selected, destPath, isMove, overwriteNames, skipNames)
                 if (currentDir != null) {
                     openSubfolder(currentDir, _uiState.value.currentSubfolderName)
                 } else {
@@ -935,16 +951,21 @@ class CategoriesViewModel @Inject constructor(
         val paths = _uiState.value.selectedPaths.toList()
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
-            // Same fix as FileBrowserViewModel.deleteSelected — a large batch delete with no
-            // progress feedback used to just leave the screen looking hung until it finished.
+            // Same fix as FileBrowserViewModel.deleteSelected — shown immediately, before
+            // delete() even starts, since a quick per-item renameTo() with no progress ticks in
+            // between can still take a moment for several items with nothing on screen at all,
+            // which read as the app hanging.
+            _uiState.value = _uiState.value.copy(
+                downloadProgress = CloudTransferProgress(
+                    isUpload = false,
+                    isIndeterminate = true,
+                    operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
+                )
+            )
             fileOperationsUseCase.delete(paths, moveToRecycleBin) { currentName, currentIndex, total ->
                 _uiState.value = _uiState.value.copy(
-                    downloadProgress = CloudTransferProgress(
-                        currentFileName = currentName,
-                        currentIndex = currentIndex,
-                        totalFiles = total,
-                        isIndeterminate = false,
-                        isUpload = false,
+                    downloadProgress = CloudTransferProgress.forItemCount(
+                        currentName, currentIndex, total, isUpload = false,
                         operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
                     )
                 )
@@ -997,14 +1018,7 @@ class CategoriesViewModel @Inject constructor(
         activeTransferJob = viewModelScope.launch {
             fileOperationsUseCase.zip(sources, zipPath) { currentFile, currentIndex, totalFiles ->
                 _uiState.value = _uiState.value.copy(
-                    downloadProgress = CloudTransferProgress(
-                        currentFileName = currentFile,
-                        currentIndex = currentIndex,
-                        totalFiles = totalFiles,
-                        isIndeterminate = true,
-                        isUpload = true,
-                        operationLabel = "Compressing"
-                    )
+                    downloadProgress = CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = "Compressing")
                 )
             }
             _uiState.value = _uiState.value.copy(downloadProgress = null)
@@ -1022,14 +1036,7 @@ class CategoriesViewModel @Inject constructor(
             selected.forEachIndexed { index, path ->
                 val archiveName = File(path).name
                 _uiState.value = _uiState.value.copy(
-                    downloadProgress = CloudTransferProgress(
-                        currentFileName = archiveName,
-                        currentIndex = index + 1,
-                        totalFiles = selected.size,
-                        isIndeterminate = true,
-                        isUpload = false,
-                        operationLabel = "Extracting"
-                    )
+                    downloadProgress = CloudTransferProgress.forItemCount(archiveName, index + 1, selected.size, isUpload = false, operationLabel = "Extracting")
                 )
                 val res = fileOperationsUseCase.unzip(path, targetDir)
                 if (res.isSuccess) count++

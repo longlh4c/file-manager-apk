@@ -47,8 +47,20 @@ interface IFileRepository {
     // skipNames is left out of the operation entirely, and any other conflicting name defaults to
     // "keep both" (renamed with a numbered suffix) — matching the Overwrite/Skip/Keep Both choices
     // in OverwriteConflictDialog. Names not in either set and with no conflict are unaffected.
-    suspend fun copyFiles(sourcePaths: List<String>, targetDirectory: String, overwriteNames: Set<String> = emptySet(), skipNames: Set<String> = emptySet()): Result<Unit>
-    suspend fun moveFiles(sourcePaths: List<String>, targetDirectory: String, overwriteNames: Set<String> = emptySet(), skipNames: Set<String> = emptySet()): Result<Unit>
+    suspend fun copyFiles(
+        sourcePaths: List<String>,
+        targetDirectory: String,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
+    ): Result<Unit>
+    suspend fun moveFiles(
+        sourcePaths: List<String>,
+        targetDirectory: String,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
+    ): Result<Unit>
     suspend fun findCopyConflicts(sourcePaths: List<String>, targetDirectory: String): List<com.antigravity.filemanager.domain.model.OverwriteConflict>
     suspend fun renameFile(filePath: String, newName: String): Result<FileItem>
     suspend fun createDirectory(parentPath: String, directoryName: String): Result<FileItem>
@@ -68,7 +80,10 @@ interface IRecycleBinRepository {
         filePaths: List<String>,
         onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null
     ): Result<Int>
-    suspend fun restoreFromTrash(trashIds: List<Long>): Result<Int>
+    suspend fun restoreFromTrash(
+        trashIds: List<Long>,
+        onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null
+    ): Result<Int>
     suspend fun deletePermanently(
         trashIds: List<Long>,
         onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null

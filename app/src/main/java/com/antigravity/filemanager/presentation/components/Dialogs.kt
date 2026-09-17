@@ -2035,7 +2035,7 @@ fun CloudDownloadProgressDialog(
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.height(14.dp))
-                if (progress.isIndeterminate || progress.totalBytes <= 0) {
+                if (!progress.hasDeterminateProgress) {
                     LinearProgressIndicator(
                         modifier = Modifier
                             .fillMaxWidth()

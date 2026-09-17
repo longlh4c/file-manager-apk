@@ -255,11 +255,18 @@ class DashboardViewModel @Inject constructor(
             }
 
             suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>) {
-                if (clip.isCut) {
-                    fileOperationsUseCase.move(clip.paths, target, overwriteNames, skipNames)
-                } else {
-                    fileOperationsUseCase.copy(clip.paths, target, overwriteNames, skipNames)
+                val operationLabel = if (clip.isCut) "Moving" else "Copying"
+                val onProgress: (String, Int, Int) -> Unit = { currentFile, currentIndex, totalFiles ->
+                    _uiState.value = _uiState.value.copy(
+                        downloadProgress = com.antigravity.filemanager.domain.model.CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = operationLabel)
+                    )
                 }
+                if (clip.isCut) {
+                    fileOperationsUseCase.move(clip.paths, target, overwriteNames, skipNames, onProgress)
+                } else {
+                    fileOperationsUseCase.copy(clip.paths, target, overwriteNames, skipNames, onProgress)
+                }
+                _uiState.value = _uiState.value.copy(downloadProgress = null)
                 globalClipboardManager.clear()
                 refresh()
             }

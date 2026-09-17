@@ -20,6 +20,7 @@ data class RecycleBinUiState(
     val totalSizeBytes: Long = 0L,
     val showEmptyConfirm: Boolean = false,
     val deleteProgress: CloudTransferProgress? = null,
+    val restoreProgress: CloudTransferProgress? = null,
     // Starts true: observeTrash()'s first emission is asynchronous (a Room Flow query), so
     // without this the very first composed frame renders with the default items=emptyList()
     // and briefly shows the "Recycle Bin is empty" icon even when the bin actually has items —
@@ -55,9 +56,23 @@ class RecycleBinViewModel @Inject constructor(
     }
 
     fun restoreSelected() {
-        viewModelScope.launch {
-            recycleBinUseCase.restore(_uiState.value.selectedIds.toList())
-            _uiState.value = _uiState.value.copy(selectedIds = emptySet())
+        activeJob?.cancel()
+        activeJob = viewModelScope.launch {
+            // Shown immediately, before restore() even starts — most restores complete via an
+            // instant renameTo() with no progress ticks at all (same reasoning as moveToTrash),
+            // but with literally nothing shown in the meantime, tapping Restore used to look like
+            // it did nothing until the list suddenly updated, which for a bigger selection (or one
+            // that hits the slow copy fallback below) read as the app hanging. This spinner is
+            // replaced by real per-file progress the moment (if ever) onProgress actually fires.
+            _uiState.value = _uiState.value.copy(
+                restoreProgress = CloudTransferProgress(isUpload = false, operationLabel = "Restoring", isIndeterminate = true)
+            )
+            recycleBinUseCase.restore(_uiState.value.selectedIds.toList()) { currentName, currentIndex, total ->
+                _uiState.value = _uiState.value.copy(
+                    restoreProgress = CloudTransferProgress.forItemCount(currentName, currentIndex, total, isUpload = false, operationLabel = "Restoring")
+                )
+            }
+            _uiState.value = _uiState.value.copy(selectedIds = emptySet(), restoreProgress = null)
         }
     }
 
@@ -71,14 +86,7 @@ class RecycleBinViewModel @Inject constructor(
             // synchronous recursive delete with no feedback otherwise, which reads as a hang.
             recycleBinUseCase.deletePermanently(ids) { currentName, currentIndex, total ->
                 _uiState.value = _uiState.value.copy(
-                    deleteProgress = CloudTransferProgress(
-                        currentFileName = currentName,
-                        currentIndex = currentIndex,
-                        totalFiles = total,
-                        isIndeterminate = false,
-                        isUpload = false,
-                        operationLabel = "Deleting permanently"
-                    )
+                    deleteProgress = CloudTransferProgress.forItemCount(currentName, currentIndex, total, isUpload = false, operationLabel = "Deleting permanently")
                 )
             }
             _uiState.value = _uiState.value.copy(selectedIds = emptySet(), deleteProgress = null)
@@ -93,14 +101,7 @@ class RecycleBinViewModel @Inject constructor(
             // the same way compress/extract/upload already do elsewhere in the app.
             recycleBinUseCase.empty { currentName, currentIndex, total ->
                 _uiState.value = _uiState.value.copy(
-                    deleteProgress = CloudTransferProgress(
-                        currentFileName = currentName,
-                        currentIndex = currentIndex,
-                        totalFiles = total,
-                        isIndeterminate = false,
-                        isUpload = false,
-                        operationLabel = "Emptying Trash"
-                    )
+                    deleteProgress = CloudTransferProgress.forItemCount(currentName, currentIndex, total, isUpload = false, operationLabel = "Emptying Trash")
                 )
             }
             _uiState.value = _uiState.value.copy(showEmptyConfirm = false, selectedIds = emptySet(), deleteProgress = null)

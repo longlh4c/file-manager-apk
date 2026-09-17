@@ -168,14 +168,7 @@ class StorageAnalysisViewModel @Inject constructor(
         activeTransferJob = viewModelScope.launch {
             fileOperationsUseCase.zip(paths, targetZip) { currentFile, currentIndex, totalFiles ->
                 _uiState.value = _uiState.value.copy(
-                    transferProgress = CloudTransferProgress(
-                        currentFileName = currentFile,
-                        currentIndex = currentIndex,
-                        totalFiles = totalFiles,
-                        isIndeterminate = true,
-                        isUpload = true,
-                        operationLabel = "Compressing"
-                    )
+                    transferProgress = CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = "Compressing")
                 )
             }
             _uiState.value = _uiState.value.copy(transferProgress = null)
@@ -206,14 +199,7 @@ class StorageAnalysisViewModel @Inject constructor(
             paths.forEachIndexed { index, p ->
                 val archiveName = File(p).name
                 _uiState.value = _uiState.value.copy(
-                    transferProgress = CloudTransferProgress(
-                        currentFileName = archiveName,
-                        currentIndex = index + 1,
-                        totalFiles = paths.size,
-                        isIndeterminate = true,
-                        isUpload = false,
-                        operationLabel = "Extracting"
-                    )
+                    transferProgress = CloudTransferProgress.forItemCount(archiveName, index + 1, paths.size, isUpload = false, operationLabel = "Extracting")
                 )
                 val res = fileOperationsUseCase.unzip(p, targetDir)
                 if (res.isSuccess) anySucceeded = true

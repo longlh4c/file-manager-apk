@@ -815,9 +815,11 @@ class CloudExplorerViewModel @Inject constructor(
      * repeated `_uiState.value = _uiState.value.copy(downloadProgress = CloudTransferProgress(...))`
      * blocks that used to be duplicated at every progress tick across download/upload/paste/
      * delete/restore. `isIndeterminate` is derived from `totalBytes` (as every call site already
-     * did by hand): a byte-counted transfer passes real totalBytes, a count-only operation
-     * (deleting/restoring N items, no per-item byte size) just leaves it at 0 and gets the
-     * indeterminate bar automatically. */
+     * did by hand): a byte-counted transfer passes real totalBytes and gets the byte-based bar; a
+     * count-only operation (deleting/restoring N items, no per-item byte size) instead falls back
+     * to CloudTransferProgress's own item-count-based progress (see hasDeterminateProgress) once
+     * more than one item is involved — leaving it at 0 gave a spinner with no percentage at all
+     * even though "item 3 of 10" was already known. */
     private fun setTransferProgress(
         currentFileName: String,
         currentIndex: Int,
@@ -834,7 +836,7 @@ class CloudExplorerViewModel @Inject constructor(
                 totalFiles = totalFiles,
                 bytesTransferred = bytesTransferred,
                 totalBytes = totalBytes,
-                isIndeterminate = totalBytes <= 0,
+                isIndeterminate = false,
                 isUpload = isUpload,
                 operationLabel = operationLabel
             )

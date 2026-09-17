@@ -63,6 +63,10 @@ fun RecycleBinScreen(
         CloudDownloadProgressDialog(progress = uiState.deleteProgress!!)
     }
 
+    if (uiState.restoreProgress != null) {
+        CloudDownloadProgressDialog(progress = uiState.restoreProgress!!)
+    }
+
     Scaffold(
         topBar = {
             FileManagerTopBar(
