@@ -5,31 +5,51 @@ import org.apache.ftpserver.ftplet.FtpRequest
 import org.apache.ftpserver.ftplet.FtpSession
 import org.apache.ftpserver.ftplet.FtpletResult
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 
-/** Caps how many uploads/downloads run their actual file-copy loop at once — see the comment at
- * this Ftplet's registration in [EmbeddedFtpServer.start] for why. A transfer beyond the cap just
- * blocks in [onUploadStart]/[onDownloadStart] until a slot frees up (still consuming one of
- * maxThreads' worker threads while it waits — but that pool is sized generously precisely so
- * waiting jobs don't starve out unrelated commands on other connections).
+/** Caps how many uploads/downloads run their actual file-copy loop at once.
+ * A transfer beyond the cap waits with a timeout in [onUploadStart]/[onDownloadStart] until a slot
+ * frees up. If waiting times out, the transfer is rejected to prevent thread pool starvation.
  *
- * The permit-held flag lives on the FtpSession itself (its own getAttribute/setAttribute store,
- * not a map this class owns) so [onDisconnect] can always find and release it — a client that
- * vanishes mid-transfer (connection drop, app killed) may never reach onUploadEnd/onDownloadEnd,
- * and a permit that's never released would permanently shrink the pool of available slots. */
+ * The permit-held flag lives on the FtpSession itself, protected by synchronization, so [onDisconnect]
+ * or transfer end hooks can always reliably find and release it even under abnormal socket drops. */
 class TransferConcurrencyFtplet(maxConcurrentTransfers: Int) : DefaultFtplet() {
     private val semaphore = Semaphore(maxConcurrentTransfers, true) // fair: first-in-first-served
     private val permitHeldAttr = "owl_transfer_permit_held"
+    private val lock = Any()
+
+    companion object {
+        private const val PERMIT_ACQUIRE_TIMEOUT_SECONDS = 60L
+    }
 
     private fun acquire(session: FtpSession): FtpletResult {
-        semaphore.acquire()
-        session.setAttribute(permitHeldAttr, true)
-        return FtpletResult.DEFAULT
+        val acquired = try {
+            semaphore.tryAcquire(PERMIT_ACQUIRE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+
+        return if (acquired) {
+            synchronized(lock) {
+                session.setAttribute(permitHeldAttr, true)
+            }
+            FtpletResult.DEFAULT
+        } else {
+            android.util.Log.w(
+                "TransferLimiter",
+                "Timed out waiting for transfer slot after ${PERMIT_ACQUIRE_TIMEOUT_SECONDS}s; disconnecting transfer to prevent thread pool starvation"
+            )
+            FtpletResult.DISCONNECT
+        }
     }
 
     private fun release(session: FtpSession) {
-        if (session.getAttribute(permitHeldAttr) == true) {
-            session.removeAttribute(permitHeldAttr)
-            semaphore.release()
+        synchronized(lock) {
+            if (session.getAttribute(permitHeldAttr) == true) {
+                session.removeAttribute(permitHeldAttr)
+                semaphore.release()
+            }
         }
     }
 

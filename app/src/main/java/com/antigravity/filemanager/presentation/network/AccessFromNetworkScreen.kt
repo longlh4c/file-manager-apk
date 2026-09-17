@@ -18,7 +18,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -86,7 +85,10 @@ fun AccessFromNetworkScreen(
                         )
                         OutlinedTextField(
                             value = uiState.port.toString(),
-                            onValueChange = { viewModel.onPortChanged(it) },
+                            onValueChange = { input ->
+                                val filtered = input.filter { it.isDigit() }.take(8)
+                                viewModel.onPortChanged(filtered)
+                            },
                             singleLine = true,
                             enabled = !uiState.isRunning,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -117,11 +119,13 @@ fun AccessFromNetworkScreen(
                         )
                         OutlinedTextField(
                             value = uiState.password,
-                            onValueChange = { viewModel.onPasswordChanged(it) },
+                            onValueChange = { input ->
+                                val filtered = input.filter { it.isLetterOrDigit() }.take(8)
+                                viewModel.onPasswordChanged(filtered)
+                            },
                             placeholder = { Text("(Leave blank for anonymous)", color = Color(0xFF666666), fontSize = 12.sp) },
                             singleLine = true,
                             enabled = !uiState.isRunning,
-                            visualTransformation = PasswordVisualTransformation(),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedTextColor = TextPrimary,
                                 unfocusedTextColor = TextPrimary,

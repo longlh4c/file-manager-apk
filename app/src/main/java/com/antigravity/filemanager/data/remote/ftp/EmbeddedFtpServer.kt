@@ -9,36 +9,18 @@ import org.apache.ftpserver.listener.ListenerFactory
 import javax.inject.Inject
 import javax.inject.Singleton
 
-// Number of STOR/RETR transfers allowed to actually run their file-copy loop at once — see
-// TransferConcurrencyFtplet's own doc comment for why this exists separately from maxThreads.
+// Number of STOR/RETR transfers allowed to actually run their file-copy loop at once.
+// Allows up to 4 parallel active transfers matching standard multi-connection FTP clients (WinSCP / FileZilla).
 private const val MAX_CONCURRENT_TRANSFERS = 4
 
-// apache-ftpserver 1.2.0 (unmaintained since 2011) shares a single CharsetEncoder across this
-// pool's worker threads when encoding responses (e.g. "227 Entering Passive Mode ..." for PASV,
-// or STOR's own reply). CharsetEncoder is NOT thread-safe, so >1 thread means two connections (or
-// parallel data-connection requests from one client) can encode a response at the same time and
-// corrupt the shared encoder's internal state. maxThreads=1 was tried once to avoid that race by
-// fully serializing every command through this one pool — but that pool ALSO runs each command's
-// own handling, including STOR/RETR's file-copy loop, not just response encoding. With only 1
-// thread, any other command the client sends while a transfer is in progress (many clients
-// poll/refresh during a transfer) sits blocked until the transfer finishes, and can hit the
-// CLIENT's own timeout waiting — trading the crash for "connection times out mid-transfer". A
-// real thread pool lets commands run concurrently instead; the encoder race this risks is caught
-// (not fatal) by [ftpUncaughtExceptionHandler] below, which targets exactly exceptions from
-// org.apache.ftpserver/org.apache.mina, dropping just that one connection instead of the whole
-// app, while genuine app bugs elsewhere still crash normally.
-//
-// 4 wasn't enough on its own either: since each STOR/RETR's own file-copy loop runs synchronously
-// on one of these worker threads for as long as that transfer takes (not just the response
-// encoding), a client running N parallel transfer jobs needs N worker threads tied up in blocking
-// I/O simultaneously, for however long the transfers last — not just briefly. A WinSCP session
-// with 5 parallel 1GB uploads occupied all 4 threads with nothing left to process ANY other
-// command (control-connection keepalives, the 5th job's own PASV/STOR, directory listings) until
-// one transfer finished minutes later — which looked exactly like the app freezing, and was slow
-// enough that WinSCP's own client-side timeout gave up and dropped the connection. Raised well
-// above what a real transfer client is likely to run in parallel at once; each thread is only
-// blocked on I/O (not spinning the CPU), so holding more of them idle-but-blocked is cheap. See
-// [MAX_CONCURRENT_TRANSFERS] for the separate, tighter cap on actual concurrent storage I/O.
+// Thread pool size for MINA I/O worker threads.
+// Note on CharsetEncoder: In vanilla apache-ftpserver 1.2.0, FtpResponseEncoder shared a single
+// non-thread-safe CharsetEncoder across worker threads, leading to ICU native memory corruption
+// (SIGSEGV/SIGABRT) under concurrent loads. We have resolved this by overriding FtpResponseEncoder
+// with a ThreadLocal<CharsetEncoder> implementation.
+// Setting MAX_WORKER_THREADS to 16 allows ample capacity to handle parallel control requests
+// (directory listing, navigation, NOOP keep-alives) across multiple sessions/clients without latency,
+// while storage I/O concurrency remains strictly bounded by MAX_CONCURRENT_TRANSFERS.
 private const val MAX_WORKER_THREADS = 16
 
 /** Embedded FTP server (apache-ftpserver over MINA) exposing the device's storage over the LAN.
@@ -53,12 +35,17 @@ class EmbeddedFtpServer @Inject constructor() {
 
     private var previousUncaughtExceptionHandler: Thread.UncaughtExceptionHandler? = null
 
-    // Defense in depth for the shared-CharsetEncoder race described at MAX_WORKER_THREADS above —
-    // if it ever fires again despite that, this stops it from being fatal for the whole app. Only
-    // swallows exceptions whose stack trace actually runs through org.apache.ftpserver or
-    // org.apache.mina (this library's own packages), so it can only ever mask a bug in this
-    // embedded FTP server — never a real crash elsewhere in the app, which still falls through to
-    // whatever handler was already installed (Android's default process-kill included).
+    // Kept as a second line of defense even with maxThreads=1 eliminating the encoder race itself
+    // (see MAX_WORKER_THREADS) — this library still has other ways to throw from a worker thread
+    // that aren't that specific bug, and this at least keeps THOSE from taking the whole app down.
+    // It is NOT sufficient on its own against the encoder race specifically: logs from an actual
+    // crash showed this handler correctly logging and swallowing that exception, and the app still
+    // died seconds later from a separate native-level fault the race had already caused — no JVM
+    // handler can undo native memory corruption after the fact. Only swallows exceptions whose
+    // stack trace actually runs through org.apache.ftpserver or org.apache.mina (this library's
+    // own packages), so it can only ever mask a bug in this embedded FTP server — never a real
+    // crash elsewhere in the app, which still falls through to whatever handler was already
+    // installed (Android's default process-kill included).
     private val ftpUncaughtExceptionHandler = Thread.UncaughtExceptionHandler { thread, throwable ->
         val isFromFtpLibrary = generateSequence(throwable) { it.cause }
             .any { t -> t.stackTrace.any { frame -> frame.className.startsWith("org.apache.ftpserver") || frame.className.startsWith("org.apache.mina") } }
@@ -118,7 +105,17 @@ class EmbeddedFtpServer @Inject constructor() {
                 // and ties up more worker threads doing it. Extra jobs beyond the cap simply queue
                 // (blocked on the semaphore, not competing for storage bandwidth) until a slot
                 // frees up, rather than racing ahead.
-                ftplets = mapOf("transferLimiter" to TransferConcurrencyFtplet(MAX_CONCURRENT_TRANSFERS))
+                //
+                // MUST be a mutable map: DefaultFtpServer.stop() -> DefaultFtpServerContext.
+                // dispose() calls .clear() on this exact map — Kotlin's mapOf() returns an
+                // unmodifiable one, so every stop() threw UnsupportedOperationException here. That
+                // alone wasn't fatal (stop() catches it), but it meant stop() never got past that
+                // point to reset server/isRunning either — leaving the app reporting FTP as
+                // running (notification and all) after a stop, while the very next start() call's
+                // `if (isRunning) return true` guard skipped ever creating a new listener. From a
+                // client's side that's indistinguishable from the app just refusing every
+                // connection.
+                ftplets = hashMapOf<String, org.apache.ftpserver.ftplet.Ftplet>("transferLimiter" to TransferConcurrencyFtplet(MAX_CONCURRENT_TRANSFERS))
             }
 
             val createdServer = serverFactory.createServer()
@@ -150,13 +147,22 @@ class EmbeddedFtpServer @Inject constructor() {
     }.createListener()
 
     fun stop() {
+        // server = null / isRunning = false must happen regardless of whether server.stop() itself
+        // throws (see the ftplets map fix in start() for why it used to) — this used to sit inside
+        // the try block after that call, so a thrown exception skipped resetting them entirely.
+        // With isRunning stuck at true, the NEXT start() call's `if (isRunning) return true` guard
+        // short-circuited without ever creating a new listener — the app kept reporting the FTP
+        // server as running (notification and all) while nothing was actually listening on the
+        // port at all, which is exactly what "server says on, client gets connection refused"
+        // looks like from the outside.
         try {
             server?.stop()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        } finally {
             server = null
             isRunning = false
             Thread.setDefaultUncaughtExceptionHandler(previousUncaughtExceptionHandler)
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 }

@@ -6,6 +6,7 @@ import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Folder
@@ -20,6 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -141,7 +143,11 @@ fun AppNavigation() {
                     NavigationBarItem(
                         selected = isFtpTab,
                         onClick = { switchTab(FTP_GRAPH) },
-                        icon = { Icon(Icons.Default.Router, contentDescription = "FTP") },
+                        // The Router glyph has a lot more built-in empty padding than Folder/Cloud
+                        // do, so at the same 24dp default it visually reads as noticeably smaller
+                        // even though the bounding box is identical — bumped up to match their
+                        // actual visual weight in the bar.
+                        icon = { Icon(Icons.Default.Router, contentDescription = "FTP", modifier = Modifier.size(28.dp)) },
                         label = { Text("FTP") },
                         colors = NavigationBarItemDefaults.colors(
                             selectedIconColor = TealPrimary,

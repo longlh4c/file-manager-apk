@@ -36,6 +36,7 @@ android {
             // isn't representative of a released build's speed.
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -113,7 +114,11 @@ dependencies {
     implementation(libs.androidx.media3.session)
 
     // Embedded FTP Server & Logging
-    implementation(libs.apache.ftpserver.core)
+    // ftpserver-core-1.2.0-patched.jar excludes FtpResponseEncoder.class so our thread-safe
+    // ThreadLocal FtpResponseEncoder implementation in source code is used cleanly without R8 duplicate-class collisions.
+    implementation(files("libs/ftpserver-core-1.2.0-patched.jar"))
+    implementation("org.apache.ftpserver:ftplet-api:1.2.0")
+    implementation("org.apache.mina:mina-core:2.1.6")
     implementation(libs.slf4j.android)
 
     // Zip4j Archive Management

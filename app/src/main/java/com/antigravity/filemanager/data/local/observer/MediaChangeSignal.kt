@@ -3,7 +3,7 @@ package com.antigravity.filemanager.data.local.observer
 import android.content.Context
 import android.database.ContentObserver
 import android.os.Handler
-import android.os.Looper
+import android.os.HandlerThread
 import android.provider.MediaStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.channels.BufferOverflow
@@ -15,14 +15,11 @@ import javax.inject.Singleton
 /**
  * Fires whenever MediaStore reports a change anywhere under external storage — a new photo,
  * a download once the media scanner picks it up, a deleted file, etc. Registered once for the
- * app's whole lifetime (tied to the Application context, so it's never explicitly unregistered —
- * fine for a single process-lifetime ContentObserver); screens collect [changes] (debounced)
- * instead of each registering their own observer, so Images/Audio/Videos/Documents can quietly
- * pick up new/removed files without the user having to pull-to-refresh.
+ * app's whole lifetime (tied to the Application context, so it's never explicitly unregistered).
  *
- * Local folder browsing (Downloads/Main storage/any plain directory) doesn't rely on this —
- * MediaStore only reflects files it has scanned, which can lag behind a file that just landed
- * on disk (FTP transfer, direct copy). See DirectoryWatcher for that path's own FileObserver.
+ * Runs on a dedicated background HandlerThread instead of the MainLooper so that bulk file writes
+ * (such as thousands of files landing via an FTP transfer) do not flood the main UI thread message
+ * queue, preventing ANRs and UI freezes.
  */
 @Singleton
 class MediaChangeSignal @Inject constructor(
@@ -31,8 +28,10 @@ class MediaChangeSignal @Inject constructor(
     private val _changes = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val changes = _changes.asSharedFlow()
 
+    private val observerThread = HandlerThread("MediaChangeSignalObserver").apply { start() }
+
     init {
-        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        val observer = object : ContentObserver(Handler(observerThread.looper)) {
             override fun onChange(selfChange: Boolean) {
                 _changes.tryEmit(Unit)
             }
