@@ -265,7 +265,8 @@ class CategoriesViewModel @Inject constructor(
             // that produced a visible "all files hide, then reappear" flash once the fresh scan
             // finished. Keep whatever was already on screen (stale-but-non-empty) until the fresh
             // list is ready, same as the stale-while-revalidate pattern already used when a cache
-            // entry does exist.
+            val isSameFolder = _uiState.value.currentSubfolderPath == folderPath
+            val fallbackFiles = if (isSameFolder) _uiState.value.subfolderFiles else emptyList()
             _uiState.value = _uiState.value.copy(
                 isLoading = cached == null,
                 folderHistory = history,
@@ -274,7 +275,7 @@ class CategoriesViewModel @Inject constructor(
                 sortOption = savedSort,
                 showHiddenFiles = savedHidden,
                 viewMode = savedViewMode,
-                subfolderFiles = cached?.files ?: _uiState.value.subfolderFiles
+                subfolderFiles = cached?.files ?: fallbackFiles
             )
             if (cached != null && cached.isFresh) return@launch
 

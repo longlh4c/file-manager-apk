@@ -562,6 +562,10 @@ fun MediaCategoriesScreen(
                             Text(text = "Searching…", color = TextSecondary, fontSize = 14.sp)
                         }
                     }
+                } else if (uiState.isLoading && filteredFiles.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = TealPrimary)
+                    }
                 } else if (filteredFiles.isEmpty() && !uiState.isLoading) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(
@@ -691,7 +695,15 @@ fun MediaCategoriesScreen(
                     CategoryType.DOCUMENTS -> Icons.Default.Article to Color(0xFF42A5F5)
                     else -> Icons.Default.Folder to Color(0xFFFFB74D)
                 }
-                if (viewMode == ViewMode.GRID) {
+                if (uiState.isLoading && filteredFolders.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = TealPrimary)
+                    }
+                } else if (filteredFolders.isEmpty() && !uiState.isLoading) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(text = "No folders found", color = TextSecondary, fontSize = 15.sp)
+                    }
+                } else if (viewMode == ViewMode.GRID) {
                     LazyVerticalGrid(
                         columns = GridCells.Adaptive(minSize = 100.dp),
                         modifier = Modifier
