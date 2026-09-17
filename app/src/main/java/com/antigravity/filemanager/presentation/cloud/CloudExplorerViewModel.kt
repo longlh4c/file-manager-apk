@@ -989,15 +989,18 @@ class CloudExplorerViewModel @Inject constructor(
 
     fun refresh(isManual: Boolean = false) {
         val currentPath = _uiState.value.currentPath
-        // A whole-account tree refresh (list_folder(recursive=true) on Dropbox, or MEGA's only
-        // "f" endpoint which always returns every node) is expensive — only pay for it when the
-        // user explicitly asked to refresh (pull-to-refresh), not on every automatic refresh
-        // (after paste/delete/rename/createFolder). It used to also require being at the account
-        // root, back when the underlying tree cache expired on its own after 45s — now that the
-        // cache is kept forever until explicitly invalidated (see MegaApiClient/DropboxApiClient),
-        // that restriction just meant pull-to-refresh silently did nothing while inside a
-        // subfolder, since there was no other trigger to ever drop the stale cache. A manual pull
-        // now always forces the full refetch, wherever you are.
+        // forceFullRefresh only matters for Dropbox/MEGA — their tree cache is kept forever until
+        // explicitly told otherwise (see MegaApiClient/DropboxApiClient), so a manual pull-to-
+        // refresh is the only thing that ever forces a re-check against the server. MEGA's API
+        // genuinely has no way to list just one folder (its only "f" endpoint always returns every
+        // node in the account), so forceFullRefresh there really does mean a full account rebuild.
+        // Dropbox does have a real per-folder listing though — CloudManager routes forceFullRefresh
+        // there through DropboxApiClient.refreshFolderShallow, which re-lists just this one folder
+        // and patches only its direct children into the cached tree, leaving everything else
+        // cached as-is (much lighter than the account-wide list_folder(recursive=true) a full
+        // rebuild would need, at the cost of subfolder item counts here starting at 0 until
+        // fetchFolderItemCounts backfills them, and other folders not picking up concurrent
+        // changes until they're themselves refreshed).
         val provider = _uiState.value.account?.provider
         val forceFullRefresh = isManual &&
             (provider == com.antigravity.filemanager.domain.model.CloudProvider.DROPBOX ||

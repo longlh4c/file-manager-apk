@@ -226,15 +226,25 @@ class CloudManager @Inject constructor(
                     // outright, in case a real trash API becomes available later.
                     val path = if (remotePath == "/" || remotePath.isBlank()) "" else remotePath
                     if (forceFullRefresh) {
-                        dropboxApi.invalidateTree(account.id)
+                        // A manual pull-to-refresh used to invalidateTree() here, forcing the next
+                        // listing (right below) to rebuild the WHOLE account's tree via
+                        // list_folder(recursive=true) — accurate everywhere, but meant refreshing
+                        // even one small subfolder repaid the cost of relisting the entire account.
+                        // refreshFolderShallow instead re-lists just this one folder and patches
+                        // only its direct children into the existing cached tree, leaving every
+                        // other cached folder as-is — see its own doc comment for the tradeoffs
+                        // (subfolder item counts here come back at 0 until fetchFolderItemCounts's
+                        // fan-out backfills them, and a change made in some OTHER folder around the
+                        // same time won't show until that folder is itself refreshed).
+                        dropboxApi.refreshFolderShallow(account, path)
                     }
                     // Always build/reuse the cached whole-account tree, same as MEGA — now that
                     // the tree cache never expires on its own (only an explicit invalidateTree()
-                    // from a manual root refresh or a mutation drops it), paying for one full
-                    // recursive fetch is worth it: every navigation after that (including the
-                    // "copy/move to Dropbox" destination picker, and revisiting a folder right
-                    // after a transfer) is served from memory instead of a fresh network call
-                    // that looked like the folder was "reloading" every time.
+                    // or refreshFolderShallow patch changes it), paying for one full recursive
+                    // fetch (only when nothing is cached yet at all) is worth it: every navigation
+                    // after that (including the "copy/move to Dropbox" destination picker, and
+                    // revisiting a folder right after a transfer) is served from memory instead of
+                    // a fresh network call that looked like the folder was "reloading" every time.
                     val result = dropboxApi.listFolderCached(account, path, allowFullTreeFetch = true)
                     if (result.isSuccess) {
                         val list = result.getOrNull() ?: emptyList()

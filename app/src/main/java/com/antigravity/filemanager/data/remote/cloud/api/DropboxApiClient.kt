@@ -193,6 +193,37 @@ class DropboxApiClient @Inject constructor(
         persistTreeToDisk(accountId, newCache)
     }
 
+    /** Manual pull-to-refresh's actual work for Dropbox: a plain, non-recursive list_folder(path)
+     * for exactly this one folder, patched into the cached tree by replacing every entry whose
+     * parent is exactly this path with what the server just returned — everywhere else in the
+     * cached tree (every other folder) is left untouched. This is what lets a manual refresh stay
+     * a single lightweight call instead of the account-wide list_folder(recursive=true) rebuild a
+     * full [invalidateTree] would force on the next listing.
+     *
+     * The tradeoffs of scoping it this way: subfolders revealed by this refresh come back with
+     * itemCount=0 like any plain (non-tree) listing does — the caller's own bounded per-folder
+     * fan-out (see CloudExplorerViewModel.fetchFolderItemCounts) is what backfills those, same as
+     * it already does for Google Drive. And a change made to some OTHER folder around the same
+     * time (another device, or this account open elsewhere) won't show up here until that other
+     * folder is itself listed/refreshed — a full tree rebuild would have caught it everywhere at
+     * once, this deliberately does not.
+     *
+     * No-ops (leaving the next listing to do a full fetch as usual) if nothing is cached yet —
+     * patching a folder into an empty/nonexistent tree wouldn't leave anything usable behind. */
+    suspend fun refreshFolderShallow(account: CloudAccount, path: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val cached = treeCache[account.id] ?: return@withContext Result.success(Unit)
+        val normalizedPath = if (path == "/" || path.isBlank()) "" else path.trimEnd('/')
+        val freshItems = listFolder(account, path).getOrElse { return@withContext Result.failure(it) }
+        val freshEntries = freshItems.map { item ->
+            DropboxEntry(item.path, normalizedPath, item.name, item.isDirectory, item.size, item.lastModified, item.id)
+        }
+        val kept = cached.entries.filterNot { it.parentPath == normalizedPath }
+        val newCache = TreeCache(kept + freshEntries, System.currentTimeMillis())
+        treeCache[account.id] = newCache
+        persistTreeToDisk(account.id, newCache)
+        Result.success(Unit)
+    }
+
     private fun isFreshAndNonEmpty(cache: TreeCache): Boolean =
         cache.entries.isNotEmpty() && System.currentTimeMillis() - cache.timestamp <= treeTtlMillis
 
