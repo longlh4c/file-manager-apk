@@ -5,22 +5,45 @@ import org.apache.ftpserver.ConnectionConfigFactory
 import org.apache.ftpserver.DataConnectionConfigurationFactory
 import org.apache.ftpserver.FtpServer
 import org.apache.ftpserver.FtpServerFactory
-import org.apache.ftpserver.ftplet.Authentication
-import org.apache.ftpserver.ftplet.AuthenticationFailedException
-import org.apache.ftpserver.ftplet.Authority
-import org.apache.ftpserver.ftplet.User
-import org.apache.ftpserver.ftplet.UserManager
 import org.apache.ftpserver.listener.ListenerFactory
-import org.apache.ftpserver.usermanager.AnonymousAuthentication
-import org.apache.ftpserver.usermanager.UsernamePasswordAuthentication
-import org.apache.ftpserver.usermanager.impl.BaseUser
-import org.apache.ftpserver.usermanager.impl.ConcurrentLoginPermission
-import org.apache.ftpserver.usermanager.impl.TransferRatePermission
-import org.apache.ftpserver.usermanager.impl.WritePermission
-import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
+// Number of STOR/RETR transfers allowed to actually run their file-copy loop at once — see
+// TransferConcurrencyFtplet's own doc comment for why this exists separately from maxThreads.
+private const val MAX_CONCURRENT_TRANSFERS = 4
+
+// apache-ftpserver 1.2.0 (unmaintained since 2011) shares a single CharsetEncoder across this
+// pool's worker threads when encoding responses (e.g. "227 Entering Passive Mode ..." for PASV,
+// or STOR's own reply). CharsetEncoder is NOT thread-safe, so >1 thread means two connections (or
+// parallel data-connection requests from one client) can encode a response at the same time and
+// corrupt the shared encoder's internal state. maxThreads=1 was tried once to avoid that race by
+// fully serializing every command through this one pool — but that pool ALSO runs each command's
+// own handling, including STOR/RETR's file-copy loop, not just response encoding. With only 1
+// thread, any other command the client sends while a transfer is in progress (many clients
+// poll/refresh during a transfer) sits blocked until the transfer finishes, and can hit the
+// CLIENT's own timeout waiting — trading the crash for "connection times out mid-transfer". A
+// real thread pool lets commands run concurrently instead; the encoder race this risks is caught
+// (not fatal) by [ftpUncaughtExceptionHandler] below, which targets exactly exceptions from
+// org.apache.ftpserver/org.apache.mina, dropping just that one connection instead of the whole
+// app, while genuine app bugs elsewhere still crash normally.
+//
+// 4 wasn't enough on its own either: since each STOR/RETR's own file-copy loop runs synchronously
+// on one of these worker threads for as long as that transfer takes (not just the response
+// encoding), a client running N parallel transfer jobs needs N worker threads tied up in blocking
+// I/O simultaneously, for however long the transfers last — not just briefly. A WinSCP session
+// with 5 parallel 1GB uploads occupied all 4 threads with nothing left to process ANY other
+// command (control-connection keepalives, the 5th job's own PASV/STOR, directory listings) until
+// one transfer finished minutes later — which looked exactly like the app freezing, and was slow
+// enough that WinSCP's own client-side timeout gave up and dropped the connection. Raised well
+// above what a real transfer client is likely to run in parallel at once; each thread is only
+// blocked on I/O (not spinning the CPU), so holding more of them idle-but-blocked is cheap. See
+// [MAX_CONCURRENT_TRANSFERS] for the separate, tighter cap on actual concurrent storage I/O.
+private const val MAX_WORKER_THREADS = 16
+
+/** Embedded FTP server (apache-ftpserver over MINA) exposing the device's storage over the LAN.
+ * Owns only the server's own lifecycle — networking (LAN IP, wake/WiFi locks) and the foreground
+ * service wrapper live in [FtpServerService]. */
 @Singleton
 class EmbeddedFtpServer @Inject constructor() {
 
@@ -30,10 +53,10 @@ class EmbeddedFtpServer @Inject constructor() {
 
     private var previousUncaughtExceptionHandler: Thread.UncaughtExceptionHandler? = null
 
-    // Defense in depth for the shared-CharsetEncoder race described where maxThreads is set,
-    // below — if it ever fires again despite that, this stops it from being fatal for the whole
-    // app. Only swallows exceptions whose stack trace actually runs through org.apache.ftpserver
-    // or org.apache.mina (this library's own packages), so it can only ever mask a bug in this
+    // Defense in depth for the shared-CharsetEncoder race described at MAX_WORKER_THREADS above —
+    // if it ever fires again despite that, this stops it from being fatal for the whole app. Only
+    // swallows exceptions whose stack trace actually runs through org.apache.ftpserver or
+    // org.apache.mina (this library's own packages), so it can only ever mask a bug in this
     // embedded FTP server — never a real crash elsewhere in the app, which still falls through to
     // whatever handler was already installed (Android's default process-kill included).
     private val ftpUncaughtExceptionHandler = Thread.UncaughtExceptionHandler { thread, throwable ->
@@ -51,16 +74,16 @@ class EmbeddedFtpServer @Inject constructor() {
         port: Int = 1524,
         password: String = "",
         // The LAN IP FtpServerService already computes for the "ftp://ip:port" it shows the user
-        // — reused here for the exact same reason it needed getLocalIpAddress() in the first
-        // place: MINA's default PASV configuration announces whatever local address the JVM's
-        // socket auto-detects for the "227 Entering Passive Mode (...)" reply, which on Android
-        // (multiple interfaces — WiFi, mobile data, VPN, hotspot AP — all up at once) can easily
-        // be the wrong one. The control connection (login, PWD, LIST headers) works fine either
-        // way since it's already an established socket, but every PASV data transfer (a real
-        // directory listing's contents, upload, download) then dials an address the client can't
-        // actually reach and just times out — which is exactly "service says active, but every
-        // real operation times out". Passing the real LAN IP here pins the announced address to
-        // one the client, on the same LAN, can actually reach.
+        // — reused here for the exact same reason it needed that resolution in the first place:
+        // MINA's default PASV configuration announces whatever local address the JVM's socket
+        // auto-detects for the "227 Entering Passive Mode (...)" reply, which on Android (multiple
+        // interfaces — WiFi, mobile data, VPN, hotspot AP — all up at once) can easily be the
+        // wrong one. The control connection (login, PWD, LIST headers) works fine either way since
+        // it's already an established socket, but every PASV data transfer (a real directory
+        // listing's contents, upload, download) then dials an address the client can't actually
+        // reach and just times out — which is exactly "service says active, but every real
+        // operation times out". Passing the real LAN IP here pins the announced address to one the
+        // client, on the same LAN, can actually reach.
         externalIpAddress: String? = null
     ): Boolean {
         if (isRunning) return true
@@ -69,60 +92,34 @@ class EmbeddedFtpServer @Inject constructor() {
         Thread.setDefaultUncaughtExceptionHandler(ftpUncaughtExceptionHandler)
 
         return try {
-            val serverFactory = FtpServerFactory()
+            val serverFactory = FtpServerFactory().apply {
+                connectionConfig = ConnectionConfigFactory().apply {
+                    maxLogins = 100
+                    maxAnonymousLogins = 100
+                    maxLoginFailures = 100
+                    loginFailureDelay = 0
+                    maxThreads = MAX_WORKER_THREADS
+                    isAnonymousLoginEnabled = true
+                }.createConnectionConfig()
 
-            // Configure unlimited connections & remove login limits
-            val connectionConfigFactory = ConnectionConfigFactory().apply {
-                maxLogins = 100
-                maxAnonymousLogins = 100
-                maxLoginFailures = 100
-                loginFailureDelay = 0
-                // apache-ftpserver 1.2.0 (unmaintained since 2011) shares a single CharsetEncoder
-                // across this pool's worker threads when encoding responses (e.g. "227 Entering
-                // Passive Mode ..." for PASV, or STOR's own reply). CharsetEncoder is NOT
-                // thread-safe, so >1 thread means two connections (or parallel data-connection
-                // requests from one client) can encode a response at the same time and corrupt the
-                // shared encoder's internal state. maxThreads=1 (tried right before this) avoids
-                // that race by fully serializing every command through this one pool — but that
-                // pool ALSO runs each command's own handling, including STOR/RETR's file-copy loop,
-                // not just response encoding. With only 1 thread, any other command the client
-                // sends while a transfer is in progress (many clients poll/refresh during a
-                // transfer) sits blocked until the transfer finishes, and can hit the CLIENT's own
-                // timeout waiting — trading the crash for "connection times out mid-transfer".
-                // Back to a real thread pool so commands can actually run concurrently; the
-                // encoder race this used to risk is now caught (not fatal) by the
-                // UncaughtExceptionHandler installed in start(), below — it targets exactly
-                // exceptions from org.apache.ftpserver/org.apache.mina, dropping just that one
-                // connection instead of the whole app, while genuine app bugs elsewhere still
-                // crash normally.
-                maxThreads = 4
-                isAnonymousLoginEnabled = true
+                addListener("default", buildListener(port, externalIpAddress))
+
+                userManager = CustomFtpUserManager(
+                    homeDirectory = Environment.getExternalStorageDirectory().absolutePath,
+                    expectedPassword = password.trim()
+                )
+
+                // Caps how many STOR/RETR transfers actually run their file-copy loop at once,
+                // independent of maxThreads above (which just bounds how many commands/connections
+                // can be serviced in parallel at all). Without this, N clients' transfer jobs
+                // compete for the phone's single flash storage I/O bus — more parallel writes/
+                // reads than the storage can actually service concurrently doesn't move data
+                // faster, just spreads the same bandwidth thinner across more in-flight transfers,
+                // and ties up more worker threads doing it. Extra jobs beyond the cap simply queue
+                // (blocked on the semaphore, not competing for storage bandwidth) until a slot
+                // frees up, rather than racing ahead.
+                ftplets = mapOf("transferLimiter" to TransferConcurrencyFtplet(MAX_CONCURRENT_TRANSFERS))
             }
-            serverFactory.connectionConfig = connectionConfigFactory.createConnectionConfig()
-
-            val listenerFactory = ListenerFactory().apply {
-                this.port = port
-                if (!externalIpAddress.isNullOrBlank()) {
-                    dataConnectionConfiguration = DataConnectionConfigurationFactory().apply {
-                        // Pin PASV replies to the real LAN address instead of letting MINA guess
-                        // from the local socket — see the parameter's doc comment above.
-                        passiveExternalAddress = externalIpAddress
-                        // Leaving passivePorts at its "0" default (any free ephemeral port) is
-                        // fine here: on the same LAN there's no NAT/router port-forwarding step
-                        // in the way, so nothing needs those ports pre-opened externally, only the
-                        // announced address needs to be correct.
-                    }.createDataConnectionConfiguration()
-                }
-            }
-            serverFactory.addListener("default", listenerFactory.createListener())
-
-            val homeDir = Environment.getExternalStorageDirectory().absolutePath
-            val userManager = CustomFtpUserManager(
-                homeDirectory = homeDir,
-                expectedPassword = password.trim()
-            )
-
-            serverFactory.userManager = userManager
 
             val createdServer = serverFactory.createServer()
             createdServer.start()
@@ -137,6 +134,21 @@ class EmbeddedFtpServer @Inject constructor() {
         }
     }
 
+    private fun buildListener(port: Int, externalIpAddress: String?) = ListenerFactory().apply {
+        this.port = port
+        if (!externalIpAddress.isNullOrBlank()) {
+            dataConnectionConfiguration = DataConnectionConfigurationFactory().apply {
+                // Pin PASV replies to the real LAN address instead of letting MINA guess from the
+                // local socket — see start()'s externalIpAddress doc comment above.
+                passiveExternalAddress = externalIpAddress
+                // Leaving passivePorts at its "0" default (any free ephemeral port) is fine here:
+                // on the same LAN there's no NAT/router port-forwarding step in the way, so
+                // nothing needs those ports pre-opened externally, only the announced address
+                // needs to be correct.
+            }.createDataConnectionConfiguration()
+        }
+    }.createListener()
+
     fun stop() {
         try {
             server?.stop()
@@ -146,88 +158,5 @@ class EmbeddedFtpServer @Inject constructor() {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-    }
-}
-
-class CustomFtpUserManager(
-    private val homeDirectory: String,
-    private val expectedPassword: String
-) : UserManager {
-
-    private val authorities: List<Authority> = listOf(
-        WritePermission(),
-        ConcurrentLoginPermission(100, 100),
-        TransferRatePermission(0, 0)
-    )
-
-    private fun createUser(name: String): BaseUser {
-        val user = BaseUser()
-        user.name = name
-        user.password = expectedPassword
-        user.homeDirectory = this@CustomFtpUserManager.homeDirectory
-        user.authorities = this@CustomFtpUserManager.authorities
-        user.maxIdleTime = 600
-        user.setEnabled(true)
-        return user
-    }
-
-    override fun getUserByName(username: String?): User? {
-        val name = if (username.isNullOrBlank()) "anonymous" else username
-        return createUser(name)
-    }
-
-    override fun getAllUserNames(): Array<String> {
-        return arrayOf("admin", "anonymous")
-    }
-
-    override fun delete(username: String?) {}
-
-    override fun save(user: User?) {}
-
-    override fun doesExist(username: String?): Boolean {
-        return true
-    }
-
-    override fun authenticate(authentication: Authentication?): User {
-        if (authentication == null) {
-            throw AuthenticationFailedException("Authentication required")
-        }
-
-        // Case 1: Anonymous Authentication
-        if (authentication is AnonymousAuthentication) {
-            if (expectedPassword.isEmpty()) {
-                return createUser("anonymous")
-            } else {
-                throw AuthenticationFailedException("Password is required for this server")
-            }
-        }
-
-        // Case 2: Username & Password Authentication
-        if (authentication is UsernamePasswordAuthentication) {
-            val username = authentication.username?.trim() ?: "admin"
-            val password = authentication.password ?: ""
-
-            if (expectedPassword.isEmpty()) {
-                // No password set on server: accept ANY username and password!
-                return createUser(username)
-            } else {
-                // Server has password: verify exact match
-                if (password == expectedPassword) {
-                    return createUser(username)
-                } else {
-                    throw AuthenticationFailedException("Invalid password for user $username")
-                }
-            }
-        }
-
-        throw AuthenticationFailedException("Unsupported authentication method")
-    }
-
-    override fun getAdminName(): String {
-        return "admin"
-    }
-
-    override fun isAdmin(username: String?): Boolean {
-        return true
     }
 }

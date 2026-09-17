@@ -1,42 +1,44 @@
 package com.antigravity.filemanager.data.remote.ftp
 
-import android.app.*
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
-import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.antigravity.filemanager.MainActivity
 import com.antigravity.filemanager.R
+import com.antigravity.filemanager.data.local.preferences.PreferenceManager
 import com.antigravity.filemanager.domain.model.FtpServerState
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.net.InetAddress
-import java.net.NetworkInterface
-import java.util.*
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+/** Foreground service wrapping [EmbeddedFtpServer] — owns everything about staying alive and
+ * reachable while it runs (wake/WiFi locks via [FtpPowerLocks], the persistent notification, LAN
+ * IP resolution) that the embedded server itself has no business knowing about. */
 @AndroidEntryPoint
 class FtpServerService : Service() {
 
     @Inject
     lateinit var ftpServer: EmbeddedFtpServer
 
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var screenWakeLock: PowerManager.WakeLock? = null
-    // Neither wake lock above keeps the WiFi radio itself awake — Android independently puts WiFi
-    // into a low-power/sleep state once the screen turns off or the app is backgrounded, unless
-    // something holds a WifiLock. Without one, the process (and this foreground service) keeps
-    // running fine, but incoming packets on the FTP listening socket get delayed/dropped by the
-    // radio itself — exactly "service says running, but switching to another app drops the
-    // connection". WIFI_MODE_FULL_HIGH_PERF keeps it fully awake for as long as this is held.
-    private var wifiLock: WifiManager.WifiLock? = null
+    @Inject
+    lateinit var preferenceManager: PreferenceManager
+
+    private lateinit var powerLocks: FtpPowerLocks
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     companion object {
@@ -57,16 +59,7 @@ class FtpServerService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FileManager::FtpWakeLock")
-        @Suppress("DEPRECATION")
-        screenWakeLock = powerManager.newWakeLock(
-            PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
-            "FileManager::FtpScreenWakeLock"
-        )
-        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-        @Suppress("DEPRECATION")
-        wifiLock = wifiManager?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "FileManager::FtpWifiLock")
+        powerLocks = FtpPowerLocks(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -74,27 +67,49 @@ class FtpServerService : Service() {
             ACTION_START -> {
                 val port = intent.getIntExtra(EXTRA_PORT, 1524)
                 val randomPass = intent.getBooleanExtra(EXTRA_RANDOM_PASS, false)
-                val password = if (randomPass) generateRandomPassword() else intent.getStringExtra(EXTRA_PASSWORD) ?: ""
+                val password = if (randomPass) generateRandomFtpPassword() else intent.getStringExtra(EXTRA_PASSWORD) ?: ""
 
                 startServer(port, password, randomPass)
             }
             ACTION_STOP -> {
                 stopServer()
             }
+            else -> {
+                // A null (or otherwise unrecognized) intent is how Android redelivers a
+                // START_STICKY service after the system killed its process — there's no
+                // ACTION_START intent to read port/password from this time, only whatever was
+                // last persisted. Re-launch automatically ONLY if the server was actually left
+                // running (not explicitly stopped) before the kill — otherwise every ordinary
+                // app-swipe-to-close would resurrect a server the user turned off on purpose.
+                if (intent == null) {
+                    serviceScope.launch {
+                        if (preferenceManager.ftpWasRunningFlow.first()) {
+                            val port = preferenceManager.ftpPortFlow.first()
+                            val password = preferenceManager.ftpPasswordFlow.first()
+                            startServer(port, password, random = false)
+                        }
+                    }
+                }
+            }
         }
-        return START_NOT_STICKY
+        // Was START_NOT_STICKY: if the OS (or an OEM battery manager) killed this process while
+        // the FTP server was on, nothing brought the listening socket back — the app's own UI
+        // still showed "running" from whatever it last observed, but WinSCP (or any client)
+        // trying to connect got a flat "connection refused" since nothing was actually listening
+        // anymore, with no way to tell without checking logcat. START_STICKY tells Android to
+        // relaunch this service after such a kill (redelivering a null intent, handled above);
+        // this alone can't help against an OEM-specific kill that also blocks that relaunch
+        // outright (that needs the battery/background-permission settings already advised
+        // elsewhere), but it does recover from an ordinary Android low-memory kill on its own.
+        return START_STICKY
     }
 
     private fun startServer(port: Int, pass: String, random: Boolean) {
         serviceScope.launch {
-            val ip = getLocalIpAddress()
+            val ip = resolveLocalIpAddress(this@FtpServerService)
             val success = ftpServer.start(port, pass, externalIpAddress = ip)
             if (success) {
-                wakeLock?.acquire(24 * 60 * 60 * 1000L) // 24h max
-                screenWakeLock?.acquire(24 * 60 * 60 * 1000L) // keep screen from timing out while FTP is on
-                if (wifiLock?.isHeld != true) {
-                    wifiLock?.acquire()
-                }
+                powerLocks.acquire()
                 _ftpState.value = FtpServerState(
                     isRunning = true,
                     ipAddress = ip,
@@ -102,9 +117,11 @@ class FtpServerService : Service() {
                     password = pass,
                     isRandomPassword = random
                 )
+                preferenceManager.setFtpWasRunning(true)
                 startForegroundNotification("ftp://$ip:$port")
             } else {
                 _ftpState.value = _ftpState.value.copy(isRunning = false)
+                preferenceManager.setFtpWasRunning(false)
                 stopSelf()
             }
         }
@@ -113,15 +130,8 @@ class FtpServerService : Service() {
     private fun stopServer() {
         serviceScope.launch {
             ftpServer.stop()
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-            }
-            if (screenWakeLock?.isHeld == true) {
-                screenWakeLock?.release()
-            }
-            if (wifiLock?.isHeld == true) {
-                wifiLock?.release()
-            }
+            preferenceManager.setFtpWasRunning(false)
+            powerLocks.release()
             _ftpState.value = _ftpState.value.copy(isRunning = false)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -164,82 +174,9 @@ class FtpServerService : Service() {
         }
     }
 
-    private fun getLocalIpAddress(): String {
-        try {
-            // 1. Check WifiManager first if connected to Wi-Fi
-            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-            if (wifiManager != null && wifiManager.isWifiEnabled) {
-                val ipInt = wifiManager.connectionInfo.ipAddress
-                if (ipInt != 0) {
-                    return String.format(
-                        Locale.US,
-                        "%d.%d.%d.%d",
-                        ipInt and 0xff,
-                        ipInt shr 8 and 0xff,
-                        ipInt shr 16 and 0xff,
-                        ipInt shr 24 and 0xff
-                    )
-                }
-            }
-
-            // 2. Iterate network interfaces prioritizing Wi-Fi, Ethernet, Hotspot
-            val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
-
-            // Priority 1: wlan, eth, ap, rndis interfaces
-            for (intf in interfaces) {
-                val name = intf.name.lowercase(Locale.US)
-                if (intf.isUp && (name.startsWith("wlan") || name.startsWith("eth") || name.startsWith("ap") || name.startsWith("rndis"))) {
-                    for (addr in Collections.list(intf.inetAddresses)) {
-                        if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
-                            val host = addr.hostAddress
-                            if (host != null && !host.startsWith("127.")) {
-                                return host
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Priority 2: Standard private subnets (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
-            for (intf in interfaces) {
-                if (intf.isUp && !intf.isLoopback) {
-                    for (addr in Collections.list(intf.inetAddresses)) {
-                        if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
-                            val host = addr.hostAddress ?: continue
-                            if (host.startsWith("192.168.") || host.startsWith("10.") || host.startsWith("172.")) {
-                                return host
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Priority 3: Any non-loopback IPv4
-            for (intf in interfaces) {
-                if (intf.isUp && !intf.isLoopback) {
-                    for (addr in Collections.list(intf.inetAddresses)) {
-                        if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
-                            return addr.hostAddress ?: "127.0.0.1"
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        return "127.0.0.1"
-    }
-
-    private fun generateRandomPassword(): String {
-        val chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-        return (1..6).map { chars.random() }.joinToString("")
-    }
-
     override fun onDestroy() {
         ftpServer.stop()
-        if (wakeLock?.isHeld == true) wakeLock?.release()
-        if (screenWakeLock?.isHeld == true) screenWakeLock?.release()
-        if (wifiLock?.isHeld == true) wifiLock?.release()
+        powerLocks.release()
         _ftpState.value = _ftpState.value.copy(isRunning = false)
         serviceScope.cancel()
         super.onDestroy()

@@ -20,6 +20,7 @@ class PreferenceManager @Inject constructor(
         val FTP_PORT = intPreferencesKey("ftp_port")
         val FTP_PASSWORD = stringPreferencesKey("ftp_password")
         val FTP_RANDOM_PASSWORD = booleanPreferencesKey("ftp_random_password")
+        val FTP_WAS_RUNNING = booleanPreferencesKey("ftp_was_running")
         val IS_GRID_VIEW = booleanPreferencesKey("is_grid_view")
         val DEFAULT_SORT_OPTION = stringPreferencesKey("default_sort_option")
         val DEFAULT_VIEW_MODE = stringPreferencesKey("default_view_mode")
@@ -29,6 +30,11 @@ class PreferenceManager @Inject constructor(
     val ftpPortFlow: Flow<Int> = context.dataStore.data.map { it[Keys.FTP_PORT] ?: 1524 }
     val ftpPasswordFlow: Flow<String> = context.dataStore.data.map { it[Keys.FTP_PASSWORD] ?: "" }
     val ftpRandomPasswordFlow: Flow<Boolean> = context.dataStore.data.map { it[Keys.FTP_RANDOM_PASSWORD] ?: false }
+    // Whether the FTP server was left running (as opposed to explicitly stopped by the user) —
+    // used to auto-restart it if the OS/OEM battery manager kills the app process outright while
+    // it's on, since a plain Android low-memory kill doesn't otherwise bring the FTP listener back
+    // on its own. See FtpServerService.onStartCommand's null-intent (system restart) branch.
+    val ftpWasRunningFlow: Flow<Boolean> = context.dataStore.data.map { it[Keys.FTP_WAS_RUNNING] ?: false }
     val isGridViewFlow: Flow<Boolean> = context.dataStore.data.map { it[Keys.IS_GRID_VIEW] ?: true }
     val defaultSortOptionFlow: Flow<String> = context.dataStore.data.map { it[Keys.DEFAULT_SORT_OPTION] ?: "BY_NAME_ASC" }
     val defaultViewModeFlow: Flow<String> = context.dataStore.data.map { it[Keys.DEFAULT_VIEW_MODE] ?: "LIST" }
@@ -40,6 +46,10 @@ class PreferenceManager @Inject constructor(
             prefs[Keys.FTP_PASSWORD] = password
             prefs[Keys.FTP_RANDOM_PASSWORD] = isRandom
         }
+    }
+
+    suspend fun setFtpWasRunning(running: Boolean) {
+        context.dataStore.edit { prefs -> prefs[Keys.FTP_WAS_RUNNING] = running }
     }
 
     suspend fun setGridView(isGrid: Boolean) {
