@@ -350,6 +350,10 @@ fun ImageViewerScreen(
         ) {
             HorizontalPager(
                 state = pagerState,
+                // Swipe right to advance to the next image (and left for the previous one) —
+                // the opposite of HorizontalPager's own default page order, which advances on a
+                // left swipe.
+                reverseLayout = true,
                 modifier = Modifier.fillMaxSize()
             ) { page ->
                 val entry = imageEntries[page]
@@ -712,6 +716,8 @@ fun VideoPlayerScreen(
         ) {
             HorizontalPager(
                 state = pagerState,
+                // Same swipe convention as the image viewer — right advances, left goes back.
+                reverseLayout = true,
                 modifier = Modifier.fillMaxSize()
             ) { page ->
                 val entry = videoEntries[page]
