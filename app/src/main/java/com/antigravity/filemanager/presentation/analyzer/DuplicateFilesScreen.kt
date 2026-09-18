@@ -27,6 +27,7 @@ import com.antigravity.filemanager.presentation.theme.*
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.presentation.components.DeleteConfirmDialog
 import com.antigravity.filemanager.presentation.components.FileManagerTopBar
+import com.antigravity.filemanager.presentation.components.PullToRefreshWrapper
 import com.antigravity.filemanager.presentation.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -115,41 +116,45 @@ fun DuplicateFilesScreen(
         },
         containerColor = DarkBackground
     ) { paddingValues ->
-        if (uiState.isLoading) {
-            Box(modifier = Modifier.fillMaxSize().padding(paddingValues), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = TealPrimary)
-            }
-        } else if (groups.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize().padding(paddingValues), contentAlignment = Alignment.Center) {
-                Text("No duplicates found", color = TextSecondary, fontSize = 15.sp)
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().background(DarkBackground).padding(paddingValues),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                groups.forEach { group ->
-                    item(key = "header_${group.key}") {
-                        Text(
-                            text = group.items.firstOrNull { it.isOriginal }?.name ?: group.items.first().name,
-                            color = TealPrimary,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-                        )
-                    }
-                    items(group.items, key = { it.path }) { entry ->
-                        val isSelected = selectedPaths.contains(entry.path)
-                        DuplicateEntryRow(
-                            entry = entry,
-                            isSelected = isSelected,
-                            onClick = {
-                                selectedPaths = if (isSelected) selectedPaths - entry.path else selectedPaths + entry.path
-                            }
-                        )
-                        HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
+        PullToRefreshWrapper(
+            onRefresh = { viewModel.refresh() },
+            isRefreshing = uiState.isLoading,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+        ) {
+            if (!uiState.isLoading && groups.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No duplicates found", color = TextSecondary, fontSize = 15.sp)
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize().background(DarkBackground),
+                    contentPadding = PaddingValues(vertical = 8.dp)
+                ) {
+                    groups.forEach { group ->
+                        item(key = "header_${group.key}") {
+                            Text(
+                                text = group.items.firstOrNull { it.isOriginal }?.name ?: group.items.first().name,
+                                color = TealPrimary,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                            )
+                        }
+                        items(group.items, key = { it.path }) { entry ->
+                            val isSelected = selectedPaths.contains(entry.path)
+                            DuplicateEntryRow(
+                                entry = entry,
+                                isSelected = isSelected,
+                                onClick = {
+                                    selectedPaths = if (isSelected) selectedPaths - entry.path else selectedPaths + entry.path
+                                }
+                            )
+                            HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
+                        }
                     }
                 }
             }

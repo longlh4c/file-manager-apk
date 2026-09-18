@@ -395,38 +395,41 @@ fun LargeFilesScreen(
 
             HorizontalDivider(color = Color(0xFF222222), thickness = 0.5.dp)
 
-            if (uiState.isLoading) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator(color = TealPrimary)
-                }
-            } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(filteredFiles, key = { it.path }) { item ->
-                        val isSelected = selectedPaths.contains(item.path)
-                        LargeFileDetailedRow(
-                            item = item,
-                            isSelected = isSelected,
-                            onClick = {
-                                if (selectedPaths.isNotEmpty()) {
+            PullToRefreshWrapper(
+                onRefresh = { viewModel.refresh() },
+                isRefreshing = uiState.isLoading,
+                modifier = Modifier.fillMaxSize()
+            ) {
+                if (!uiState.isLoading && filteredFiles.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text(text = "No large files found", color = TextSecondary, fontSize = 15.sp)
+                    }
+                } else {
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        items(filteredFiles, key = { it.path }) { item ->
+                            val isSelected = selectedPaths.contains(item.path)
+                            LargeFileDetailedRow(
+                                item = item,
+                                isSelected = isSelected,
+                                onClick = {
+                                    if (selectedPaths.isNotEmpty()) {
+                                        selectedPaths = if (isSelected) selectedPaths - item.path else selectedPaths + item.path
+                                    } else {
+                                        val fileItem = FileItem(
+                                            id = item.path,
+                                            name = item.name,
+                                            path = item.path,
+                                            size = item.sizeBytes
+                                        )
+                                        FileOpener.openFile(context, fileItem)
+                                    }
+                                },
+                                onCheckboxToggle = {
                                     selectedPaths = if (isSelected) selectedPaths - item.path else selectedPaths + item.path
-                                } else {
-                                    val fileItem = FileItem(
-                                        id = item.path,
-                                        name = item.name,
-                                        path = item.path,
-                                        size = item.sizeBytes
-                                    )
-                                    FileOpener.openFile(context, fileItem)
                                 }
-                            },
-                            onCheckboxToggle = {
-                                selectedPaths = if (isSelected) selectedPaths - item.path else selectedPaths + item.path
-                            }
-                        )
-                        HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
+                            )
+                            HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
+                        }
                     }
                 }
             }

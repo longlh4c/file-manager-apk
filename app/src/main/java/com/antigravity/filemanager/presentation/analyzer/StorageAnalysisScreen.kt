@@ -55,19 +55,11 @@ fun StorageAnalysisScreen(
     ) { paddingValues ->
         PullToRefreshWrapper(
             onRefresh = { viewModel.refresh() },
+            isRefreshing = uiState.isLoading,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            if (uiState.isLoading) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator(color = TealPrimary)
-                }
-            }
-
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()

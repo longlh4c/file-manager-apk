@@ -29,6 +29,7 @@ import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.TrashItem
 import com.antigravity.filemanager.presentation.components.CloudDownloadProgressDialog
 import com.antigravity.filemanager.presentation.components.FileManagerTopBar
+import com.antigravity.filemanager.presentation.components.PullToRefreshWrapper
 import com.antigravity.filemanager.presentation.components.getFileIcon
 import com.antigravity.filemanager.presentation.theme.*
 import java.io.File
@@ -118,38 +119,35 @@ fun RecycleBinScreen(
         },
         containerColor = DarkBackground
     ) { paddingValues ->
-        if (uiState.isLoading) {
-            Box(
-                modifier = Modifier.fillMaxSize().padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(color = TealPrimary)
-            }
-        } else if (uiState.items.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.DeleteOutline,
-                        contentDescription = null,
-                        tint = TextTertiary,
-                        modifier = Modifier.size(64.dp)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(text = "Recycle Bin is empty", color = TextSecondary, fontSize = 16.sp)
+        PullToRefreshWrapper(
+            onRefresh = { /* Reactive Room Flow automatically stays fresh */ },
+            isRefreshing = uiState.isLoading,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+        ) {
+            if (!uiState.isLoading && uiState.items.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = null,
+                            tint = TextTertiary,
+                            modifier = Modifier.size(64.dp)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(text = "Recycle Bin is empty", color = TextSecondary, fontSize = 16.sp)
+                    }
                 }
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(DarkBackground)
-                    .padding(paddingValues)
-            ) {
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(DarkBackground)
+                ) {
                 items(uiState.items, key = { it.id }) { item ->
                     val isSelected = uiState.selectedIds.contains(item.id)
                     Row(
@@ -190,6 +188,7 @@ fun RecycleBinScreen(
             }
         }
     }
+}
 }
 
 // Was a plain text-only row with no thumbnail at all. trashPath (not originalPath) is the file's

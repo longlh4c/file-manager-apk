@@ -52,6 +52,7 @@ fun StorageFolderBreakdownScreen(
     // folderItems still empty and isScanning=false — briefly showing the "empty folder" icon
     // even when the folder isn't empty, before the actual scan below had a chance to run.
     var isScanning by remember { mutableStateOf(true) }
+    var refreshTrigger by remember { mutableStateOf(0) }
     var folderItems by remember { mutableStateOf<List<FileItem>>(emptyList()) }
     var showMoreMenu by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
@@ -62,7 +63,7 @@ fun StorageFolderBreakdownScreen(
 
     val rootPath = android.os.Environment.getExternalStorageDirectory().absolutePath
 
-    LaunchedEffect(currentPath, uiState.mutationTick) {
+    LaunchedEffect(currentPath, uiState.mutationTick, refreshTrigger) {
         isScanning = true
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
@@ -90,7 +91,6 @@ fun StorageFolderBreakdownScreen(
                 folderItems = emptyList()
             }
         }
-        kotlinx.coroutines.delay(200)
         isScanning = false
     }
 
@@ -486,44 +486,43 @@ fun StorageFolderBreakdownScreen(
 
             HorizontalDivider(color = Color(0xFF222222), thickness = 0.5.dp)
 
-            if (isScanning || uiState.isLoading) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator(color = TealPrimary)
-                }
-            } else if (filteredItems.isEmpty()) {
-                EmptyFolderState()
-            } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(filteredItems, key = { it.path }) { item ->
-                        val percentage = (item.size.toDouble() / totalDirBytes.toDouble()) * 100.0
-                        val formattedPercent = String.format(Locale.getDefault(), "%.2f%%", percentage)
-                        val isSelected = selectedPaths.contains(item.path)
+            PullToRefreshWrapper(
+                onRefresh = { refreshTrigger++ },
+                isRefreshing = isScanning || uiState.isLoading,
+                modifier = Modifier.fillMaxSize()
+            ) {
+                if (!isScanning && filteredItems.isEmpty()) {
+                    EmptyFolderState()
+                } else {
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        items(filteredItems, key = { it.path }) { item ->
+                            val percentage = (item.size.toDouble() / totalDirBytes.toDouble()) * 100.0
+                            val formattedPercent = String.format(Locale.getDefault(), "%.2f%%", percentage)
+                            val isSelected = selectedPaths.contains(item.path)
 
-                        StorageFolderRow(
-                            item = item,
-                            percentage = percentage,
-                            formattedPercent = formattedPercent,
-                            isSelected = isSelected,
-                            onFolderClick = {
-                                if (selectedPaths.isNotEmpty()) {
-                                    selectedPaths = if (isSelected) selectedPaths - item.path else selectedPaths + item.path
-                                } else {
-                                    if (item.isDirectory) {
-                                        currentPath = item.path
-                                        pathHistory = pathHistory + item.path
+                            StorageFolderRow(
+                                item = item,
+                                percentage = percentage,
+                                formattedPercent = formattedPercent,
+                                isSelected = isSelected,
+                                onFolderClick = {
+                                    if (selectedPaths.isNotEmpty()) {
+                                        selectedPaths = if (isSelected) selectedPaths - item.path else selectedPaths + item.path
                                     } else {
-                                        FileOpener.openFile(context, item)
+                                        if (item.isDirectory) {
+                                            currentPath = item.path
+                                            pathHistory = pathHistory + item.path
+                                        } else {
+                                            FileOpener.openFile(context, item)
+                                        }
                                     }
+                                },
+                                onCheckboxToggle = {
+                                    selectedPaths = if (isSelected) selectedPaths - item.path else selectedPaths + item.path
                                 }
-                            },
-                            onCheckboxToggle = {
-                                selectedPaths = if (isSelected) selectedPaths - item.path else selectedPaths + item.path
-                            }
-                        )
-                        HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
+                            )
+                            HorizontalDivider(color = Color(0xFF202020), thickness = 0.5.dp)
+                        }
                     }
                 }
             }
@@ -540,124 +539,93 @@ private fun StorageFolderRow(
     onFolderClick: () -> Unit,
     onCheckboxToggle: () -> Unit
 ) {
-    val theme = getStorageItemVisualTheme(item)
     val rowBg = if (isSelected) SelectionBg else Color.Transparent
 
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .background(rowBg)
             .clickable { onFolderClick() }
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
-        // Clean neutral icon container with subtle pastel folder tint
-        Box(
-            modifier = Modifier
-                .size(42.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF1C2228)),
-            contentAlignment = Alignment.Center
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = theme.icon,
-                contentDescription = null,
-                tint = theme.color,
-                modifier = Modifier.size(24.dp)
-            )
-        }
-
-        Spacer(modifier = Modifier.width(14.dp))
-
-        // Title & clean neutral subtitle pill
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = item.name,
-                color = TextPrimary,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(3.dp))
-
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color(0xFF222830))
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
-            ) {
-                Text(
-                    text = if (item.isDirectory) "${item.itemCount} items (${item.formattedSize})" else item.formattedSize,
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Normal
-                )
+            // Folders in yellow with badges, or file icon for files
+            if (item.isDirectory) {
+                FolderIconWithBadge(badgeType = item.folderBadgeType)
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(DarkCard),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = getFileIcon(item),
+                        contentDescription = null,
+                        tint = getFileIconColor(item),
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
             }
-        }
+            Spacer(modifier = Modifier.width(14.dp))
 
-        Spacer(modifier = Modifier.width(8.dp))
+            // Title & Subtitle with light blue capacity bar
+            Column(modifier = Modifier.weight(1f)) {
+                // Name
+                Text(
+                    text = item.name,
+                    color = TextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(2.dp))
 
-        // Percentage text
-        Text(
-            text = formattedPercent,
-            color = TextSecondary,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Normal,
-            modifier = Modifier.padding(horizontal = 6.dp)
-        )
+                // Items count and Formatted Size e.g. "3 items (42,50 GB)" with light blue capacity bar
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(
+                                if (percentage > 10.0) Color(0xFF81D4FA).copy(alpha = 0.6f)
+                                else if (percentage > 2.0) Color(0xFF81D4FA).copy(alpha = 0.35f)
+                                else Color.Transparent
+                            )
+                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                    ) {
+                        Text(
+                            text = if (item.isDirectory) "${item.itemCount} items (${item.formattedSize})" else item.formattedSize,
+                            color = if (percentage > 2.0) Color.White else TextSecondary,
+                            fontSize = 13.sp
+                        )
+                    }
+                }
+            }
 
-        // Checkbox on the right
-        Checkbox(
-            checked = isSelected,
-            onCheckedChange = { onCheckboxToggle() },
-            colors = CheckboxDefaults.colors(
-                checkedColor = TealPrimary,
-                uncheckedColor = TextSecondary,
-                checkmarkColor = PureBlack
+            // Percentage on the right (matching Screenshot 1:30)
+            Text(
+                text = formattedPercent,
+                color = TextSecondary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Normal,
+                modifier = Modifier.padding(horizontal = 12.dp)
             )
-        )
-    }
-}
 
-private data class StorageItemVisualTheme(
-    val color: Color,
-    val icon: ImageVector
-)
-
-private fun getStorageItemVisualTheme(item: FileItem): StorageItemVisualTheme {
-    if (item.isDirectory) {
-        val lower = item.name.lowercase(Locale.getDefault())
-        return when {
-            lower in listOf("dcim", "camera", "pictures", "picture", "photos", "photo", "screenshots", "screenshot") ->
-                StorageItemVisualTheme(Color(0xFFCE93D8), Icons.Default.Folder) // Soft Lavender
-            lower in listOf("movies", "movie", "videos", "video", "screen recorder") ->
-                StorageItemVisualTheme(Color(0xFFFFAB91), Icons.Default.Folder) // Soft Coral
-            lower in listOf("music", "audio", "podcasts", "podcast", "ringtones") ->
-                StorageItemVisualTheme(Color(0xFF80DEEA), Icons.Default.Folder) // Soft Aqua Cyan
-            lower in listOf("download", "downloads", "telegram", "zalo") ->
-                StorageItemVisualTheme(Color(0xFFFFE082), Icons.Default.Folder) // Soft Amber Gold
-            lower in listOf("documents", "document", "doc", "docs", "books", "book", "pdf") ->
-                StorageItemVisualTheme(Color(0xFF90CAF9), Icons.Default.Folder) // Soft Sky Blue
-            lower in listOf("android", "data", "obb") ->
-                StorageItemVisualTheme(Color(0xFFB0BEC5), Icons.Default.Folder) // Slate Grey
-            else ->
-                StorageItemVisualTheme(Color(0xFFFFCC80), Icons.Default.Folder) // Classic Soft Amber Folder
-        }
-    } else {
-        val ext = item.extension.lowercase(Locale.getDefault())
-        val imgExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "svg")
-        val videoExts = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v")
-        val audioExts = setOf("mp3", "m4a", "wav", "flac", "ogg", "aac", "wma", "opus")
-        val archiveExts = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "xz")
-        val docExts = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub")
-        return when {
-            ext in imgExts -> StorageItemVisualTheme(Color(0xFFCE93D8), Icons.Default.InsertDriveFile)
-            ext in videoExts -> StorageItemVisualTheme(Color(0xFFFFAB91), Icons.Default.InsertDriveFile)
-            ext in audioExts -> StorageItemVisualTheme(Color(0xFF80DEEA), Icons.Default.InsertDriveFile)
-            ext in archiveExts -> StorageItemVisualTheme(Color(0xFFFFE082), Icons.Default.InsertDriveFile)
-            ext in docExts -> StorageItemVisualTheme(Color(0xFF90CAF9), Icons.Default.InsertDriveFile)
-            else -> StorageItemVisualTheme(TextSecondary, Icons.Default.InsertDriveFile)
+            // Checkbox on the right
+            Checkbox(
+                checked = isSelected,
+                onCheckedChange = { onCheckboxToggle() },
+                colors = CheckboxDefaults.colors(
+                    checkedColor = TealPrimary,
+                    uncheckedColor = TextSecondary,
+                    checkmarkColor = PureBlack
+                )
+            )
         }
     }
 }
