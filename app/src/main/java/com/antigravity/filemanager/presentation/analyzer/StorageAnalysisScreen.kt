@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -26,6 +27,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.LargeFileItem
 import com.antigravity.filemanager.presentation.components.FileManagerTopBar
+import com.antigravity.filemanager.presentation.components.PullToRefreshWrapper
 import com.antigravity.filemanager.presentation.theme.*
 
 @Composable
@@ -51,22 +53,25 @@ fun StorageAnalysisScreen(
         },
         containerColor = DarkBackground
     ) { paddingValues ->
-        if (uiState.isLoading) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(DarkBackground)
-                    .padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(color = TealPrimary)
+        PullToRefreshWrapper(
+            onRefresh = { viewModel.refresh() },
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+        ) {
+            if (uiState.isLoading) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(color = TealPrimary)
+                }
             }
-        } else {
+
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
                     .background(DarkBackground)
-                    .padding(paddingValues)
                     .padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
@@ -120,7 +125,7 @@ fun StorageAnalysisScreen(
                                 .height(6.dp)
                                 .clip(RoundedCornerShape(3.dp)),
                             color = TealPrimary,
-                            trackColor = Color(0xFF333333),
+                            trackColor = Color(0xFF263238),
                         )
 
                         Spacer(modifier = Modifier.height(18.dp))
@@ -131,19 +136,19 @@ fun StorageAnalysisScreen(
                             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 BreakdownRow(
                                     icon = Icons.Default.PhotoLibrary,
-                                    iconColor = Color(0xFFBA68C8),
+                                    iconColor = ImagesColor,
                                     label = "Images",
                                     size = FileItem.formatBytes(data.breakdown.imagesBytes)
                                 )
                                 BreakdownRow(
                                     icon = Icons.Default.Movie,
-                                    iconColor = Color(0xFFEF5350),
+                                    iconColor = VideosColor,
                                     label = "Videos",
                                     size = FileItem.formatBytes(data.breakdown.videosBytes)
                                 )
                                 BreakdownRow(
                                     icon = Icons.Default.FolderZip,
-                                    iconColor = Color(0xFF81C784),
+                                    iconColor = DownloadFolderColor,
                                     label = "Archives",
                                     size = FileItem.formatBytes(data.breakdown.archivesBytes)
                                 )
@@ -155,19 +160,19 @@ fun StorageAnalysisScreen(
                             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                 BreakdownRow(
                                     icon = Icons.Default.MusicNote,
-                                    iconColor = Color(0xFF4DB6AC),
+                                    iconColor = AudioColor,
                                     label = "Audio",
                                     size = FileItem.formatBytes(data.breakdown.audioBytes)
                                 )
                                 BreakdownRow(
                                     icon = Icons.Default.Description,
-                                    iconColor = Color(0xFF42A5F5),
+                                    iconColor = DocumentsColor,
                                     label = "Documents",
                                     size = FileItem.formatBytes(data.breakdown.documentsBytes)
                                 )
                                 BreakdownRow(
                                     icon = Icons.Default.MoreHoriz,
-                                    iconColor = Color(0xFF9E9E9E),
+                                    iconColor = DiskDriveColor,
                                     label = "Others",
                                     size = FileItem.formatBytes(data.breakdown.othersBytes)
                                 )
@@ -175,7 +180,7 @@ fun StorageAnalysisScreen(
                         }
 
                         Spacer(modifier = Modifier.height(16.dp))
-                        HorizontalDivider(color = Color(0xFF2E2E2E), thickness = 0.5.dp)
+                        HorizontalDivider(color = Color(0xFF263238), thickness = 0.5.dp)
 
                         // MORE Button
                         Box(
@@ -190,8 +195,8 @@ fun StorageAnalysisScreen(
                         ) {
                             Text(
                                 text = "MORE",
-                                color = TextPrimary,
-                                fontSize = 14.sp,
+                                color = TealPrimary,
+                                fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 letterSpacing = 0.8.sp
                             )
@@ -239,7 +244,7 @@ fun StorageAnalysisScreen(
                             Spacer(modifier = Modifier.height(10.dp))
                         }
 
-                        HorizontalDivider(color = Color(0xFF2E2E2E), thickness = 0.5.dp)
+                        HorizontalDivider(color = Color(0xFF263238), thickness = 0.5.dp)
 
                         Box(
                             modifier = Modifier
@@ -250,8 +255,8 @@ fun StorageAnalysisScreen(
                         ) {
                             Text(
                                 text = "MORE",
-                                color = TextPrimary,
-                                fontSize = 14.sp,
+                                color = TealPrimary,
+                                fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 letterSpacing = 0.8.sp
                             )
@@ -291,11 +296,11 @@ fun StorageAnalysisScreen(
                                 Box(
                                     modifier = Modifier
                                         .size(36.dp)
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .background(Color(0xFFBA68C8)),
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(TrashColor.copy(alpha = 0.22f)),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Icon(Icons.Default.Image, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                                    Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = TrashColor, modifier = Modifier.size(20.dp))
                                 }
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
@@ -319,7 +324,7 @@ fun StorageAnalysisScreen(
                                 }
                                 Text(
                                     text = data.recycleBinSampleItem.formattedSize,
-                                    color = Color(0xFF81C784),
+                                    color = TrashColor,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Medium
                                 )
@@ -327,7 +332,7 @@ fun StorageAnalysisScreen(
                         }
 
                         Spacer(modifier = Modifier.height(14.dp))
-                        HorizontalDivider(color = Color(0xFF2E2E2E), thickness = 0.5.dp)
+                        HorizontalDivider(color = Color(0xFF263238), thickness = 0.5.dp)
 
                         Box(
                             modifier = Modifier
@@ -338,8 +343,8 @@ fun StorageAnalysisScreen(
                         ) {
                             Text(
                                 text = "MORE",
-                                color = TextPrimary,
-                                fontSize = 14.sp,
+                                color = TealPrimary,
+                                fontSize = 13.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 letterSpacing = 0.8.sp
                             )
@@ -359,8 +364,8 @@ fun StorageAnalysisScreen(
                 )
             }
         }
+        }
     }
-}
 }
 
 @Composable
@@ -409,11 +414,11 @@ private fun DuplicatesCard(
                     Box(
                         modifier = Modifier
                             .size(38.dp)
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color(0xFF2C3E50)),
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF80DEEA).copy(alpha = 0.22f)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(Icons.Default.FileCopy, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(20.dp))
+                        Icon(Icons.Default.FileCopy, contentDescription = null, tint = Color(0xFF80DEEA), modifier = Modifier.size(20.dp))
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
@@ -435,7 +440,7 @@ private fun DuplicatesCard(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = item.formattedSize,
-                        color = Color(0xFF81C784),
+                        color = TealPrimary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
                     )
@@ -443,7 +448,7 @@ private fun DuplicatesCard(
                 Spacer(modifier = Modifier.height(10.dp))
             }
 
-            HorizontalDivider(color = Color(0xFF2E2E2E), thickness = 0.5.dp)
+            HorizontalDivider(color = Color(0xFF263238), thickness = 0.5.dp)
 
             Box(
                 modifier = Modifier
@@ -454,8 +459,8 @@ private fun DuplicatesCard(
             ) {
                 Text(
                     text = "MORE",
-                    color = TextPrimary,
-                    fontSize = 14.sp,
+                    color = TealPrimary,
+                    fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.8.sp
                 )
@@ -472,8 +477,16 @@ private fun BreakdownRow(
     size: String
 ) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Icon(imageVector = icon, contentDescription = label, tint = iconColor, modifier = Modifier.size(20.dp))
-        Spacer(modifier = Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(iconColor.copy(alpha = 0.22f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(imageVector = icon, contentDescription = label, tint = iconColor, modifier = Modifier.size(16.dp))
+        }
+        Spacer(modifier = Modifier.width(10.dp))
         Text(text = label, color = TextPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
         Text(text = size, color = TextSecondary, fontSize = 13.sp)
     }
@@ -485,11 +498,11 @@ private fun LargeFileRow(item: LargeFileItem) {
         Box(
             modifier = Modifier
                 .size(38.dp)
-                .clip(RoundedCornerShape(4.dp))
-                .background(Color(0xFF2C3E50)),
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color(0xFFFFAB91).copy(alpha = 0.22f)),
             contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Default.Archive, contentDescription = null, tint = Color(0xFFF39C12), modifier = Modifier.size(22.dp))
+            Icon(Icons.Default.Archive, contentDescription = null, tint = Color(0xFFFFAB91), modifier = Modifier.size(20.dp))
         }
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -511,7 +524,7 @@ private fun LargeFileRow(item: LargeFileItem) {
         Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = item.formattedSize,
-            color = Color(0xFF81C784),
+            color = TealPrimary,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold
         )

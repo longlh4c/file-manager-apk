@@ -27,6 +27,29 @@ import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
+internal suspend fun healZeroTrashFolders(database: AppDatabase) {
+    try {
+        val items = database.trashDao().getAll()
+        for (item in items) {
+            if (item.isDirectory && item.fileSize <= 0L) {
+                val file = File(item.trashPath)
+                if (file.exists()) {
+                    val computedSize = try {
+                        file.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                    } catch (e: Exception) {
+                        0L
+                    }
+                    if (computedSize > 0L) {
+                        database.trashDao().updateFileSize(item.id, computedSize)
+                    }
+                }
+            }
+        }
+    } catch (e: Exception) {
+        // ignore
+    }
+}
+
 @Singleton
 class StorageRepositoryImpl @Inject constructor(
     private val scanner: LocalFileScanner,
@@ -41,7 +64,12 @@ class StorageRepositoryImpl @Inject constructor(
     override suspend fun getCategorySummaries(): List<CategorySummary> = withContext(Dispatchers.IO) {
         coroutineScope {
             val volume = scanner.getStorageVolume()
-            val trashDeferred = async { database.trashDao().getTotalTrashSize() ?: 0L }
+            val trashDeferred = async {
+                healZeroTrashFolders(database)
+                val size = database.trashDao().getTotalTrashSize() ?: 0L
+                val count = database.trashDao().getTrashCount()
+                Pair(size, count)
+            }
             val cloudDeferred = async { database.cloudDao().getAll().size }
             val imgDeferred = async { scanner.getMediaFolders(CategoryType.IMAGES) }
             val audioDeferred = async { scanner.getMediaFolders(CategoryType.AUDIO) }
@@ -49,7 +77,7 @@ class StorageRepositoryImpl @Inject constructor(
             val docDeferred = async { scanner.getAllDocumentFiles() }
             val dlDeferred = async { scanner.getMediaFolders(CategoryType.DOWNLOADS) }
 
-            val trashSize = trashDeferred.await()
+            val (trashSize, trashCount) = trashDeferred.await()
             val cloudCount = cloudDeferred.await()
             val imgFolders = imgDeferred.await()
             val audioFolders = audioDeferred.await()
@@ -124,7 +152,8 @@ class StorageRepositoryImpl @Inject constructor(
                 CategorySummary(
                     type = CategoryType.RECYCLE_BIN,
                     title = "Recycle Bin",
-                    totalSizeBytes = trashSize
+                    totalSizeBytes = trashSize,
+                    itemCount = trashCount
                 )
             )
         }
@@ -417,9 +446,26 @@ class RecycleBinRepositoryImpl @Inject constructor(
     }
 
     override fun observeTrashItems(): Flow<List<TrashItem>> =
-        database.trashDao().observeAll().map { list -> list.map { it.toDomain() } }
+        database.trashDao().observeAll().map { list ->
+            list.map { entity ->
+                if (entity.isDirectory && entity.fileSize <= 0L) {
+                    val file = File(entity.trashPath)
+                    if (file.exists()) {
+                        val computed = try {
+                            file.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                        } catch (e: Exception) { 0L }
+                        if (computed > 0L) {
+                            database.trashDao().updateFileSize(entity.id, computed)
+                            return@map entity.copy(fileSize = computed).toDomain()
+                        }
+                    }
+                }
+                entity.toDomain()
+            }
+        }
 
     override suspend fun getTrashItems(): List<TrashItem> = withContext(Dispatchers.IO) {
+        healZeroTrashFolders(database)
         database.trashDao().getAll().map { it.toDomain() }
     }
 
@@ -444,8 +490,16 @@ class RecycleBinRepositoryImpl @Inject constructor(
                 val source = File(path)
                 if (!source.exists()) continue
                 val trashFile = File(trashRoot, "${System.currentTimeMillis()}_${source.name}")
-                val size = if (source.isDirectory) 0L else source.length()
                 val isDir = source.isDirectory
+                val size = if (isDir) {
+                    try {
+                        source.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                    } catch (e: Exception) {
+                        0L
+                    }
+                } else {
+                    source.length()
+                }
                 if (source.renameTo(trashFile)) {
                     database.trashDao().insert(
                         TrashEntity(
@@ -637,6 +691,7 @@ class RecycleBinRepositoryImpl @Inject constructor(
     }
 
     override suspend fun getTrashTotalSize(): Long = withContext(Dispatchers.IO) {
+        healZeroTrashFolders(database)
         database.trashDao().getTotalTrashSize() ?: 0L
     }
 }

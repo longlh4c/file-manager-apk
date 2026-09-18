@@ -57,7 +57,7 @@ fun MediaFolderCard(
     isSelected: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val bg = if (isSelected) Color(0xFF00695C).copy(alpha = 0.5f) else Color.Transparent
+    val bg = if (isSelected) SelectionGridBg else Color.Transparent
 
     Column(
         modifier = modifier
@@ -176,9 +176,9 @@ fun AudioListItem(
     // root-folders grid used to ignore the view-mode toggle entirely and stay a grid no matter
     // what was selected; see MediaCategoriesScreen). Defaults keep Audio's call sites unchanged.
     badgeIcon: ImageVector = Icons.Default.MusicNote,
-    badgeColor: Color = Color(0xFF26A69A)
+    badgeColor: Color = AudioColor
 ) {
-    val rowBg = if (isSelected) Color(0xFF00695C) else Color.Transparent
+    val rowBg = if (isSelected) SelectionBg else Color.Transparent
 
     Row(
         modifier = modifier
@@ -329,7 +329,7 @@ fun FileListItem(
         }
     }
 
-    val rowBg = if (isSelected) Color(0xFF00695C) else Color.Transparent
+    val rowBg = if (isSelected) SelectionBg else Color.Transparent
 
     Row(
         modifier = modifier
@@ -427,15 +427,15 @@ fun FolderIconWithBadge(badgeType: FolderBadgeType, size: Dp = 46.dp) {
         modifier = Modifier.size(size),
         contentAlignment = Alignment.Center
     ) {
-        // Yellow Folder background
+        // Soft Pastel Honey Folder background
         Icon(
             imageVector = Icons.Default.Folder,
             contentDescription = null,
-            tint = Color(0xFFF6A623),
+            tint = Color(0xFFFFCC80),
             modifier = Modifier.size(size)
         )
 
-        // Embedded Badge inside the flap (matching Screenshot 000552)
+        // Embedded Badge inside the flap (matching Soft Pastel)
         when (badgeType) {
             FolderBadgeType.CAMERA -> {
                 Box(
@@ -446,7 +446,7 @@ fun FolderIconWithBadge(badgeType: FolderBadgeType, size: Dp = 46.dp) {
                         .background(Color.White, RoundedCornerShape(2.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.CameraAlt, contentDescription = null, tint = Color(0xFFF6A623), modifier = Modifier.size(badgeIconSize))
+                    Icon(Icons.Default.CameraAlt, contentDescription = null, tint = Color(0xFFCE93D8), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.DOCUMENTS -> {
@@ -458,7 +458,7 @@ fun FolderIconWithBadge(badgeType: FolderBadgeType, size: Dp = 46.dp) {
                         .background(Color.White, RoundedCornerShape(2.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Article, contentDescription = null, tint = Color(0xFF1E88E5), modifier = Modifier.size(badgeIconSize))
+                    Icon(Icons.Default.Article, contentDescription = null, tint = Color(0xFF90CAF9), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.DOWNLOAD -> {
@@ -470,7 +470,7 @@ fun FolderIconWithBadge(badgeType: FolderBadgeType, size: Dp = 46.dp) {
                         .background(Color.White, CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.ArrowDownward, contentDescription = null, tint = Color(0xFF00ACC1), modifier = Modifier.size(badgeIconSize))
+                    Icon(Icons.Default.ArrowDownward, contentDescription = null, tint = Color(0xFF80DEEA), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.MOVIES -> {
@@ -482,7 +482,7 @@ fun FolderIconWithBadge(badgeType: FolderBadgeType, size: Dp = 46.dp) {
                         .background(Color.White, RoundedCornerShape(2.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Movie, contentDescription = null, tint = Color(0xFFE53935), modifier = Modifier.size(badgeIconSize))
+                    Icon(Icons.Default.Movie, contentDescription = null, tint = Color(0xFFFFAB91), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.MUSIC -> {
@@ -494,7 +494,7 @@ fun FolderIconWithBadge(badgeType: FolderBadgeType, size: Dp = 46.dp) {
                         .background(Color.White, RoundedCornerShape(2.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color(0xFF26A69A), modifier = Modifier.size(badgeIconSize))
+                    Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color(0xFF80DEEA), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.TRASH -> {
@@ -506,7 +506,7 @@ fun FolderIconWithBadge(badgeType: FolderBadgeType, size: Dp = 46.dp) {
                         .background(Color.White, RoundedCornerShape(2.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFF757575), modifier = Modifier.size(badgeIconSize))
+                    Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFB39DDB), modifier = Modifier.size(badgeIconSize))
                 }
             }
             FolderBadgeType.STANDARD -> {}
@@ -532,18 +532,19 @@ fun getFileIcon(file: FileItem): ImageVector {
 }
 
 fun getFileIconColor(file: FileItem): Color {
-    if (file.isDirectory) return Color(0xFFF6A623)
+    if (file.isDirectory) return Color(0xFFFFCC80) // Pastel Honey/Amber
     return when (file.extension) {
-        "pdf" -> Color(0xFFE53935)
-        "doc", "docx" -> Color(0xFF1E88E5)
-        "xls", "xlsx" -> Color(0xFF43A047)
-        "ppt", "pptx" -> Color(0xFFFB8C00)
-        "zip", "rar", "7z" -> Color(0xFFFFB300)
-        "mp3", "flac", "wav" -> Color(0xFF26A69A)
-        "mp4", "mkv", "avi" -> Color(0xFFEF5350)
-        "jpg", "png", "webp" -> Color(0xFFAB47BC)
-        "apk" -> Color(0xFF7CB342)
-        else -> TextSecondary
+        "pdf" -> Color(0xFFFFAB91) // Pastel Soft Coral
+        "doc", "docx" -> Color(0xFF90CAF9) // Pastel Sky Blue
+        "xls", "xlsx" -> Color(0xFFA5D6A7) // Pastel Mint Green
+        "ppt", "pptx" -> Color(0xFFFFCC80) // Pastel Peach
+        "zip", "rar", "7z", "tar", "gz" -> Color(0xFFFFE082) // Pastel Amber Gold
+        "mp3", "flac", "wav", "m4a", "aac" -> Color(0xFF80DEEA) // Pastel Aqua Cyan
+        "mp4", "mkv", "avi", "mov", "webm" -> Color(0xFFFFAB91) // Pastel Soft Rose
+        "jpg", "jpeg", "png", "webp", "gif" -> Color(0xFFCE93D8) // Pastel Lavender
+        "apk" -> Color(0xFFAED581) // Pastel Sage/Lime
+        "txt", "log", "json", "xml" -> Color(0xFF81D4FA) // Pastel Ice Blue
+        else -> Color(0xFFB0BEC5) // Pastel Slate Grey
     }
 }
 
@@ -563,18 +564,18 @@ private fun getBadgeIcon(badge: AppSourceBadge): ImageVector = when (badge) {
 }
 
 private fun getBadgeBgColor(badge: AppSourceBadge): Color = when (badge) {
-    AppSourceBadge.MESSENGER -> Color(0xFF0084FF)
-    AppSourceBadge.ZALO -> Color(0xFF0068FF)
-    AppSourceBadge.DOWNLOAD -> Color(0xFF00ACC1)
-    AppSourceBadge.CAMERA -> Color(0xFF5C6BC0)
-    AppSourceBadge.SCREENSHOT -> Color(0xFF7E57C2)
-    AppSourceBadge.INSTAGRAM -> Color(0xFFE91E63)
-    AppSourceBadge.REDDIT -> Color(0xFFFF5722)
-    AppSourceBadge.NINE_GAG -> Color(0xFF212121)
-    AppSourceBadge.OFFICE_LENS -> Color(0xFFFF9800)
-    AppSourceBadge.GENERIC_AUDIO -> Color(0xFF26A69A)
-    AppSourceBadge.GENERIC_VIDEO -> Color(0xFFE53935)
-    else -> Color(0xFF78909C)
+    AppSourceBadge.MESSENGER -> Color(0xFF64B5F6)
+    AppSourceBadge.ZALO -> Color(0xFF81D4FA)
+    AppSourceBadge.DOWNLOAD -> Color(0xFF80DEEA)
+    AppSourceBadge.CAMERA -> Color(0xFFCE93D8)
+    AppSourceBadge.SCREENSHOT -> Color(0xFFB39DDB)
+    AppSourceBadge.INSTAGRAM -> Color(0xFFF48FB1)
+    AppSourceBadge.REDDIT -> Color(0xFFFFAB91)
+    AppSourceBadge.NINE_GAG -> Color(0xFF37474F)
+    AppSourceBadge.OFFICE_LENS -> Color(0xFFFFCC80)
+    AppSourceBadge.GENERIC_AUDIO -> Color(0xFF80DEEA)
+    AppSourceBadge.GENERIC_VIDEO -> Color(0xFFFFAB91)
+    else -> Color(0xFFB0BEC5)
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -587,7 +588,7 @@ fun FileGridCard(
     onLongClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val bg = if (isSelected) Color(0xFF00695C).copy(alpha = 0.5f) else Color.Transparent
+    val bg = if (isSelected) SelectionGridBg else Color.Transparent
 
     Column(
         modifier = modifier
@@ -683,7 +684,7 @@ fun FileDetailedListItem(
     // See FileListItem's showPath for why this exists.
     showPath: Boolean = false
 ) {
-    val rowBg = if (isSelected) Color(0xFF00695C) else Color.Transparent
+    val rowBg = if (isSelected) SelectionBg else Color.Transparent
 
     Row(
         modifier = modifier

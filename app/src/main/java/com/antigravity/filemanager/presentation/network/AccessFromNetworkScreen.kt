@@ -59,13 +59,12 @@ fun AccessFromNetworkScreen(
                 .padding(paddingValues)
                 .padding(16.dp)
         ) {
-            // Main Config Card with cyan/teal outline matching screenshot 2
+            // Main Config Card without borders
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(6.dp))
                     .background(DarkBackground)
-                    .border(1.dp, Color(0xFF2E6171), RoundedCornerShape(6.dp))
                     .padding(24.dp)
             ) {
                 Column(
@@ -138,46 +137,16 @@ fun AccessFromNetworkScreen(
                         )
                     }
 
-
                     Spacer(modifier = Modifier.height(20.dp))
-                    HorizontalDivider(color = Color(0xFF2E6171), thickness = 1.dp)
-                    Spacer(modifier = Modifier.height(24.dp))
+                    HorizontalDivider(color = DividerDark, thickness = 1.dp)
+                    Spacer(modifier = Modifier.height(20.dp))
 
-                    // Description or Active URL
-                    if (uiState.isRunning) {
-                        Text(
-                            text = "Service is active!\nEnter this address on your PC browser or FTP client:",
-                            color = TealAccent,
-                            fontSize = 15.sp,
-                            textAlign = TextAlign.Center
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = uiState.accessUrl,
-                            color = TextPrimary,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold,
-                            textAlign = TextAlign.Center
-                        )
-                    } else {
-                        Text(
-                            text = "Start the service to access files\nfrom another device.",
-                            color = TextPrimary,
-                            fontSize = 19.sp,
-                            fontWeight = FontWeight.Normal,
-                            textAlign = TextAlign.Center,
-                            lineHeight = 26.sp
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    // START / STOP SERVICE Button
+                    // START / STOP SERVICE Button (Fixed position above dynamic text)
                     Button(
                         onClick = { viewModel.toggleService() },
-                        shape = RoundedCornerShape(4.dp),
+                        shape = RoundedCornerShape(6.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (uiState.isRunning) Color(0xFFEF5350) else Color(0xFF66BB6A).copy(alpha = 0.85f),
+                            containerColor = if (uiState.isRunning) PastelCoral else TealPrimary,
                             contentColor = PureBlack
                         ),
                         modifier = Modifier
@@ -188,9 +157,47 @@ fun AccessFromNetworkScreen(
                             text = if (uiState.isRunning) "STOP SERVICE" else "START SERVICE",
                             color = PureBlack,
                             fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold,
+                            fontWeight = FontWeight.Bold,
                             letterSpacing = 0.8.sp
                         )
+                    }
+
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    // Description or Active URL (Dynamic content placed below button so button does not jump)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 60.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (uiState.isRunning) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "Service is active!\nEnter this address on your PC browser or FTP client:",
+                                    color = TealAccent,
+                                    fontSize = 14.sp,
+                                    textAlign = TextAlign.Center
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = uiState.accessUrl,
+                                    color = TextPrimary,
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = "Start the service to access files\nfrom another device.",
+                                color = TextPrimary,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Normal,
+                                textAlign = TextAlign.Center,
+                                lineHeight = 24.sp
+                            )
+                        }
                     }
                 }
             }

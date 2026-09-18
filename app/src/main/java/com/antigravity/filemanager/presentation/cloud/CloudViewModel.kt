@@ -42,10 +42,12 @@ class CloudViewModel @Inject constructor(
     private fun loadAccounts() {
         viewModelScope.launch {
             cloudUseCase.observeAccounts().collect { list ->
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    accounts = list
-                )
+                if (!_uiState.value.isReorderMode) {
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        accounts = list
+                    )
+                }
                 // Auto-resolve missing or placeholder emails (e.g. user@mega.com)
                 list.forEach { account ->
                     if (account.provider == CloudProvider.MEGA && (account.email.startsWith("user@") || account.email.startsWith("account@") || account.email.isBlank())) {
@@ -62,15 +64,34 @@ class CloudViewModel @Inject constructor(
         }
     }
 
-    fun toggleReorderMode() {
-        val current = _uiState.value.isReorderMode
-        if (current) {
-            // Save new order to database
-            viewModelScope.launch {
-                cloudUseCase.reorderAccounts(_uiState.value.accounts)
-            }
+    private var originalAccountsBeforeEdit: List<CloudAccount> = emptyList()
+
+    fun enterReorderMode() {
+        originalAccountsBeforeEdit = _uiState.value.accounts
+        _uiState.value = _uiState.value.copy(isReorderMode = true)
+    }
+
+    fun confirmReorder() {
+        val accountsToSave = _uiState.value.accounts
+        _uiState.value = _uiState.value.copy(isReorderMode = false)
+        viewModelScope.launch {
+            cloudUseCase.reorderAccounts(accountsToSave)
         }
-        _uiState.value = _uiState.value.copy(isReorderMode = !current)
+    }
+
+    fun cancelReorder() {
+        _uiState.value = _uiState.value.copy(
+            isReorderMode = false,
+            accounts = originalAccountsBeforeEdit
+        )
+    }
+
+    fun toggleReorderMode() {
+        if (_uiState.value.isReorderMode) {
+            confirmReorder()
+        } else {
+            enterReorderMode()
+        }
     }
 
     fun moveAccountUp(index: Int) {
@@ -84,6 +105,22 @@ class CloudViewModel @Inject constructor(
         if (index >= _uiState.value.accounts.size - 1) return
         val list = _uiState.value.accounts.toMutableList()
         Collections.swap(list, index, index + 1)
+        _uiState.value = _uiState.value.copy(accounts = list)
+    }
+
+    fun moveAccountToTop(index: Int) {
+        if (index <= 0) return
+        val list = _uiState.value.accounts.toMutableList()
+        val item = list.removeAt(index)
+        list.add(0, item)
+        _uiState.value = _uiState.value.copy(accounts = list)
+    }
+
+    fun moveAccountToBottom(index: Int) {
+        if (index >= _uiState.value.accounts.size - 1) return
+        val list = _uiState.value.accounts.toMutableList()
+        val item = list.removeAt(index)
+        list.add(item)
         _uiState.value = _uiState.value.copy(accounts = list)
     }
 

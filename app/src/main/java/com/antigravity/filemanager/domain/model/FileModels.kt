@@ -152,7 +152,7 @@ data class CategorySummary(
             CategoryType.MAIN_STORAGE -> subtitle
             CategoryType.STORAGE_ANALYSIS -> subtitle
             CategoryType.CLOUD -> if (itemCount > 0) "($itemCount)" else ""
-            CategoryType.RECYCLE_BIN -> if (totalSizeBytes > 0L) FileItem.formatBytes(totalSizeBytes) else ""
+            CategoryType.RECYCLE_BIN -> if (totalSizeBytes > 0L) FileItem.formatBytes(totalSizeBytes) else if (itemCount > 0) "0 B" else ""
             CategoryType.ACCESS_FROM_NETWORK -> ""
             else -> {
                 if (totalSizeBytes > 0L || itemCount > 0) {

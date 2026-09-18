@@ -61,7 +61,8 @@ class StorageAnalysisViewModel @Inject constructor(
     private var activeTransferJob: kotlinx.coroutines.Job? = null
 
     init {
-        loadData()
+        _uiState.value = _uiState.value.copy(isLoading = true)
+        loadData(isInitial = true)
         observeBookmarks()
     }
 
@@ -79,13 +80,15 @@ class StorageAnalysisViewModel @Inject constructor(
         }
     }
 
-    fun loadData() {
-        viewModelScope.launch { loadDataInternal() }
+    fun loadData(isInitial: Boolean = false) {
+        viewModelScope.launch { loadDataInternal(isInitial) }
     }
 
     /** Suspending body of [loadData], so mutation handlers can await a full rescan before continuing. */
-    private suspend fun loadDataInternal() {
-        _uiState.value = _uiState.value.copy(isLoading = true)
+    private suspend fun loadDataInternal(isInitial: Boolean = false) {
+        if (isInitial) {
+            _uiState.value = _uiState.value.copy(isLoading = true)
+        }
         val result = storageAnalysisUseCase.getAnalysisData()
         _uiState.value = _uiState.value.copy(
             isLoading = false,
@@ -94,7 +97,7 @@ class StorageAnalysisViewModel @Inject constructor(
     }
 
     fun refresh() {
-        loadData()
+        loadData(isInitial = false)
     }
 
     fun copySelected(paths: List<String>) {

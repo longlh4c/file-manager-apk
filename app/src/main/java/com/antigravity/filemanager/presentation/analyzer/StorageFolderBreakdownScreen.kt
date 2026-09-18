@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -223,7 +224,7 @@ fun StorageFolderBreakdownScreen(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color(0xFF004D40)
+                        containerColor = SelectionTopBarBg
                     )
                 )
             } else if (isSearchActive) {
@@ -333,7 +334,7 @@ fun StorageFolderBreakdownScreen(
                         BottomBarActionItem(
                             icon = Icons.Default.Delete,
                             label = "Delete",
-                            tint = Color(0xFFEF5350),
+                            tint = Color(0xFFFFAB91),
                             onClick = { showDeleteDialog = true },
                             modifier = Modifier.weight(1f)
                         )
@@ -440,7 +441,7 @@ fun StorageFolderBreakdownScreen(
                 Icon(
                     imageVector = Icons.Default.PieChart,
                     contentDescription = "Analysis",
-                    tint = Color(0xFF00BCD4),
+                    tint = TealPrimary,
                     modifier = Modifier
                         .size(24.dp)
                         .clickable { onNavigateBack() }
@@ -539,95 +540,124 @@ private fun StorageFolderRow(
     onFolderClick: () -> Unit,
     onCheckboxToggle: () -> Unit
 ) {
-    val rowBg = if (isSelected) Color(0xFF00695C).copy(alpha = 0.6f) else Color.Transparent
+    val theme = getStorageItemVisualTheme(item)
+    val rowBg = if (isSelected) SelectionBg else Color.Transparent
 
-    Box(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(rowBg)
             .clickable { onFolderClick() }
-            .padding(horizontal = 16.dp, vertical = 10.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
+        // Clean neutral icon container with subtle pastel folder tint
+        Box(
+            modifier = Modifier
+                .size(42.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF1C2228)),
+            contentAlignment = Alignment.Center
         ) {
-            // Folder icon for real directories; a proper file-type icon (video/image/pdf/etc.)
-            // for files — this row previously always rendered a folder icon here, so files like
-            // videos or photos on this screen were indistinguishable from actual subfolders.
-            if (item.isDirectory) {
-                FolderIconWithBadge(badgeType = item.folderBadgeType)
-            } else {
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(DarkCard),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = getFileIcon(item),
-                        contentDescription = null,
-                        tint = getFileIconColor(item),
-                        modifier = Modifier.size(26.dp)
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.width(14.dp))
+            Icon(
+                imageVector = theme.icon,
+                contentDescription = null,
+                tint = theme.color,
+                modifier = Modifier.size(24.dp)
+            )
+        }
 
-            // Title & Subtitle with proportional progress bar in the background
-            Column(modifier = Modifier.weight(1f)) {
-                // Name
-                Text(
-                    text = item.name,
-                    color = TextPrimary,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Normal,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
+        Spacer(modifier = Modifier.width(14.dp))
 
-                // Items count and Formatted Size e.g. "3 items (42,50 GB)"
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(
-                                if (percentage > 10.0) Color(0xFF1E88E5).copy(alpha = 0.6f)
-                                else if (percentage > 2.0) Color(0xFF26A69A).copy(alpha = 0.5f)
-                                else Color.Transparent
-                            )
-                            .padding(horizontal = 4.dp, vertical = 1.dp)
-                    ) {
-                        Text(
-                            text = if (item.isDirectory) "${item.itemCount} items (${item.formattedSize})" else item.formattedSize,
-                            color = TextSecondary,
-                            fontSize = 13.sp
-                        )
-                    }
-                }
-            }
-
-            // Percentage on the right (matching Screenshot 1:30)
+        // Title & clean neutral subtitle pill
+        Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = formattedPercent,
-                color = TextSecondary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Normal,
-                modifier = Modifier.padding(horizontal = 12.dp)
+                text = item.name,
+                color = TextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
+            Spacer(modifier = Modifier.height(3.dp))
 
-            // Checkbox on the right
-            Checkbox(
-                checked = isSelected,
-                onCheckedChange = { onCheckboxToggle() },
-                colors = CheckboxDefaults.colors(
-                    checkedColor = TealPrimary,
-                    uncheckedColor = TextSecondary,
-                    checkmarkColor = PureBlack
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xFF222830))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    text = if (item.isDirectory) "${item.itemCount} items (${item.formattedSize})" else item.formattedSize,
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Normal
                 )
+            }
+        }
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        // Percentage text
+        Text(
+            text = formattedPercent,
+            color = TextSecondary,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Normal,
+            modifier = Modifier.padding(horizontal = 6.dp)
+        )
+
+        // Checkbox on the right
+        Checkbox(
+            checked = isSelected,
+            onCheckedChange = { onCheckboxToggle() },
+            colors = CheckboxDefaults.colors(
+                checkedColor = TealPrimary,
+                uncheckedColor = TextSecondary,
+                checkmarkColor = PureBlack
             )
+        )
+    }
+}
+
+private data class StorageItemVisualTheme(
+    val color: Color,
+    val icon: ImageVector
+)
+
+private fun getStorageItemVisualTheme(item: FileItem): StorageItemVisualTheme {
+    if (item.isDirectory) {
+        val lower = item.name.lowercase(Locale.getDefault())
+        return when {
+            lower in listOf("dcim", "camera", "pictures", "picture", "photos", "photo", "screenshots", "screenshot") ->
+                StorageItemVisualTheme(Color(0xFFCE93D8), Icons.Default.Folder) // Soft Lavender
+            lower in listOf("movies", "movie", "videos", "video", "screen recorder") ->
+                StorageItemVisualTheme(Color(0xFFFFAB91), Icons.Default.Folder) // Soft Coral
+            lower in listOf("music", "audio", "podcasts", "podcast", "ringtones") ->
+                StorageItemVisualTheme(Color(0xFF80DEEA), Icons.Default.Folder) // Soft Aqua Cyan
+            lower in listOf("download", "downloads", "telegram", "zalo") ->
+                StorageItemVisualTheme(Color(0xFFFFE082), Icons.Default.Folder) // Soft Amber Gold
+            lower in listOf("documents", "document", "doc", "docs", "books", "book", "pdf") ->
+                StorageItemVisualTheme(Color(0xFF90CAF9), Icons.Default.Folder) // Soft Sky Blue
+            lower in listOf("android", "data", "obb") ->
+                StorageItemVisualTheme(Color(0xFFB0BEC5), Icons.Default.Folder) // Slate Grey
+            else ->
+                StorageItemVisualTheme(Color(0xFFFFCC80), Icons.Default.Folder) // Classic Soft Amber Folder
+        }
+    } else {
+        val ext = item.extension.lowercase(Locale.getDefault())
+        val imgExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "svg")
+        val videoExts = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v")
+        val audioExts = setOf("mp3", "m4a", "wav", "flac", "ogg", "aac", "wma", "opus")
+        val archiveExts = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "xz")
+        val docExts = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub")
+        return when {
+            ext in imgExts -> StorageItemVisualTheme(Color(0xFFCE93D8), Icons.Default.InsertDriveFile)
+            ext in videoExts -> StorageItemVisualTheme(Color(0xFFFFAB91), Icons.Default.InsertDriveFile)
+            ext in audioExts -> StorageItemVisualTheme(Color(0xFF80DEEA), Icons.Default.InsertDriveFile)
+            ext in archiveExts -> StorageItemVisualTheme(Color(0xFFFFE082), Icons.Default.InsertDriveFile)
+            ext in docExts -> StorageItemVisualTheme(Color(0xFF90CAF9), Icons.Default.InsertDriveFile)
+            else -> StorageItemVisualTheme(TextSecondary, Icons.Default.InsertDriveFile)
         }
     }
 }

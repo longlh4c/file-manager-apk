@@ -286,7 +286,7 @@ fun MediaCategoriesScreen(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color(0xFF004D40)
+                        containerColor = SelectionTopBarBg
                     )
                 )
             } else if (uiState.isSearchActive) {
@@ -420,7 +420,7 @@ fun MediaCategoriesScreen(
                         BottomBarActionItem(
                             icon = Icons.Default.Delete,
                             label = "Delete",
-                            tint = Color(0xFFEF5350),
+                            tint = Color(0xFFFFAB91),
                             onClick = { viewModel.setShowDeleteDialog(true) },
                             modifier = Modifier.weight(1f)
                         )
@@ -686,11 +686,11 @@ fun MediaCategoriesScreen(
                 // every other listing in the app, with `category` only picking the right
                 // thumbnail fallback icon/badge for the list rows.
                 val (badgeIcon, badgeColor) = when (category) {
-                    CategoryType.AUDIO -> Icons.Default.MusicNote to Color(0xFF26A69A)
-                    CategoryType.VIDEOS -> Icons.Default.Movie to Color(0xFFEF5350)
-                    CategoryType.IMAGES -> Icons.Default.Image to Color(0xFFBA68C8)
-                    CategoryType.DOCUMENTS -> Icons.Default.Article to Color(0xFF42A5F5)
-                    else -> Icons.Default.Folder to Color(0xFFFFB74D)
+                    CategoryType.AUDIO -> Icons.Default.MusicNote to AudioColor
+                    CategoryType.VIDEOS -> Icons.Default.Movie to VideosColor
+                    CategoryType.IMAGES -> Icons.Default.Image to ImagesColor
+                    CategoryType.DOCUMENTS -> Icons.Default.Description to DocumentsColor
+                    else -> Icons.Default.Folder to DownloadFolderColor
                 }
                 if (filteredFolders.isEmpty() && !uiState.isLoading) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

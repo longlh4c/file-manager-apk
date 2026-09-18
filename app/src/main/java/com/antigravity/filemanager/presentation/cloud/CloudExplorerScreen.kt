@@ -131,7 +131,8 @@ fun CloudExplorerScreen(
             itemCount = uiState.selectedPaths.size,
             onConfirm = { moveToTrash -> viewModel.deleteSelected(moveToTrash) },
             onDismiss = { viewModel.setShowDeleteDialog(false) },
-            showMoveToTrashOption = !uiState.isInsideTrashView,
+            showMoveToTrashOption = false,
+            defaultMoveToTrash = !uiState.isInsideTrashView,
             title = if (uiState.isInsideTrashView) "Delete Permanently" else "Delete",
             message = if (uiState.isInsideTrashView)
                 "Permanently delete ${uiState.selectedPaths.size} item(s)? This cannot be undone."
@@ -361,7 +362,7 @@ fun CloudExplorerScreen(
                             BottomBarActionItem(
                                 icon = Icons.Default.DeleteForever,
                                 label = "Delete Permanently",
-                                tint = Color(0xFFEF5350),
+                                tint = PastelCoral,
                                 onClick = { viewModel.setShowDeleteDialog(true) },
                                 modifier = Modifier.weight(1f)
                             )
@@ -403,7 +404,7 @@ fun CloudExplorerScreen(
                             BottomBarActionItem(
                                 icon = Icons.Default.Delete,
                                 label = "Delete",
-                                tint = Color(0xFFEF5350),
+                                tint = PastelCoral,
                                 onClick = { viewModel.setShowDeleteDialog(true) },
                                 modifier = Modifier.weight(1f)
                             )
@@ -492,37 +493,17 @@ fun CloudExplorerScreen(
                             .padding(horizontal = 2.dp)
                     ) {
 
-                        when (uiState.account?.provider) {
-                            CloudProvider.GOOGLE_DRIVE -> {
-                                GoogleDriveLogoIcon(modifier = Modifier.size(20.dp))
-                            }
-                            CloudProvider.DROPBOX -> {
-                                DropboxLogoIcon(modifier = Modifier.size(20.dp))
-                            }
-                            CloudProvider.MEGA -> {
-                                Box(
-                                    modifier = Modifier
-                                        .size(22.dp)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFFD9272E)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = "M",
-                                        color = Color.White,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                            else -> {
-                                Icon(
-                                    imageVector = Icons.Default.Cloud,
-                                    contentDescription = "Cloud",
-                                    tint = TealPrimary,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
+                        val provider = uiState.account?.provider
+                        if (provider != null) {
+                            val iconSize = if (provider == CloudProvider.DROPBOX) 24.dp else 20.dp
+                            CloudProviderIcon(provider = provider, size = iconSize)
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Cloud,
+                                contentDescription = "Cloud",
+                                tint = TealPrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                     }
 

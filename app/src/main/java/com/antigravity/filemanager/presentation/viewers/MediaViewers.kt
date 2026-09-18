@@ -42,7 +42,7 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FileSortOption
-import com.antigravity.filemanager.presentation.theme.PureBlack
+import com.antigravity.filemanager.presentation.theme.*
 import com.antigravity.filemanager.presentation.theme.TealPrimary
 import com.antigravity.filemanager.presentation.theme.TextPrimary
 import com.antigravity.filemanager.presentation.theme.TextSecondary
@@ -211,8 +211,8 @@ fun ImageViewerScreen(
     if (showDeleteConfirm && currentEntry != null) {
         AlertDialog(
             onDismissRequest = { if (!isDeleting) showDeleteConfirm = false },
-            title = { Text("Delete") },
-            text = { Text("Delete \"$currentName\"?" + if (currentEntry is ViewerEntry.Local) " It will be moved to the recycle bin." else "") },
+            title = { Text("Delete", color = TextPrimary, fontWeight = FontWeight.SemiBold) },
+            text = { Text("Delete \"$currentName\"? It will be moved to the recycle bin.", color = TextSecondary) },
             confirmButton = {
                 TextButton(
                     enabled = !isDeleting,
@@ -252,16 +252,17 @@ fun ImageViewerScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = TealPrimary)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Deleting…", color = Color(0xFFEF5350))
+                            Text("Deleting…", color = PastelCoral)
                         }
                     } else {
-                        Text("Delete", color = Color(0xFFEF5350))
+                        Text("Delete", color = PastelCoral, fontWeight = FontWeight.Bold)
                     }
                 }
             },
             dismissButton = {
-                TextButton(enabled = !isDeleting, onClick = { showDeleteConfirm = false }) { Text("Cancel") }
-            }
+                TextButton(enabled = !isDeleting, onClick = { showDeleteConfirm = false }) { Text("Cancel", color = TextSecondary) }
+            },
+            containerColor = DarkCard
         )
     }
 
@@ -585,8 +586,8 @@ fun VideoPlayerScreen(
     if (showDeleteConfirm && currentEntry != null) {
         AlertDialog(
             onDismissRequest = { if (!isDeleting) showDeleteConfirm = false },
-            title = { Text("Delete") },
-            text = { Text("Delete \"$currentName\"?" + if (currentEntry is ViewerEntry.Local) " It will be moved to the recycle bin." else "") },
+            title = { Text("Delete", color = TextPrimary, fontWeight = FontWeight.SemiBold) },
+            text = { Text("Delete \"$currentName\"? It will be moved to the recycle bin.", color = TextSecondary) },
             confirmButton = {
                 TextButton(
                     enabled = !isDeleting,
@@ -624,16 +625,17 @@ fun VideoPlayerScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = TealPrimary)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Deleting…", color = Color(0xFFEF5350))
+                            Text("Deleting…", color = PastelCoral)
                         }
                     } else {
-                        Text("Delete", color = Color(0xFFEF5350))
+                        Text("Delete", color = PastelCoral, fontWeight = FontWeight.Bold)
                     }
                 }
             },
             dismissButton = {
-                TextButton(enabled = !isDeleting, onClick = { showDeleteConfirm = false }) { Text("Cancel") }
-            }
+                TextButton(enabled = !isDeleting, onClick = { showDeleteConfirm = false }) { Text("Cancel", color = TextSecondary) }
+            },
+            containerColor = DarkCard
         )
     }
 

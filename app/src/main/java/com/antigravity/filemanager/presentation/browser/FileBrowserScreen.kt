@@ -34,10 +34,7 @@ import com.antigravity.filemanager.domain.model.CategoryType
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FileSortOption
 import com.antigravity.filemanager.presentation.components.*
-import com.antigravity.filemanager.presentation.theme.DarkBackground
-import com.antigravity.filemanager.presentation.theme.DarkCard
-import com.antigravity.filemanager.presentation.theme.TealPrimary
-import com.antigravity.filemanager.presentation.theme.TextPrimary
+import com.antigravity.filemanager.presentation.theme.*
 import com.antigravity.filemanager.presentation.theme.TextSecondary
 import com.antigravity.filemanager.utils.FileOpener
 import java.io.File
@@ -175,11 +172,23 @@ fun FileBrowserScreen(
     if (uiState.bookmarkConfirmationMessage != null) {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { viewModel.dismissBookmarkConfirmation() },
-            title = { Text("Bookmark Added") },
-            text = { Text(uiState.bookmarkConfirmationMessage ?: "") },
+            containerColor = DarkCard,
+            title = {
+                Text(
+                    text = "Bookmark",
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary
+                )
+            },
+            text = {
+                Text(
+                    text = uiState.bookmarkConfirmationMessage ?: "",
+                    color = TextSecondary
+                )
+            },
             confirmButton = {
                 androidx.compose.material3.TextButton(onClick = { viewModel.dismissBookmarkConfirmation() }) {
-                    Text("OK")
+                    Text("OK", color = TealPrimary, fontWeight = FontWeight.SemiBold)
                 }
             }
         )
@@ -271,7 +280,7 @@ fun FileBrowserScreen(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color(0xFF004D40)
+                        containerColor = SelectionTopBarBg
                     )
                 )
             } else if (uiState.isSearchActive) {
@@ -404,7 +413,7 @@ fun FileBrowserScreen(
                         BottomBarActionItem(
                             icon = Icons.Default.Delete,
                             label = "Delete",
-                            tint = Color(0xFFEF5350),
+                            tint = Color(0xFFFFAB91),
                             onClick = { viewModel.setShowDeleteDialog(true) },
                             modifier = Modifier.weight(1f)
                         )

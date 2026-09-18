@@ -47,7 +47,7 @@ fun RecycleBinScreen(
             text = { Text(text = "All items in the Recycle Bin will be permanently deleted. This action cannot be undone.", color = TextSecondary) },
             confirmButton = {
                 TextButton(onClick = { viewModel.emptyTrash() }) {
-                    Text(text = "EMPTY TRASH", color = Color(0xFFEF5350))
+                    Text(text = "EMPTY TRASH", color = PastelCoral, fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
@@ -76,7 +76,7 @@ fun RecycleBinScreen(
                 actions = {
                     if (uiState.items.isNotEmpty()) {
                         IconButton(onClick = { viewModel.setShowEmptyConfirm(true) }) {
-                            Icon(Icons.Default.DeleteSweep, contentDescription = "Empty Trash", tint = Color(0xFFEF5350))
+                            Icon(Icons.Default.DeleteSweep, contentDescription = "Empty Trash", tint = Color(0xFFFFAB91))
                         }
                     }
                 }
@@ -106,11 +106,11 @@ fun RecycleBinScreen(
                         }
                         Button(
                             onClick = { viewModel.deleteSelectedPermanently() },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF5350))
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFAB91))
                         ) {
-                            Icon(Icons.Default.DeleteForever, contentDescription = null, tint = TextPrimary)
+                            Icon(Icons.Default.DeleteForever, contentDescription = null, tint = PureBlack)
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("DELETE", color = TextPrimary)
+                            Text("DELETE", color = PureBlack)
                         }
                     }
                 }
@@ -209,7 +209,7 @@ private fun TrashItemThumbnail(item: TrashItem) {
             Icon(
                 imageVector = Icons.Default.Folder,
                 contentDescription = null,
-                tint = TextSecondary,
+                tint = Color(0xFFFFCC80),
                 modifier = Modifier.size(26.dp)
             )
         } else {

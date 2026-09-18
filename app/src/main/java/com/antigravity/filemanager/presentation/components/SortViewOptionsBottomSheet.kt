@@ -129,10 +129,10 @@ fun SortViewOptionsBottomSheet(
             confirmButton = {},
             dismissButton = {
                 TextButton(onClick = { showSortDialog = false }) {
-                    Text("CANCEL", color = TealPrimary)
+                    Text("CANCEL", color = TextSecondary)
                 }
             },
-            containerColor = Color(0xFF2C2C2C)
+            containerColor = DarkCard
         )
     }
 
@@ -370,10 +370,10 @@ fun SortByDialog(
         confirmButton = {},
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("CANCEL", color = TealPrimary)
+                Text("CANCEL", color = TextSecondary)
             }
         },
-        containerColor = Color(0xFF2C2C2C)
+        containerColor = DarkCard
     )
 }
 

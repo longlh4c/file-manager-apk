@@ -23,6 +23,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.antigravity.filemanager.domain.model.DuplicateFileEntry
 import com.antigravity.filemanager.domain.model.DuplicateGroup
+import com.antigravity.filemanager.presentation.theme.*
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.presentation.components.DeleteConfirmDialog
 import com.antigravity.filemanager.presentation.components.FileManagerTopBar
@@ -78,7 +79,7 @@ fun DuplicateFilesScreen(
                             Icon(Icons.Default.DoneAll, contentDescription = "Select all duplicates (keep originals)", tint = Color.White)
                         }
                     },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF004D40))
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = SelectionTopBarBg)
                 )
             } else {
                 FileManagerTopBar(
@@ -104,9 +105,9 @@ fun DuplicateFilesScreen(
                             modifier = Modifier.clickable { showDeleteDialog = true },
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFEF5350))
+                            Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFFFAB91))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Delete ${selectedPaths.size} file(s)", color = Color(0xFFEF5350), fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                            Text("Delete ${selectedPaths.size} file(s)", color = Color(0xFFFFAB91), fontSize = 15.sp, fontWeight = FontWeight.Medium)
                         }
                     }
                 }
@@ -162,7 +163,7 @@ private fun DuplicateEntryRow(
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
-    val rowBg = if (isSelected) Color(0xFF00695C).copy(alpha = 0.6f) else Color.Transparent
+    val rowBg = if (isSelected) SelectionBg else Color.Transparent
 
     Row(
         modifier = Modifier.fillMaxWidth().background(rowBg).clickable { onClick() }.padding(horizontal = 16.dp, vertical = 10.dp),

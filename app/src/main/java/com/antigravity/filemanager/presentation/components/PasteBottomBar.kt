@@ -49,7 +49,7 @@ fun PasteBottomBar(
                 TextButton(onClick = onCancel) {
                     Text(
                         text = "CANCEL",
-                        color = Color(0xFFEF5350),
+                        color = Color(0xFFFFAB91),
                         fontWeight = FontWeight.Bold
                     )
                 }

@@ -197,7 +197,7 @@ fun OverwriteConflictDialog(
                     }
                     Button(
                         onClick = { onConfirm(setOf(conflict.name), emptySet()) },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF5350), contentColor = Color.White),
+                        colors = ButtonDefaults.buttonColors(containerColor = PastelCoral, contentColor = PureBlack),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                     ) {
                         Text(text = "OVERWRITE", fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1, softWrap = false)
@@ -248,7 +248,7 @@ fun OverwriteConflictDialog(
                         onClick = { conflicts.forEach { resolutionState[it.name] = ConflictResolution.OVERWRITE } },
                         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 8.dp)
                     ) {
-                        Text(text = "OVERWRITE ALL", color = Color(0xFFEF5350), fontSize = 12.sp, maxLines = 1, softWrap = false)
+                        Text(text = "OVERWRITE ALL", color = PastelCoral, fontSize = 12.sp, maxLines = 1, softWrap = false)
                     }
                     TextButton(
                         onClick = { conflicts.forEach { resolutionState[it.name] = ConflictResolution.SKIP } },
@@ -291,7 +291,7 @@ fun OverwriteConflictDialog(
                                 ConflictChoiceChip(
                                     label = "Overwrite",
                                     selected = current == ConflictResolution.OVERWRITE,
-                                    selectedColor = Color(0xFFEF5350),
+                                    selectedColor = PastelCoral,
                                     onClick = { resolutionState[conflict.name] = ConflictResolution.OVERWRITE }
                                 )
                                 ConflictChoiceChip(
@@ -325,7 +325,7 @@ fun OverwriteConflictDialog(
                     val skipNames = resolutionState.filterValues { it == ConflictResolution.SKIP }.keys.toSet()
                     onConfirm(overwriteNames, skipNames)
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = TealPrimary, contentColor = Color.White)
+                colors = ButtonDefaults.buttonColors(containerColor = TealPrimary, contentColor = PureBlack)
             ) {
                 Text(text = "CONFIRM", fontWeight = FontWeight.Bold)
             }
@@ -372,6 +372,7 @@ fun DeleteConfirmDialog(
     // rubbish-bin view) — there's no "move to trash" choice left to make, so the checkbox is
     // hidden and onConfirm always fires with false.
     showMoveToTrashOption: Boolean = true,
+    defaultMoveToTrash: Boolean = false,
     title: String = "Delete",
     message: String = "Are you sure you want to delete $itemCount item(s)?"
 ) {
@@ -420,10 +421,10 @@ fun DeleteConfirmDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(if (showMoveToTrashOption) moveToTrash else false) },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF5350), contentColor = Color.White)
+                onClick = { onConfirm(if (showMoveToTrashOption) moveToTrash else defaultMoveToTrash) },
+                colors = ButtonDefaults.buttonColors(containerColor = PastelCoral, contentColor = PureBlack)
             ) {
-                Text(text = "DELETE", fontWeight = FontWeight.Bold)
+                Text(text = "DELETE", fontWeight = FontWeight.Bold, color = PureBlack)
             }
         },
         dismissButton = {
@@ -461,9 +462,9 @@ fun OverwriteFileConfirmDialog(
         confirmButton = {
             Button(
                 onClick = onConfirm,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF5350), contentColor = Color.White)
+                colors = ButtonDefaults.buttonColors(containerColor = PastelCoral, contentColor = PureBlack)
             ) {
-                Text(text = "REPLACE", fontWeight = FontWeight.Bold)
+                Text(text = "REPLACE", fontWeight = FontWeight.Bold, color = PureBlack)
             }
         },
         dismissButton = {
@@ -648,14 +649,6 @@ fun AddCloudDialog(
         }
     }
 
-    val providerColor = remember(selectedProvider) {
-        when (selectedProvider) {
-            CloudProvider.GOOGLE_DRIVE -> Color(0xFF4285F4)
-            CloudProvider.DROPBOX -> Color(0xFF0061FF)
-            CloudProvider.MEGA -> Color(0xFFD9272E)
-        }
-    }
-
     val providerDisplayName = remember(selectedProvider) {
         when (selectedProvider) {
             CloudProvider.GOOGLE_DRIVE -> "Google Drive"
@@ -689,8 +682,9 @@ fun AddCloudDialog(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     CloudProviderButton(
+                        provider = CloudProvider.GOOGLE_DRIVE,
                         name = "Google Drive",
-                        color = Color(0xFF4285F4),
+                        pastelColor = Color(0xFF81D4FA),
                         isSelected = selectedProvider == CloudProvider.GOOGLE_DRIVE,
                         onClick = {
                             selectedProvider = CloudProvider.GOOGLE_DRIVE
@@ -700,8 +694,9 @@ fun AddCloudDialog(
                         modifier = Modifier.weight(1f)
                     )
                     CloudProviderButton(
+                        provider = CloudProvider.DROPBOX,
                         name = "Dropbox",
-                        color = Color(0xFF0061FF),
+                        pastelColor = Color(0xFF80DEEA),
                         isSelected = selectedProvider == CloudProvider.DROPBOX,
                         onClick = {
                             selectedProvider = CloudProvider.DROPBOX
@@ -711,8 +706,9 @@ fun AddCloudDialog(
                         modifier = Modifier.weight(1f)
                     )
                     CloudProviderButton(
+                        provider = CloudProvider.MEGA,
                         name = "MEGA",
-                        color = Color(0xFFD9272E),
+                        pastelColor = PastelCoral,
                         isSelected = selectedProvider == CloudProvider.MEGA,
                         onClick = {
                             selectedProvider = CloudProvider.MEGA
@@ -735,8 +731,12 @@ fun AddCloudDialog(
                         focusedTextColor = TextPrimary,
                         unfocusedTextColor = TextPrimary,
                         focusedBorderColor = TealPrimary,
-                        unfocusedBorderColor = TextSecondary,
-                        cursorColor = TealPrimary
+                        unfocusedBorderColor = DividerDark,
+                        focusedLabelColor = TealPrimary,
+                        unfocusedLabelColor = TextSecondary,
+                        cursorColor = TealPrimary,
+                        focusedContainerColor = DarkBackground,
+                        unfocusedContainerColor = DarkBackground
                     ),
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -838,13 +838,18 @@ fun AddCloudDialog(
                     }
                 },
                 enabled = !isAddingAccount,
-                colors = ButtonDefaults.buttonColors(containerColor = providerColor, contentColor = Color.White),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = TealPrimary,
+                    contentColor = PureBlack,
+                    disabledContainerColor = TealPrimary.copy(alpha = 0.4f),
+                    disabledContentColor = PureBlack.copy(alpha = 0.4f)
+                ),
                 shape = RoundedCornerShape(6.dp)
             ) {
                 Icon(
                     imageVector = Icons.Default.Login,
                     contentDescription = null,
-                    tint = Color.White,
+                    tint = PureBlack,
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
@@ -855,7 +860,8 @@ fun AddCloudDialog(
                         "SIGN IN & CONNECT"
                     },
                     fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp
+                    fontSize = 13.sp,
+                    color = PureBlack
                 )
             }
         },
@@ -864,6 +870,7 @@ fun AddCloudDialog(
                 Text(text = "CANCEL", color = TextSecondary)
             }
         },
+        shape = RoundedCornerShape(12.dp),
         containerColor = DarkCard
     )
 }
@@ -1716,8 +1723,9 @@ fun CloudLoginWebViewDialog(
 
 @Composable
 private fun CloudProviderButton(
+    provider: CloudProvider,
     name: String,
-    color: Color,
+    pastelColor: Color,
     isSelected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -1725,14 +1733,22 @@ private fun CloudProviderButton(
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(8.dp),
-        color = if (isSelected) color.copy(alpha = 0.25f) else DarkCardSecondary,
-        border = if (isSelected) androidx.compose.foundation.BorderStroke(1.5.dp, color) else null,
-        modifier = modifier.height(48.dp)
+        color = if (isSelected) pastelColor.copy(alpha = 0.18f) else DarkCardSecondary,
+        border = if (isSelected) androidx.compose.foundation.BorderStroke(1.5.dp, pastelColor) else androidx.compose.foundation.BorderStroke(0.5.dp, DividerDark),
+        modifier = modifier.height(54.dp)
     ) {
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 4.dp, vertical = 4.dp)
+        ) {
+            CloudProviderIcon(provider = provider, size = 20.dp)
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = name,
-                color = if (isSelected) Color.White else TextSecondary,
+                color = if (isSelected) pastelColor else TextSecondary,
                 fontSize = 11.sp,
                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                 maxLines = 1
@@ -1834,7 +1850,7 @@ fun SelectCloudDestinationDialog(
                         ) {
                             CloudProviderIcon(
                                 provider = account.provider,
-                                modifier = Modifier.size(36.dp)
+                                size = 36.dp
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
@@ -1960,7 +1976,7 @@ fun CloudFolderPickerDialog(
                                     .padding(horizontal = 16.dp, vertical = 14.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Default.Folder, contentDescription = null, tint = TealPrimary, modifier = Modifier.size(24.dp))
+                                Icon(Icons.Default.Folder, contentDescription = null, tint = Color(0xFFFFCC80), modifier = Modifier.size(24.dp))
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Text(text = folder.name, color = TextPrimary, fontSize = 15.sp)
                             }

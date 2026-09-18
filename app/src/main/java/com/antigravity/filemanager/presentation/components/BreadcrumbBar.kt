@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.antigravity.filemanager.domain.model.CategoryType
 import com.antigravity.filemanager.presentation.theme.DarkBackground
+import com.antigravity.filemanager.presentation.theme.PastelCoral
 import com.antigravity.filemanager.presentation.theme.TextPrimary
 import com.antigravity.filemanager.presentation.theme.TextSecondary
 
@@ -53,7 +54,7 @@ fun BreadcrumbBar(
             Icon(
                 imageVector = Icons.Default.Home,
                 contentDescription = "Home",
-                tint = Color(0xFFEF5350),
+                tint = PastelCoral,
                 modifier = Modifier
                     .size(28.dp)
                     .clickable { onHomeClick() }

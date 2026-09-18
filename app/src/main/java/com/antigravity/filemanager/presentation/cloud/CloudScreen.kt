@@ -1,35 +1,52 @@
 package com.antigravity.filemanager.presentation.cloud
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import kotlinx.coroutines.Job
 import com.antigravity.filemanager.domain.model.CloudAccount
 import com.antigravity.filemanager.domain.model.CloudProvider
 import com.antigravity.filemanager.presentation.components.AddCloudDialog
 import com.antigravity.filemanager.presentation.theme.*
+import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun CloudScreen(
     onNavigateBack: () -> Unit,
@@ -38,10 +55,16 @@ fun CloudScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var accountToDelete by remember { mutableStateOf<CloudAccount?>(null) }
+    var draggedAccountId by remember { mutableStateOf<String?>(null) }
+    var dragJob by remember { mutableStateOf<Job?>(null) }
+    val dragOffsetY = remember { Animatable(0f) }
+    var rawDragOffset by remember { mutableFloatStateOf(0f) }
+    var itemHeightPx by remember { mutableStateOf(0f) }
+    val coroutineScope = rememberCoroutineScope()
 
     BackHandler {
         if (uiState.isReorderMode) {
-            viewModel.toggleReorderMode()
+            viewModel.cancelReorder()
         } else {
             onNavigateBack()
         }
@@ -74,26 +97,27 @@ fun CloudScreen(
             },
             text = {
                 Text(
-                    text = "Are you sure you want to remove \"${accountToDelete?.accountName}\" (${accountToDelete?.email}) from cloud storage?",
-                    color = TextSecondary,
-                    fontSize = 15.sp
+                    text = "Are you sure you want to remove \"${accountToDelete?.accountName}\"? This only disconnects the account from Owl File + without deleting your files.",
+                    color = TextSecondary
                 )
             },
             confirmButton = {
-                Button(
+                TextButton(
                     onClick = {
-                        val id = accountToDelete?.id
-                        if (id != null) viewModel.removeAccount(id)
+                        accountToDelete?.let { viewModel.removeAccount(it.id) }
                         accountToDelete = null
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF5350), contentColor = Color.White)
+                    }
                 ) {
-                    Text("REMOVE")
+                    Text(
+                        text = "Remove",
+                        color = Color(0xFFEF5350),
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             },
             dismissButton = {
                 TextButton(onClick = { accountToDelete = null }) {
-                    Text("CANCEL", color = TextSecondary)
+                    Text(text = "Cancel", color = TextSecondary)
                 }
             },
             containerColor = DarkCard
@@ -112,18 +136,39 @@ fun CloudScreen(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.Default.Menu, contentDescription = "Menu", tint = TextPrimary)
+                    IconButton(onClick = {
+                        if (uiState.isReorderMode) {
+                            viewModel.cancelReorder()
+                        } else {
+                            onNavigateBack()
+                        }
+                    }) {
+                        Icon(
+                            imageVector = if (uiState.isReorderMode) Icons.AutoMirrored.Filled.ArrowBack else Icons.Default.Menu,
+                            contentDescription = if (uiState.isReorderMode) "Cancel" else "Menu",
+                            tint = TextPrimary
+                        )
                     }
                 },
                 actions = {
-                    // Pencil button to trigger Edit / Reorder / Delete Mode; Checkmark to finish
-                    IconButton(onClick = { viewModel.toggleReorderMode() }) {
-                        Icon(
-                            imageVector = if (uiState.isReorderMode) Icons.Default.Check else Icons.Default.Edit,
-                            contentDescription = if (uiState.isReorderMode) "Done" else "Edit",
-                            tint = if (uiState.isReorderMode) TealPrimary else TextPrimary
-                        )
+                    if (uiState.isReorderMode) {
+                        // Checkmark button: Confirm & Save new order to database
+                        IconButton(onClick = { viewModel.confirmReorder() }) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Confirm",
+                                tint = TealPrimary
+                            )
+                        }
+                    } else {
+                        // Pencil button: Enter reorder mode
+                        IconButton(onClick = { viewModel.enterReorderMode() }) {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Edit",
+                                tint = TextPrimary
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkBackground)
@@ -139,21 +184,114 @@ fun CloudScreen(
         ) {
             // Connected Cloud Accounts
             itemsIndexed(uiState.accounts, key = { _, it -> it.id }) { index, account ->
-                CloudAccountRow(
-                    account = account,
-                    isReorderMode = uiState.isReorderMode,
-                    canMoveUp = index > 0,
-                    canMoveDown = index < uiState.accounts.size - 1,
-                    onMoveUp = { viewModel.moveAccountUp(index) },
-                    onMoveDown = { viewModel.moveAccountDown(index) },
-                    onDelete = { accountToDelete = account },
-                    onClick = {
-                        if (!uiState.isReorderMode) {
-                            onNavigateToCloudBrowser(account.id, account.accountName)
-                        }
-                    }
+                val isDragging = draggedAccountId == account.id
+                val elevation by animateDpAsState(
+                    targetValue = if (isDragging) 8.dp else 0.dp,
+                    animationSpec = tween(durationMillis = 150),
+                    label = "dragElevation"
                 )
-                HorizontalDivider(color = Color(0xFF1E1E1E), thickness = 0.5.dp)
+                val scale by animateFloatAsState(
+                    targetValue = if (isDragging) 1.02f else 1.0f,
+                    animationSpec = tween(durationMillis = 150),
+                    label = "dragScale"
+                )
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(
+                            // The dragged item must NOT have animateItemPlacement, otherwise
+                            // its spring animation and the touch drag translation fight each other,
+                            // causing violent jitter. Non-dragged items smoothly glide out of the way!
+                            if (isDragging) Modifier
+                            else Modifier.animateItemPlacement(
+                                animationSpec = spring(
+                                    dampingRatio = Spring.DampingRatioNoBouncy,
+                                    stiffness = Spring.StiffnessMediumLow
+                                )
+                            )
+                        )
+                        .zIndex(if (isDragging) 10f else 0f)
+                        .graphicsLayer {
+                            translationY = if (isDragging) dragOffsetY.value else 0f
+                            scaleX = scale
+                            scaleY = scale
+                            shadowElevation = elevation.toPx()
+                        }
+                        .background(
+                            if (isDragging) DarkCardSecondary else Color.Transparent,
+                            RoundedCornerShape(8.dp)
+                        )
+                        .onGloballyPositioned { coordinates ->
+                            if (coordinates.size.height > 0) {
+                                itemHeightPx = coordinates.size.height.toFloat()
+                            }
+                        }
+                ) {
+                    CloudAccountRow(
+                        account = account,
+                        isReorderMode = uiState.isReorderMode,
+                        isDragging = isDragging,
+                        canMoveUp = index > 0,
+                        canMoveDown = index < uiState.accounts.size - 1,
+                        onMoveUp = { viewModel.moveAccountUp(index) },
+                        onMoveDown = { viewModel.moveAccountDown(index) },
+                        onDragStart = {
+                            dragJob?.cancel()
+                            rawDragOffset = 0f
+                            draggedAccountId = account.id
+                            dragJob = coroutineScope.launch { dragOffsetY.snapTo(0f) }
+                        },
+                        onDrag = { dragAmount ->
+                            if (draggedAccountId != account.id) return@CloudAccountRow
+                            val currentIdx = uiState.accounts.indexOfFirst { it.id == account.id }
+                            if (currentIdx == -1) return@CloudAccountRow
+                            rawDragOffset += dragAmount
+                            val height = if (itemHeightPx > 0f) itemHeightPx else 180f
+                            val threshold = height * 0.45f
+
+                            if (rawDragOffset > threshold && currentIdx < uiState.accounts.size - 1) {
+                                viewModel.moveAccountDown(currentIdx)
+                                rawDragOffset -= height
+                            } else if (rawDragOffset < -threshold && currentIdx > 0) {
+                                viewModel.moveAccountUp(currentIdx)
+                                rawDragOffset += height
+                            }
+                            dragJob?.cancel()
+                            dragJob = coroutineScope.launch {
+                                dragOffsetY.snapTo(rawDragOffset)
+                            }
+                        },
+                        onDragEnd = {
+                            if (draggedAccountId == account.id) {
+                                dragJob?.cancel()
+                                dragJob = coroutineScope.launch {
+                                    dragOffsetY.animateTo(
+                                        0f,
+                                        spring(
+                                            dampingRatio = Spring.DampingRatioNoBouncy,
+                                            stiffness = Spring.StiffnessMedium
+                                        )
+                                    )
+                                    draggedAccountId = null
+                                    rawDragOffset = 0f
+                                }
+                            }
+                        },
+                        onDelete = { accountToDelete = account },
+                        onClick = {
+                            if (!uiState.isReorderMode) {
+                                onNavigateToCloudBrowser(account.id, account.accountName)
+                            }
+                        }
+                    )
+                }
+                if (index < uiState.accounts.size - 1) {
+                    HorizontalDivider(
+                        color = if (isDragging) Color.Transparent else DividerDark,
+                        thickness = 0.5.dp
+                    )
+                }
             }
 
             // Row: "+ Add a cloud location" (matching Screenshot 234540)
@@ -195,17 +333,21 @@ fun CloudScreen(
 private fun CloudAccountRow(
     account: CloudAccount,
     isReorderMode: Boolean,
+    isDragging: Boolean = false,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
+    onDragStart: () -> Unit = {},
+    onDrag: (Float) -> Unit = {},
+    onDragEnd: () -> Unit = {},
     onDelete: () -> Unit,
     onClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .clickable(enabled = !isReorderMode) { onClick() }
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -245,12 +387,12 @@ private fun CloudAccountRow(
                     Icon(
                         imageVector = Icons.Default.Delete,
                         contentDescription = "Delete account",
-                        tint = Color(0xFFEF5350),
+                        tint = PastelCoral,
                         modifier = Modifier.size(20.dp)
                     )
                 }
 
-                Spacer(modifier = Modifier.width(4.dp))
+                Spacer(modifier = Modifier.width(2.dp))
 
                 IconButton(
                     onClick = onMoveUp,
@@ -260,7 +402,7 @@ private fun CloudAccountRow(
                     Icon(
                         Icons.Default.KeyboardArrowUp,
                         contentDescription = "Move Up",
-                        tint = if (canMoveUp) TextPrimary else TextSecondary.copy(alpha = 0.3f)
+                        tint = if (canMoveUp) Color(0xFF90CAF9) else TextSecondary.copy(alpha = 0.25f)
                     )
                 }
                 IconButton(
@@ -271,17 +413,34 @@ private fun CloudAccountRow(
                     Icon(
                         Icons.Default.KeyboardArrowDown,
                         contentDescription = "Move Down",
-                        tint = if (canMoveDown) TextPrimary else TextSecondary.copy(alpha = 0.3f)
+                        tint = if (canMoveDown) Color(0xFF90CAF9) else TextSecondary.copy(alpha = 0.25f)
                     )
                 }
-                Icon(
-                    imageVector = Icons.Default.Menu,
-                    contentDescription = "Drag handle",
-                    tint = TealPrimary,
+
+                // Drag Handle (ONLY DRAG TO REORDER, NO CLICK, NO POPUP MENU)
+                Box(
                     modifier = Modifier
-                        .padding(start = 4.dp)
-                        .size(22.dp)
-                )
+                        .size(36.dp)
+                        .pointerInput(account.id) {
+                            detectVerticalDragGestures(
+                                onDragStart = { onDragStart() },
+                                onDragEnd = { onDragEnd() },
+                                onDragCancel = { onDragEnd() },
+                                onVerticalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    onDrag(dragAmount)
+                                }
+                            )
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Menu,
+                        contentDescription = "Drag to reorder",
+                        tint = if (isDragging) TealAccent else TealPrimary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
             }
         }
     }
@@ -389,61 +548,47 @@ fun DropboxLogoIcon(modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun CloudProviderIcon(provider: CloudProvider, modifier: Modifier = Modifier) {
-    when (provider) {
-        CloudProvider.GOOGLE_DRIVE -> {
-            Box(
-                modifier = modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xFF1E2024)),
-                contentAlignment = Alignment.Center
-            ) {
-                GoogleDriveLogoIcon(modifier = Modifier.size(26.dp))
+fun CloudProviderIcon(
+    provider: CloudProvider,
+    modifier: Modifier = Modifier,
+    size: Dp = 40.dp
+) {
+    Box(
+        modifier = modifier.size(size),
+        contentAlignment = Alignment.Center
+    ) {
+        when (provider) {
+            CloudProvider.GOOGLE_DRIVE -> {
+                GoogleDriveLogoIcon(modifier = Modifier.fillMaxSize(0.85f))
             }
-        }
-        CloudProvider.DROPBOX -> {
-            Box(
-                modifier = modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xFF1E2024)),
-                contentAlignment = Alignment.Center
-            ) {
-                DropboxLogoIcon(modifier = Modifier.size(26.dp))
+            CloudProvider.DROPBOX -> {
+                DropboxLogoIcon(modifier = Modifier.fillMaxSize())
             }
-        }
-        CloudProvider.MEGA -> {
-            Box(
-                modifier = modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFFD9272E)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "M",
-                    color = Color.White,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold
-                )
+            CloudProvider.MEGA -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape)
+                        .background(Color(0xFFD9272E)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "M",
+                        color = Color.White,
+                        fontSize = (size.value * 0.5f).sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
             }
-        }
-        else -> {
-            Box(
-                modifier = modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(DarkCard),
-                contentAlignment = Alignment.Center
-            ) {
+            else -> {
                 Icon(
                     imageVector = Icons.Default.Cloud,
                     contentDescription = "Cloud",
-                    tint = TextSecondary,
-                    modifier = Modifier.size(26.dp)
+                    tint = TealPrimary,
+                    modifier = Modifier.fillMaxSize(0.85f)
                 )
             }
         }
     }
 }
+

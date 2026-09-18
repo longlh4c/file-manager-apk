@@ -173,7 +173,7 @@ fun LargeFilesScreen(
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color(0xFF004D40)
+                        containerColor = SelectionTopBarBg
                     )
                 )
             } else if (isSearchActive) {
@@ -283,7 +283,7 @@ fun LargeFilesScreen(
                         BottomBarActionItem(
                             icon = Icons.Default.Delete,
                             label = "Delete",
-                            tint = Color(0xFFEF5350),
+                            tint = Color(0xFFFFAB91),
                             onClick = { showDeleteDialog = true },
                             modifier = Modifier.weight(1f)
                         )
@@ -441,7 +441,7 @@ private fun LargeFileDetailedRow(
     onClick: () -> Unit,
     onCheckboxToggle: () -> Unit
 ) {
-    val rowBg = if (isSelected) Color(0xFF00695C).copy(alpha = 0.6f) else Color.Transparent
+    val rowBg = if (isSelected) SelectionBg else Color.Transparent
 
     Row(
         modifier = Modifier
@@ -485,7 +485,7 @@ private fun LargeFileDetailedRow(
                     }
                 }
                 ext in listOf("zip", "rar", "7z") -> {
-                    Icon(Icons.Default.FolderZip, contentDescription = null, tint = Color(0xFFFFB300), modifier = Modifier.size(28.dp))
+                    Icon(Icons.Default.FolderZip, contentDescription = null, tint = Color(0xFFFFE082), modifier = Modifier.size(28.dp))
                 }
                 else -> {
                     Icon(Icons.Default.InsertDriveFile, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(26.dp))

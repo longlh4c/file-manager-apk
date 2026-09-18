@@ -114,6 +114,12 @@ interface TrashDao {
 
     @Query("DELETE FROM trash_items")
     suspend fun clearAll()
+
+    @Query("UPDATE trash_items SET fileSize = :fileSize WHERE id = :id")
+    suspend fun updateFileSize(id: Long, fileSize: Long): Int
+
+    @Query("SELECT COUNT(*) FROM trash_items")
+    suspend fun getTrashCount(): Int
 }
 
 @Dao

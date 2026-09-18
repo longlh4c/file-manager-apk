@@ -38,9 +38,9 @@ import com.antigravity.filemanager.presentation.components.CloudDownloadProgress
 import com.antigravity.filemanager.presentation.components.FileManagerTopBar
 import com.antigravity.filemanager.presentation.components.PasteBottomBar
 import com.antigravity.filemanager.presentation.components.PullToRefreshWrapper
-import com.antigravity.filemanager.presentation.theme.DarkBackground
-import com.antigravity.filemanager.presentation.theme.TealPrimary
-import com.antigravity.filemanager.presentation.theme.TextPrimary
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.graphics.Color
+import com.antigravity.filemanager.presentation.theme.*
 
 @Composable
 fun DashboardScreen(
@@ -165,10 +165,20 @@ fun DashboardScreen(
     if (uiState.showBookmarksDialog) {
         AlertDialog(
             onDismissRequest = { viewModel.setShowBookmarksDialog(false) },
-            title = { Text("Bookmarks", fontWeight = FontWeight.Medium) },
+            containerColor = DarkCard,
+            title = {
+                Text(
+                    text = "Bookmarks",
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary
+                )
+            },
             text = {
                 if (uiState.bookmarks.isEmpty()) {
-                    Text("No bookmarked folders yet")
+                    Text(
+                        text = "No bookmarked folders yet",
+                        color = TextSecondary
+                    )
                 } else {
                     LazyColumn {
                         items(uiState.bookmarks, key = { it.path }) { bookmark ->
@@ -185,15 +195,27 @@ fun DashboardScreen(
                                 Icon(
                                     imageVector = Icons.Default.Folder,
                                     contentDescription = null,
-                                    tint = TealPrimary
+                                    tint = Color(0xFFFFCC80)
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(bookmark.name, fontWeight = FontWeight.Medium)
-                                    Text(bookmark.path, fontSize = 12.sp)
+                                    Text(
+                                        text = bookmark.name,
+                                        fontWeight = FontWeight.Medium,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = bookmark.path,
+                                        fontSize = 12.sp,
+                                        color = TextSecondary
+                                    )
                                 }
                                 IconButton(onClick = { viewModel.removeBookmark(bookmark.path) }) {
-                                    Icon(imageVector = Icons.Default.Delete, contentDescription = "Remove bookmark")
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Remove bookmark",
+                                        tint = PastelCoral
+                                    )
                                 }
                             }
                         }
@@ -201,8 +223,8 @@ fun DashboardScreen(
                 }
             },
             confirmButton = {
-                androidx.compose.material3.TextButton(onClick = { viewModel.setShowBookmarksDialog(false) }) {
-                    Text("Close")
+                TextButton(onClick = { viewModel.setShowBookmarksDialog(false) }) {
+                    Text("Close", color = TealPrimary, fontWeight = FontWeight.SemiBold)
                 }
             }
         )
