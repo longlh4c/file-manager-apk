@@ -105,6 +105,7 @@ class FileBrowserViewModel @Inject constructor(
     private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
     private val transferGuard: com.antigravity.filemanager.data.service.TransferGuard,
     private val usbOtgManager: com.antigravity.filemanager.utils.UsbOtgManager,
+    private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
@@ -141,6 +142,7 @@ class FileBrowserViewModel @Inject constructor(
         observeBookmarks()
         loadStorageUsage()
         observeUsbConnection()
+        observeMediaChanges()
     }
 
     private fun observeUsbConnection() {
@@ -280,11 +282,6 @@ class FileBrowserViewModel @Inject constructor(
                     showHiddenFiles = savedHidden,
                     viewMode = savedViewMode
                 )
-                if (cached.isFresh) {
-                    // Cache was written moments ago (and every mutation invalidates it) —
-                    // skip the filesystem rescan entirely instead of redoing it unconditionally.
-                    return@launch
-                }
             } else {
                 _uiState.value = _uiState.value.copy(
                     isLoading = true,
@@ -297,6 +294,8 @@ class FileBrowserViewModel @Inject constructor(
                 )
             }
 
+            watchDirectory(path)
+
             // 2. Revalidate: fetch fresh data from filesystem
             val files = fileOperationsUseCase.getFiles(
                 directoryPath = path,
@@ -307,12 +306,22 @@ class FileBrowserViewModel @Inject constructor(
             // Save to cache for next time
             folderCacheManager.putLocalFolder(path, savedSort, savedHidden, files)
 
-            _uiState.value = _uiState.value.copy(
-                isLoading = false,
-                files = files
-            )
+            if (_uiState.value.currentPath == path) {
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    files = files
+                )
+            }
+        }
+    }
 
-            watchDirectory(path)
+    private fun observeMediaChanges() {
+        viewModelScope.launch {
+            mediaChangeSignal.changes.debounce(300).collect {
+                if (_uiState.value.currentPath.isNotEmpty()) {
+                    loadDirectory(_uiState.value.currentPath)
+                }
+            }
         }
     }
 

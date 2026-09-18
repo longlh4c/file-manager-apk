@@ -44,4 +44,8 @@ class MediaChangeSignal @Inject constructor(
             observer
         )
     }
+
+    fun notifyChanged() {
+        _changes.tryEmit(Unit)
+    }
 }

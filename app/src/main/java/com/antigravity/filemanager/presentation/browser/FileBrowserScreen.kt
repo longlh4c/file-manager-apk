@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -49,6 +50,13 @@ fun FileBrowserScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+
+    LifecycleResumeEffect(uiState.currentPath) {
+        if (uiState.currentPath.isNotEmpty()) {
+            viewModel.loadDirectory(uiState.currentPath)
+        }
+        onPauseOrDispose { }
+    }
 
     var showMoreMenu by remember { mutableStateOf(false) }
     var showSortDialog by remember { mutableStateOf(false) }

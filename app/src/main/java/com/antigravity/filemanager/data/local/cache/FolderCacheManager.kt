@@ -103,7 +103,24 @@ class FolderCacheManager @Inject constructor(
     }
 
     private fun markMediaCachesUnreconciled() {
+        dashboardSummaryCache = null
+        ioScope.launch { dashboardCacheFile.delete() }
         reconciledOnceKeys.removeAll { it.startsWith("mediafolders_") || it.startsWith("catsub_") }
+    }
+
+    fun clearDashboardSummaries() {
+        dashboardSummaryCache = null
+        ioScope.launch { dashboardCacheFile.delete() }
+    }
+
+    fun clearLocalFolderCache() {
+        val keysToRemove = cacheRemoveByPrefix("local_")
+        ioScope.launch {
+            keysToRemove.forEach { key ->
+                val hashed = hashKey(key)
+                File(cacheDir, "$hashed.json").delete()
+            }
+        }
     }
 
     /** False the first time this exact key is asked about since process start (caller should

@@ -423,7 +423,8 @@ class FileRepositoryImpl @Inject constructor(
 @Singleton
 class RecycleBinRepositoryImpl @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val database: AppDatabase
+    private val database: AppDatabase,
+    private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal
 ) : IRecycleBinRepository {
 
     private val trashRoot = File(Environment.getExternalStorageDirectory(), ".filemanager_trash")
@@ -572,6 +573,7 @@ class RecycleBinRepositoryImpl @Inject constructor(
                     count++
                 }
             }
+            if (count > 0) mediaChangeSignal.notifyChanged()
             Result.success(count)
         } catch (e: Exception) {
             Result.failure(e)
@@ -656,6 +658,7 @@ class RecycleBinRepositoryImpl @Inject constructor(
                     android.media.MediaScannerConnection.scanFile(context, scannedPaths.toTypedArray(), null, null)
                 } catch (e: Exception) {}
             }
+            if (restored > 0) mediaChangeSignal.notifyChanged()
             Result.success(restored)
         } catch (e: Exception) {
             Result.failure(e)
@@ -678,6 +681,7 @@ class RecycleBinRepositoryImpl @Inject constructor(
                 database.trashDao().deleteByIds(listOf(entity.id))
                 deleted++
             }
+            if (deleted > 0) mediaChangeSignal.notifyChanged()
             Result.success(deleted)
         } catch (e: Exception) {
             Result.failure(e)
@@ -695,6 +699,7 @@ class RecycleBinRepositoryImpl @Inject constructor(
                 }
             }
             database.trashDao().clearAll()
+            mediaChangeSignal.notifyChanged()
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)

@@ -47,7 +47,8 @@ class FileOperationsUseCase @Inject constructor(
     private val fileRepository: IFileRepository,
     private val recycleBinRepository: IRecycleBinRepository,
     private val transferGuard: com.antigravity.filemanager.data.service.TransferGuard,
-    private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager
+    private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
+    private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal
 ) {
     suspend fun getFiles(directoryPath: String, sort: FileSortOption, showHidden: Boolean): List<FileItem> =
         fileRepository.getFilesInDirectory(directoryPath, sort, showHidden)
@@ -75,7 +76,10 @@ class FileOperationsUseCase @Inject constructor(
                     )
                 )
             }
-            if (result.isSuccess) folderCacheManager.invalidateMediaFolders()
+            if (result.isSuccess) {
+                folderCacheManager.invalidateMediaFolders()
+                mediaChangeSignal.notifyChanged()
+            }
             return result
         } finally {
             transferGuard.end()
@@ -105,7 +109,10 @@ class FileOperationsUseCase @Inject constructor(
                     )
                 )
             }
-            if (result.isSuccess) folderCacheManager.invalidateMediaFolders()
+            if (result.isSuccess) {
+                folderCacheManager.invalidateMediaFolders()
+                mediaChangeSignal.notifyChanged()
+            }
             return result
         } finally {
             transferGuard.end()
@@ -116,10 +123,19 @@ class FileOperationsUseCase @Inject constructor(
         fileRepository.findCopyConflicts(sourcePaths, targetDir)
 
     suspend fun rename(filePath: String, newName: String): Result<FileItem> =
-        fileRepository.renameFile(filePath, newName).also { if (it.isSuccess) folderCacheManager.invalidateMediaFolders() }
+        fileRepository.renameFile(filePath, newName).also {
+            if (it.isSuccess) {
+                folderCacheManager.invalidateMediaFolders()
+                mediaChangeSignal.notifyChanged()
+            }
+        }
 
     suspend fun createFolder(parentPath: String, name: String): Result<FileItem> =
-        fileRepository.createDirectory(parentPath, name)
+        fileRepository.createDirectory(parentPath, name).also {
+            if (it.isSuccess) {
+                mediaChangeSignal.notifyChanged()
+            }
+        }
 
     suspend fun delete(
         paths: List<String>,
@@ -175,7 +191,11 @@ class FileOperationsUseCase @Inject constructor(
         // just the affected bucket(s) instead of invalidateMediaFolders()'s blanket "drop every
         // category" (which otherwise forced Images AND Videos AND Audio AND Documents to all redo
         // a full MediaStore rescan on their next open just because one photo was deleted).
-        if (result.isSuccess) folderCacheManager.removeFromMediaFolders(paths)
+        if (result.isSuccess) {
+            folderCacheManager.removeFromMediaFolders(paths)
+            folderCacheManager.clearDashboardSummaries()
+            mediaChangeSignal.notifyChanged()
+        }
         return result
     }
 
@@ -184,10 +204,19 @@ class FileOperationsUseCase @Inject constructor(
         targetZipPath: String,
         onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
     ): Result<FileItem> =
-        fileRepository.zipFiles(sourcePaths, targetZipPath, onProgress)
+        fileRepository.zipFiles(sourcePaths, targetZipPath, onProgress).also {
+            if (it.isSuccess) {
+                mediaChangeSignal.notifyChanged()
+            }
+        }
 
     suspend fun unzip(zipPath: String, targetDir: String): Result<Unit> =
-        fileRepository.extractZip(zipPath, targetDir)
+        fileRepository.extractZip(zipPath, targetDir).also {
+            if (it.isSuccess) {
+                folderCacheManager.invalidateMediaFolders()
+                mediaChangeSignal.notifyChanged()
+            }
+        }
 
     suspend fun search(query: String, rootPath: String? = null, category: CategoryType? = null): List<FileItem> =
         fileRepository.searchFiles(query, rootPath, category)
@@ -197,16 +226,32 @@ class FileOperationsUseCase @Inject constructor(
 
 class RecycleBinUseCase @Inject constructor(
     private val recycleBinRepository: IRecycleBinRepository,
-    private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager
+    private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
+    private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal
 ) {
     fun observeTrash(): Flow<List<TrashItem>> = recycleBinRepository.observeTrashItems()
     suspend fun getTrash(): List<TrashItem> = recycleBinRepository.getTrashItems()
     suspend fun restore(ids: List<Long>, onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null): Result<Int> =
-        recycleBinRepository.restoreFromTrash(ids, onProgress).also { if (it.isSuccess) folderCacheManager.invalidateMediaFolders() }
+        recycleBinRepository.restoreFromTrash(ids, onProgress).also {
+            if (it.isSuccess) {
+                folderCacheManager.invalidateMediaFolders()
+                mediaChangeSignal.notifyChanged()
+            }
+        }
     suspend fun deletePermanently(ids: List<Long>, onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null): Result<Int> =
-        recycleBinRepository.deletePermanently(ids, onProgress)
+        recycleBinRepository.deletePermanently(ids, onProgress).also {
+            if (it.isSuccess) {
+                folderCacheManager.clearDashboardSummaries()
+                mediaChangeSignal.notifyChanged()
+            }
+        }
     suspend fun empty(onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null): Result<Unit> =
-        recycleBinRepository.emptyTrash(onProgress)
+        recycleBinRepository.emptyTrash(onProgress).also {
+            if (it.isSuccess) {
+                folderCacheManager.clearDashboardSummaries()
+                mediaChangeSignal.notifyChanged()
+            }
+        }
     suspend fun getTotalSize(): Long = recycleBinRepository.getTrashTotalSize()
 }
 

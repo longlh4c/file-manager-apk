@@ -23,6 +23,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import java.io.File
 import javax.inject.Inject
@@ -64,7 +65,8 @@ class DashboardViewModel @Inject constructor(
     private val mediaUseCase: GetCategorizedMediaUseCase,
     private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
     private val folderPreferencesRepository: com.antigravity.filemanager.data.repository.FolderPreferencesRepository,
-    private val usbOtgManager: com.antigravity.filemanager.utils.UsbOtgManager
+    private val usbOtgManager: com.antigravity.filemanager.utils.UsbOtgManager,
+    private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState())
@@ -83,6 +85,7 @@ class DashboardViewModel @Inject constructor(
         observeClipboard()
         observeBookmarks()
         observeUsbDrives()
+        observeMediaChanges()
         warmMediaFolderCaches()
     }
 
@@ -170,6 +173,14 @@ class DashboardViewModel @Inject constructor(
         viewModelScope.launch {
             globalClipboardManager.state.collect { clip ->
                 _uiState.value = _uiState.value.copy(clipboardState = clip)
+            }
+        }
+    }
+
+    private fun observeMediaChanges() {
+        viewModelScope.launch {
+            mediaChangeSignal.changes.debounce(300).collect {
+                refresh()
             }
         }
     }
