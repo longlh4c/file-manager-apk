@@ -30,20 +30,26 @@ import javax.inject.Singleton
 internal suspend fun healZeroTrashFolders(database: AppDatabase) {
     try {
         val items = database.trashDao().getAll()
+        val missingIds = mutableListOf<Long>()
         for (item in items) {
+            val file = File(item.trashPath)
+            if (!file.exists()) {
+                missingIds.add(item.id)
+                continue
+            }
             if (item.isDirectory && item.fileSize <= 0L) {
-                val file = File(item.trashPath)
-                if (file.exists()) {
-                    val computedSize = try {
-                        file.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-                    } catch (e: Exception) {
-                        0L
-                    }
-                    if (computedSize > 0L) {
-                        database.trashDao().updateFileSize(item.id, computedSize)
-                    }
+                val computedSize = try {
+                    file.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                } catch (e: Exception) {
+                    0L
+                }
+                if (computedSize > 0L) {
+                    database.trashDao().updateFileSize(item.id, computedSize)
                 }
             }
+        }
+        if (missingIds.isNotEmpty()) {
+            database.trashDao().deleteByIds(missingIds)
         }
     } catch (e: Exception) {
         // ignore
@@ -433,21 +439,26 @@ class RecycleBinRepositoryImpl @Inject constructor(
         if (!noMedia.exists()) {
             try { noMedia.createNewFile() } catch (e: Exception) {}
         }
-        // Rows for files that landed here before the .nomedia marker existed (or that MediaStore
-        // indexed in the gap before it noticed the marker) would otherwise sit stale in the index
-        // until a full device rescan — purge them explicitly so this takes effect immediately.
-        try {
-            context.contentResolver.delete(
-                MediaStore.Files.getContentUri("external"),
-                "${MediaStore.Files.FileColumns.DATA} LIKE ?",
-                arrayOf("${trashRoot.absolutePath}/%")
-            )
-        } catch (e: Exception) {}
     }
 
     override fun observeTrashItems(): Flow<List<TrashItem>> =
         database.trashDao().observeAll().map { list ->
-            list.map { entity ->
+            val missingIds = mutableListOf<Long>()
+            val validList = list.filter { entity ->
+                if (!File(entity.trashPath).exists()) {
+                    missingIds.add(entity.id)
+                    false
+                } else {
+                    true
+                }
+            }
+            if (missingIds.isNotEmpty()) {
+                withContext(Dispatchers.IO) {
+                    try { database.trashDao().deleteByIds(missingIds) } catch (e: Exception) {}
+                }
+            }
+            validList.map { entity ->
+                var displayEntity = entity
                 if (entity.isDirectory && entity.fileSize <= 0L) {
                     val file = File(entity.trashPath)
                     if (file.exists()) {
@@ -456,17 +467,17 @@ class RecycleBinRepositoryImpl @Inject constructor(
                         } catch (e: Exception) { 0L }
                         if (computed > 0L) {
                             database.trashDao().updateFileSize(entity.id, computed)
-                            return@map entity.copy(fileSize = computed).toDomain()
+                            displayEntity = entity.copy(fileSize = computed)
                         }
                     }
                 }
-                entity.toDomain()
+                displayEntity.toDomain()
             }
         }
 
     override suspend fun getTrashItems(): List<TrashItem> = withContext(Dispatchers.IO) {
         healZeroTrashFolders(database)
-        database.trashDao().getAll().map { it.toDomain() }
+        database.trashDao().getAll().filter { File(it.trashPath).exists() }.map { it.toDomain() }
     }
 
     override suspend fun moveToTrash(

@@ -225,7 +225,7 @@ private fun TrashItemThumbnail(item: TrashItem) {
                 )
             }
             AsyncImage(
-                model = File(item.trashPath),
+                model = item.trashPath,
                 contentDescription = item.fileName,
                 contentScale = ContentScale.Crop,
                 error = rememberVectorPainter(getFileIcon(fakeFile)),
