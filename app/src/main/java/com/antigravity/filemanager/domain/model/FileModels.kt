@@ -41,7 +41,8 @@ enum class CategoryType {
     DOCUMENTS,
     CLOUD,
     ACCESS_FROM_NETWORK,
-    RECYCLE_BIN
+    RECYCLE_BIN,
+    USB_OTG
 }
 
 enum class CloudProvider {
@@ -151,6 +152,7 @@ data class CategorySummary(
         get() = when (type) {
             CategoryType.MAIN_STORAGE -> subtitle
             CategoryType.STORAGE_ANALYSIS -> subtitle
+            CategoryType.USB_OTG -> subtitle
             CategoryType.CLOUD -> if (itemCount > 0) "($itemCount)" else ""
             CategoryType.RECYCLE_BIN -> if (totalSizeBytes > 0L) FileItem.formatBytes(totalSizeBytes) else if (itemCount > 0) "0 B" else ""
             CategoryType.ACCESS_FROM_NETWORK -> ""
@@ -161,6 +163,22 @@ data class CategorySummary(
                 } else ""
             }
         }
+}
+
+data class UsbOtgVolumeInfo(
+    val id: String,
+    val rootPath: String,
+    val displayName: String,
+    val totalBytes: Long,
+    val freeBytes: Long,
+    val usedBytes: Long
+) {
+    val formattedUsed: String
+        get() = FileItem.formatBytes(usedBytes)
+    val formattedTotal: String
+        get() = FileItem.formatBytes(totalBytes)
+    val formattedFree: String
+        get() = FileItem.formatBytes(freeBytes)
 }
 
 data class StorageCategoryBreakdown(

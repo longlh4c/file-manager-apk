@@ -10,18 +10,19 @@ import java.io.File
 data class FileCopyEntry(val source: File, val dest: File)
 
 /** Recursively flattens [source] (a lone file, or an entire folder tree) into [fileEntries] and
- * [emptyDirs], mirroring the corresponding paths under [dest]. */
-fun collectFileCopyEntries(source: File, dest: File, fileEntries: MutableList<FileCopyEntry>, emptyDirs: MutableList<FileCopyEntry>) {
+ * [dirEntries], mirroring the corresponding paths under [dest]. */
+fun collectFileCopyEntries(source: File, dest: File, fileEntries: MutableList<FileCopyEntry>, dirEntries: MutableList<FileCopyEntry>) {
     if (source.isDirectory) {
+        dirEntries.add(FileCopyEntry(source, dest))
         val children = source.listFiles()
-        if (children.isNullOrEmpty()) {
-            emptyDirs.add(FileCopyEntry(source, dest))
-        } else {
+        if (children != null) {
             for (child in children) {
-                collectFileCopyEntries(child, File(dest, child.name), fileEntries, emptyDirs)
+                collectFileCopyEntries(child, File(dest, child.name), fileEntries, dirEntries)
             }
+        } else {
+            android.util.Log.w("FileCopyUtils", "source.listFiles() returned null for directory: ${source.absolutePath}")
         }
-    } else if (source.isFile) {
+    } else if (source.exists()) {
         fileEntries.add(FileCopyEntry(source, dest))
     }
 }

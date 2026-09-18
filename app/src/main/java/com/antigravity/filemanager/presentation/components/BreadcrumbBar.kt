@@ -77,6 +77,7 @@ fun BreadcrumbBar(
                     CategoryType.DOCUMENTS -> Pair(Icons.Default.Description, Color(0xFF64B5F6))
                     CategoryType.DOWNLOADS -> Pair(Icons.Default.Download, Color(0xFFFFB74D))
                     CategoryType.MAIN_STORAGE -> Pair(Icons.Default.Storage, Color(0xFFCFD8DC))
+                    CategoryType.USB_OTG -> Pair(Icons.Default.Usb, Color(0xFF80CBC4))
                     else -> Pair(Icons.Default.Folder, Color(0xFFFFB74D))
                 }
 

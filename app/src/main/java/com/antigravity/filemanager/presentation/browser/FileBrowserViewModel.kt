@@ -89,7 +89,8 @@ data class FileBrowserUiState(
     val storageUsedPercent: Int? = null,
     val viewMode: com.antigravity.filemanager.presentation.components.ViewMode = com.antigravity.filemanager.presentation.components.ViewMode.LIST,
     // See the matching field in CloudExplorerUiState for why this exists.
-    val transferCancelledByUser: Boolean = false
+    val transferCancelledByUser: Boolean = false,
+    val shouldNavigateBackOnUsbDisconnect: Boolean = false
 )
 
 @HiltViewModel
@@ -103,6 +104,7 @@ class FileBrowserViewModel @Inject constructor(
     private val getDashboardDataUseCase: com.antigravity.filemanager.domain.usecase.GetDashboardDataUseCase,
     private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
     private val transferGuard: com.antigravity.filemanager.data.service.TransferGuard,
+    private val usbOtgManager: com.antigravity.filemanager.utils.UsbOtgManager,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
@@ -115,6 +117,8 @@ class FileBrowserViewModel @Inject constructor(
     private val determinedCategory: com.antigravity.filemanager.domain.model.CategoryType =
         if (initialTitle.equals("Download", ignoreCase = true) || initialTitle.equals("Downloads", ignoreCase = true) || initialPath.endsWith("Download")) {
             com.antigravity.filemanager.domain.model.CategoryType.DOWNLOADS
+        } else if (initialTitle.contains("USB", ignoreCase = true) || (initialPath.startsWith("/storage/") && !initialPath.startsWith("/storage/emulated"))) {
+            com.antigravity.filemanager.domain.model.CategoryType.USB_OTG
         } else {
             com.antigravity.filemanager.domain.model.CategoryType.MAIN_STORAGE
         }
@@ -136,6 +140,29 @@ class FileBrowserViewModel @Inject constructor(
         observeGlobalClipboard()
         observeBookmarks()
         loadStorageUsage()
+        observeUsbConnection()
+    }
+
+    private fun observeUsbConnection() {
+        viewModelScope.launch {
+            usbOtgManager.connectedUsbDrives.collect { drives ->
+                val current = _uiState.value.currentPath
+                val isUsbPath = _uiState.value.categoryType == com.antigravity.filemanager.domain.model.CategoryType.USB_OTG ||
+                        (current.startsWith("/storage/") && !current.startsWith("/storage/emulated"))
+                if (isUsbPath) {
+                    val isDriveStillConnected = drives.any { current.startsWith(it.rootPath) }
+                    if (!isDriveStillConnected) {
+                        _uiState.value = _uiState.value.copy(
+                            shouldNavigateBackOnUsbDisconnect = true
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun onUsbDisconnectHandled() {
+        _uiState.value = _uiState.value.copy(shouldNavigateBackOnUsbDisconnect = false)
     }
 
     private fun loadStorageUsage() {
@@ -578,19 +605,27 @@ class FileBrowserViewModel @Inject constructor(
                 downloadProgress = CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = operationLabel)
             )
         }
-        if (isMove) {
+        val result = if (isMove) {
             fileOperationsUseCase.move(sources, target, overwriteNames, skipNames, onProgress)
         } else {
             fileOperationsUseCase.copy(sources, target, overwriteNames, skipNames, onProgress)
         }
         _uiState.value = _uiState.value.copy(downloadProgress = null)
+        if (result.isFailure) {
+            _uiState.value = _uiState.value.copy(toastMessage = "Lỗi khi $operationLabel: ${result.exceptionOrNull()?.message}")
+        }
     }
 
     /** After a local copy/move, both the destination and (on move) each source's parent may have stale cache entries. */
     private fun invalidateLocalCacheForPaste(sources: List<String>, target: String, isMove: Boolean) {
         folderCacheManager.invalidateLocal(target)
+        sources.forEach { sourcePath ->
+            val name = File(sourcePath).name
+            folderCacheManager.invalidateLocal(File(target, name).absolutePath)
+        }
         if (isMove) {
             sources.mapNotNull { File(it).parent }.distinct().forEach { folderCacheManager.invalidateLocal(it) }
+            sources.forEach { folderCacheManager.invalidateLocal(it) }
         }
     }
 

@@ -61,6 +61,14 @@ fun FileBrowserScreen(
         }
     }
 
+    LaunchedEffect(uiState.shouldNavigateBackOnUsbDisconnect) {
+        if (uiState.shouldNavigateBackOnUsbDisconnect) {
+            Toast.makeText(context.applicationContext, "USB drive disconnected", Toast.LENGTH_SHORT).show()
+            viewModel.onUsbDisconnectHandled()
+            onNavigateBack()
+        }
+    }
+
     val searchFocusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
     LaunchedEffect(uiState.isSearchActive) {

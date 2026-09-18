@@ -44,6 +44,7 @@ data class DashboardUiState(
     val isLoading: Boolean = false,
     val storageVolume: StorageVolumeInfo = StorageVolumeInfo(256L * 1024 * 1024 * 1024, 241L * 1024 * 1024 * 1024, 15L * 1024 * 1024 * 1024),
     val categories: List<CategorySummary> = INITIAL_DASHBOARD_CATEGORIES,
+    val usbDrives: List<com.antigravity.filemanager.domain.model.UsbOtgVolumeInfo> = emptyList(),
     val clipboardState: GlobalClipboardState = GlobalClipboardState(),
     val showBookmarksDialog: Boolean = false,
     val bookmarks: List<Bookmark> = emptyList(),
@@ -62,13 +63,15 @@ class DashboardViewModel @Inject constructor(
     private val cloudStorageUseCase: com.antigravity.filemanager.domain.usecase.CloudStorageUseCase,
     private val mediaUseCase: GetCategorizedMediaUseCase,
     private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
-    private val folderPreferencesRepository: com.antigravity.filemanager.data.repository.FolderPreferencesRepository
+    private val folderPreferencesRepository: com.antigravity.filemanager.data.repository.FolderPreferencesRepository,
+    private val usbOtgManager: com.antigravity.filemanager.utils.UsbOtgManager
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState())
     val uiState: StateFlow<DashboardUiState> = _uiState.asStateFlow()
     private var activeTransferJob: kotlinx.coroutines.Job? = null
     private var loadDataJob: kotlinx.coroutines.Job? = null
+    private var baseCategories: List<CategorySummary> = INITIAL_DASHBOARD_CATEGORIES
 
     init {
         // Only flipped true here, for the cold-boot load — refresh() below re-triggers the exact
@@ -79,6 +82,7 @@ class DashboardViewModel @Inject constructor(
         loadData()
         observeClipboard()
         observeBookmarks()
+        observeUsbDrives()
         warmMediaFolderCaches()
     }
 
@@ -171,6 +175,7 @@ class DashboardViewModel @Inject constructor(
     }
 
     fun refresh() {
+        usbOtgManager.refresh()
         loadData()
     }
 
@@ -295,16 +300,44 @@ class DashboardViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
     }
 
+    private fun observeUsbDrives() {
+        viewModelScope.launch {
+            usbOtgManager.connectedUsbDrives.collect { drives ->
+                _uiState.value = _uiState.value.copy(usbDrives = drives)
+                applyCategoriesWithUsb(drives)
+            }
+        }
+    }
+
+    private fun applyCategoriesWithUsb(drives: List<com.antigravity.filemanager.domain.model.UsbOtgVolumeInfo>) {
+        val filtered = baseCategories.filter { it.type != CategoryType.USB_OTG }
+        val finalCategories = if (drives.isNotEmpty()) {
+            val usbSummaries = drives.map { drive ->
+                CategorySummary(
+                    type = CategoryType.USB_OTG,
+                    title = drive.displayName,
+                    totalSizeBytes = drive.totalBytes,
+                    subtitle = "${drive.formattedUsed} / ${drive.formattedTotal}"
+                )
+            }
+            filtered + usbSummaries
+        } else {
+            filtered
+        }
+        _uiState.value = _uiState.value.copy(categories = finalCategories)
+    }
+
     private fun loadData() {
         loadDataJob?.cancel()
         loadDataJob = viewModelScope.launch {
             getDashboardDataUseCase.observeSummaries().collect { categories ->
+                baseCategories = categories
                 val volume = getDashboardDataUseCase.getStorageInfo()
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
-                    storageVolume = volume,
-                    categories = categories
+                    storageVolume = volume
                 )
+                applyCategoriesWithUsb(_uiState.value.usbDrives)
             }
         }
     }

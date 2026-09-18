@@ -531,16 +531,16 @@ class RecycleBinRepositoryImpl @Inject constructor(
             var current = 0
             for ((item, fileEntries, emptyDirEntries) in perItemEntries) {
                 val moved = try {
+                    for (entry in emptyDirEntries) {
+                        current++
+                        onProgress?.invoke(entry.source.name, current, total)
+                        if (!entry.dest.exists()) entry.dest.mkdirs()
+                    }
                     for (entry in fileEntries) {
                         current++
                         onProgress?.invoke(entry.source.name, current, total)
                         entry.dest.parentFile?.mkdirs()
                         entry.source.copyTo(entry.dest, overwrite = true)
-                    }
-                    for (entry in emptyDirEntries) {
-                        current++
-                        onProgress?.invoke(entry.source.name, current, total)
-                        entry.dest.mkdirs()
                     }
                     item.source.deleteRecursively()
                     true
@@ -615,16 +615,16 @@ class RecycleBinRepositoryImpl @Inject constructor(
             var current = 0
             for ((item, fileEntries, emptyDirEntries) in perItemEntries) {
                 val moved = try {
+                    for (entry in emptyDirEntries) {
+                        current++
+                        onProgress?.invoke(entry.source.name, current, total)
+                        if (!entry.dest.exists()) entry.dest.mkdirs()
+                    }
                     for (entry in fileEntries) {
                         current++
                         onProgress?.invoke(entry.source.name, current, total)
                         entry.dest.parentFile?.mkdirs()
                         entry.source.copyTo(entry.dest, overwrite = true)
-                    }
-                    for (entry in emptyDirEntries) {
-                        current++
-                        onProgress?.invoke(entry.source.name, current, total)
-                        entry.dest.mkdirs()
                     }
                     item.trashFile.deleteRecursively()
                     true

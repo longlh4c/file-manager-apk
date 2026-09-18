@@ -36,6 +36,17 @@ class FileOperationsHelper @Inject constructor(
         return candidate
     }
 
+    private fun getFolderContentSize(file: File): Long {
+        if (!file.isDirectory) return file.length()
+        var size = 0L
+        try {
+            file.walkTopDown().maxDepth(5).forEach { child ->
+                if (child.isFile) size += child.length()
+            }
+        } catch (e: Exception) {}
+        return size
+    }
+
     // Finds conflicting file/folder names in targetDir before copy/move.
     suspend fun findConflicts(sourcePaths: List<String>, targetDir: String): List<com.antigravity.filemanager.domain.model.OverwriteConflict> = withContext(Dispatchers.IO) {
         val targetFolder = File(targetDir)
@@ -43,10 +54,12 @@ class FileOperationsHelper @Inject constructor(
             val source = File(path)
             val dest = File(targetFolder, source.name)
             if (dest.exists() && dest.absolutePath != source.absolutePath) {
+                val isDir = source.isDirectory || dest.isDirectory
                 com.antigravity.filemanager.domain.model.OverwriteConflict(
                     name = source.name,
-                    existingSize = dest.length(),
-                    newSize = source.length()
+                    existingSize = if (dest.isDirectory) getFolderContentSize(dest) else dest.length(),
+                    newSize = if (source.isDirectory) getFolderContentSize(source) else source.length(),
+                    isDirectory = isDir
                 )
             } else null
         }
@@ -68,7 +81,7 @@ class FileOperationsHelper @Inject constructor(
             // dialog, which only ever resolves top-level name clashes) and carried down to every
             // file underneath it — same effective behavior copyRecursively(overwrite=...) had.
             val fileEntries = mutableListOf<FileCopyEntry>()
-            val emptyDirEntries = mutableListOf<FileCopyEntry>()
+            val dirEntries = mutableListOf<FileCopyEntry>()
             for (path in sourcePaths) {
                 val source = File(path)
                 if (!source.exists() || source.name in skipNames) continue
@@ -77,30 +90,50 @@ class FileOperationsHelper @Inject constructor(
                 // Copying a file onto itself (same-folder paste with overwrite chosen) is a
                 // no-op: doing it for real would truncate the source before it's read.
                 if (dest.absolutePath == source.absolutePath) continue
-                collectFileCopyEntries(source, dest, fileEntries, emptyDirEntries)
+                collectFileCopyEntries(source, dest, fileEntries, dirEntries)
             }
 
-            val total = fileEntries.size + emptyDirEntries.size
+            val total = fileEntries.size + dirEntries.size
             var current = 0
+
+            // 1. Create all directory trees first so subfolders always exist
+            for (entry in dirEntries) {
+                currentCoroutineContext().ensureActive()
+                current++
+                onProgress?.invoke(entry.source.name, current, total)
+                if (!entry.dest.exists()) {
+                    entry.dest.mkdirs()
+                }
+            }
+
+            // 2. Copy files with error isolation so one failing file does not abort remaining files/folders
             for (entry in fileEntries) {
                 currentCoroutineContext().ensureActive()
                 current++
                 onProgress?.invoke(entry.source.name, current, total)
-                entry.dest.parentFile?.mkdirs()
-                // Always safe to pass overwrite=true here: when the top-level source wasn't
-                // marked for overwrite, uniqueDestination() already gave it a brand-new,
-                // collision-free folder name above, so nothing pre-existing can be at entry.dest
-                // regardless. When it WAS marked for overwrite, replacing whatever's already
-                // there is exactly the point.
-                entry.source.copyTo(entry.dest, overwrite = true)
-                scannedPaths.add(entry.dest.absolutePath)
+                try {
+                    entry.dest.parentFile?.mkdirs()
+                    if (entry.dest.exists()) {
+                        if (entry.dest.isDirectory) {
+                            entry.dest.deleteRecursively()
+                        } else {
+                            entry.dest.setWritable(true)
+                            entry.dest.delete()
+                        }
+                    }
+                    entry.source.copyTo(entry.dest, overwrite = true)
+                    scannedPaths.add(entry.dest.absolutePath)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    android.util.Log.e("FileOperationsHelper", "Failed to copy file: ${entry.source.absolutePath} -> ${entry.dest.absolutePath}", e)
+                }
             }
-            for (entry in emptyDirEntries) {
-                currentCoroutineContext().ensureActive()
-                current++
-                onProgress?.invoke(entry.source.name, current, total)
-                entry.dest.mkdirs()
-            }
+
+            try {
+                val logFile = File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "file_ops_debug.log")
+                logFile.appendText("[COPY] Sources: $sourcePaths, Target: $targetDir, Dirs: ${dirEntries.size}, Files: ${fileEntries.size}\n")
+            } catch (e: Exception) {}
+
             if (scannedPaths.isNotEmpty()) {
                 try {
                     android.media.MediaScannerConnection.scanFile(context, scannedPaths.toTypedArray(), null, null)
@@ -152,36 +185,59 @@ class FileOperationsHelper @Inject constructor(
             }
 
             // Phase 2: genuine cross-filesystem fallback, flattened into per-file copy work the
-            // same way copy() is above — a single large folder that can't use renameTo() used to
-            // report "1/1" for the entire copy+delete, no matter how long it actually took (same
-            // bug, same fix as zipFiles' addFolder() replacement elsewhere in this codebase).
-            // Deleting the now-copied source trees afterward is comparatively fast, so only the
-            // copy half needs per-file visibility.
+            // same way copy() is above
             val fileEntries = mutableListOf<FileCopyEntry>()
-            val emptyDirEntries = mutableListOf<FileCopyEntry>()
+            val dirEntries = mutableListOf<FileCopyEntry>()
             for (item in renameFailures) {
-                collectFileCopyEntries(item.source, item.dest, fileEntries, emptyDirEntries)
+                collectFileCopyEntries(item.source, item.dest, fileEntries, dirEntries)
             }
-            val total = fileEntries.size + emptyDirEntries.size
+            val total = fileEntries.size + dirEntries.size
             var current = 0
+
+            // 1. Create all directory trees first
+            for (entry in dirEntries) {
+                currentCoroutineContext().ensureActive()
+                current++
+                onProgress?.invoke(entry.source.name, current, total)
+                if (!entry.dest.exists()) {
+                    entry.dest.mkdirs()
+                }
+            }
+
+            // 2. Copy files with error isolation
             for (entry in fileEntries) {
                 currentCoroutineContext().ensureActive()
                 current++
                 onProgress?.invoke(entry.source.name, current, total)
-                entry.dest.parentFile?.mkdirs()
-                entry.source.copyTo(entry.dest, overwrite = true)
-            }
-            for (entry in emptyDirEntries) {
-                currentCoroutineContext().ensureActive()
-                current++
-                onProgress?.invoke(entry.source.name, current, total)
-                entry.dest.mkdirs()
+                try {
+                    entry.dest.parentFile?.mkdirs()
+                    if (entry.dest.exists()) {
+                        if (entry.dest.isDirectory) {
+                            entry.dest.deleteRecursively()
+                        } else {
+                            entry.dest.setWritable(true)
+                            entry.dest.delete()
+                        }
+                    }
+                    entry.source.copyTo(entry.dest, overwrite = true)
+                    entry.source.delete()
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    android.util.Log.e("FileOperationsHelper", "Failed to move file: ${entry.source.absolutePath} -> ${entry.dest.absolutePath}", e)
+                }
             }
             for (item in renameFailures) {
-                item.source.deleteRecursively()
+                if (item.source.exists()) {
+                    item.source.deleteRecursively()
+                }
                 scannedPaths.add(item.source.absolutePath)
                 scannedPaths.add(item.dest.absolutePath)
             }
+
+            try {
+                val logFile = File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "file_ops_debug.log")
+                logFile.appendText("[MOVE] Sources: $sourcePaths, Target: $targetDir, Dirs: ${dirEntries.size}, Files: ${fileEntries.size}\n")
+            } catch (e: Exception) {}
 
             if (scannedPaths.isNotEmpty()) {
                 try {

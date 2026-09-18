@@ -151,7 +151,7 @@ fun OverwriteConflictDialog(
             onDismissRequest = onCancel,
             title = {
                 Text(
-                    text = "File already exists",
+                    text = if (conflict.isDirectory) "Folder already exists" else "File already exists",
                     color = TextPrimary,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 18.sp
@@ -161,17 +161,13 @@ fun OverwriteConflictDialog(
                 Column {
                     Text(text = conflict.name, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                     Text(
-                        text = if (conflict.isDirectory) {
-                            "A folder with this name already exists"
-                        } else {
-                            "Existing: ${FileItem.formatBytes(conflict.existingSize)}  →  New: ${FileItem.formatBytes(conflict.newSize)}"
-                        },
+                        text = "Existing: ${FileItem.formatBytes(conflict.existingSize)}  →  New: ${FileItem.formatBytes(conflict.newSize)}",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Overwrite replaces the existing item. Skip leaves this file out entirely. Keep both saves the new copy under a numbered name.",
+                        text = "Overwrite replaces the existing item. Skip leaves this item out entirely. Keep both saves the new copy under a numbered name.",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
@@ -225,8 +221,11 @@ fun OverwriteConflictDialog(
     AlertDialog(
         onDismissRequest = onCancel,
         title = {
+            val allDirs = conflicts.all { it.isDirectory }
+            val anyDirs = conflicts.any { it.isDirectory }
+            val titleText = if (allDirs) "Folder already exists" else if (anyDirs) "Items already exist" else "File already exists"
             Text(
-                text = "File already exists",
+                text = titleText,
                 color = TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 18.sp
@@ -277,11 +276,7 @@ fun OverwriteConflictDialog(
                         ) {
                             Text(text = conflict.name, color = TextPrimary, fontSize = 14.sp)
                             Text(
-                                text = if (conflict.isDirectory) {
-                                    "A folder with this name already exists"
-                                } else {
-                                    "Existing: ${FileItem.formatBytes(conflict.existingSize)}  →  New: ${FileItem.formatBytes(conflict.newSize)}"
-                                },
+                                text = "Existing: ${FileItem.formatBytes(conflict.existingSize)}  →  New: ${FileItem.formatBytes(conflict.newSize)}",
                                 color = TextSecondary,
                                 fontSize = 12.sp
                             )

@@ -95,6 +95,7 @@ private fun getCategoryIcon(type: CategoryType): ImageVector = when (type) {
     CategoryType.CLOUD -> Icons.Default.Cloud
     CategoryType.ACCESS_FROM_NETWORK -> Icons.Default.Devices
     CategoryType.RECYCLE_BIN -> Icons.Default.DeleteOutline
+    CategoryType.USB_OTG -> Icons.Default.Usb
 }
 
 private fun getCategoryBgColor(type: CategoryType): Color =
