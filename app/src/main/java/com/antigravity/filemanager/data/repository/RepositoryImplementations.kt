@@ -291,7 +291,17 @@ class FileRepositoryImpl @Inject constructor(
     private val searchImageExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng")
     private val searchVideoExts = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v", "mpg", "mpeg", "vob", "ogv", "f4v")
     private val searchAudioExts = setOf("mp3", "m4a", "wav", "flac", "aac", "ogg", "wma", "opus", "amr", "mid", "midi")
-    private val searchDocExts = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "rtf", "epub")
+    private val searchDocExts = setOf(
+        "pdf", "rtf", "wps", "wpd", "ps",
+        "doc", "docx", "docm", "dot", "dotx",
+        "xls", "xlsx", "xlsm", "xlt", "xltx", "csv", "tsv",
+        "ppt", "pptx", "pptm", "pps", "ppsx", "pot", "potx",
+        "odt", "ods", "odp", "ott", "ots", "otp", "sxw", "sxc", "sxi",
+        "pages", "numbers", "key", "keynote",
+        "txt", "text", "log", "md", "markdown", "rst", "tex", "latex", "note", "nfo", "diz",
+        "json", "xml", "yaml", "yml", "ini", "conf", "properties", "html", "htm", "msg", "eml", "vcf",
+        "epub", "mobi", "azw", "azw3", "prc", "fb2", "djvu", "chm", "lit"
+    )
 
     override suspend fun searchFiles(query: String, rootPath: String?, categoryType: CategoryType?): List<FileItem> = withContext(Dispatchers.IO) {
         // Category-scoped search (Images/Videos/Audio/Documents) goes through MediaStore instead
@@ -335,6 +345,7 @@ class FileRepositoryImpl @Inject constructor(
             val list = dir.listFiles() ?: return
             for (f in list) {
                 if (results.size >= maxResults) return
+                if (f.name.startsWith(".")) continue
                 val matchesType = f.isDirectory || allowedExts == null || f.extension.lowercase() in allowedExts
                 if (matchesType && f.name.contains(query, ignoreCase = true)) {
                     val isDir = f.isDirectory
@@ -725,11 +736,13 @@ class FtpServerRepositoryImpl @Inject constructor(
     override suspend fun startFtpServer(
         port: Int,
         password: String,
-        isRandomPassword: Boolean
+        isRandomPassword: Boolean,
+        httpPort: Int
     ): Result<Unit> {
         val intent = Intent(context, FtpServerService::class.java).apply {
             action = FtpServerService.ACTION_START
             putExtra(FtpServerService.EXTRA_PORT, port)
+            putExtra(FtpServerService.EXTRA_HTTP_PORT, httpPort)
             putExtra(FtpServerService.EXTRA_PASSWORD, password)
             putExtra(FtpServerService.EXTRA_RANDOM_PASS, isRandomPassword)
         }
@@ -748,9 +761,10 @@ class FtpServerRepositoryImpl @Inject constructor(
     override suspend fun updateConfig(
         port: Int,
         password: String,
-        isRandomPassword: Boolean
+        isRandomPassword: Boolean,
+        httpPort: Int
     ) {
-        prefManager.saveFtpConfig(port, password, isRandomPassword)
+        prefManager.saveNetworkConfig(port, httpPort, password, isRandomPassword)
     }
 }
 

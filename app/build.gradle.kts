@@ -124,6 +124,9 @@ dependencies {
     // Zip4j Archive Management
     implementation(libs.zip4j)
 
+    // Embedded HTTP Web Server
+    implementation(libs.nanohttpd)
+
     // OkHttp REST & Network Client
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)

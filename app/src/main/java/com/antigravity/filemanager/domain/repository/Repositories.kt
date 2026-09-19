@@ -134,7 +134,7 @@ interface ICloudRepository {
 interface IFtpServerRepository {
     fun observeFtpServerState(): Flow<FtpServerState>
     suspend fun getFtpServerState(): FtpServerState
-    suspend fun startFtpServer(port: Int, password: String, isRandomPassword: Boolean): Result<Unit>
+    suspend fun startFtpServer(port: Int, password: String, isRandomPassword: Boolean, httpPort: Int = 8080): Result<Unit>
     suspend fun stopFtpServer(): Result<Unit>
-    suspend fun updateConfig(port: Int, password: String, isRandomPassword: Boolean)
+    suspend fun updateConfig(port: Int, password: String, isRandomPassword: Boolean, httpPort: Int = 8080)
 }

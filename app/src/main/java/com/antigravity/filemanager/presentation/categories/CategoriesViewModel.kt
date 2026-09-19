@@ -27,6 +27,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 import javax.inject.Inject
+import com.antigravity.filemanager.data.local.storage.isInsideHiddenOrSystemFolder
 
 data class CategoryUiState(
     val categoryType: CategoryType = CategoryType.IMAGES,
@@ -149,7 +150,10 @@ class CategoriesViewModel @Inject constructor(
                         _uiState.value = _uiState.value.copy(subfolderFiles = filtered)
                     }
                 } else {
-                    val folders = mediaUseCase.getFolders(categoryType, sort)
+                    val rawFolders = mediaUseCase.getFolders(categoryType, sort)
+                    val folders = if (categoryType == CategoryType.DOCUMENTS) {
+                        rawFolders.filterNot { it.name.startsWith(".") || isInsideHiddenOrSystemFolder(it.path, isFolder = true) }
+                    } else rawFolders
                     folderCacheManager.putMediaFolders(categoryType, sort, folders)
                     if (_uiState.value.currentSubfolderPath == null) {
                         _uiState.value = _uiState.value.copy(folders = folders)
@@ -207,31 +211,23 @@ class CategoriesViewModel @Inject constructor(
                 showHiddenFiles = savedHidden,
                 viewMode = savedViewMode
             )
-            // Documents used to always show a flat list of every document file on the device at
-            // the root level, unlike Images/Audio/Videos/Downloads which show a bucket-folder
-            // grid first — now it follows the same pattern as the others (a folder like
-            // /Zalo/Documents shows up as one card, not every file inside it dumped at the top).
-            //
-            // isFresh here means "already reconciled once this process" (see
-            // FolderCacheManager.reconciledOnceKeys), not "cached within the last N seconds" — so
-            // a cache hit paints instantly and, after the first open per process, never bounces
-            // back into a background rescan at all. Anything that could make it wrong is already
-            // pushed to the cache directly: invalidateMediaFolders() on any in-app mutation, and
-            // observeMediaChanges() on any external one.
             val cached = folderCacheManager.getMediaFolders(categoryType, savedSort)
-            if (cached != null) {
-                _uiState.value = _uiState.value.copy(isLoading = false, folders = cached.folders)
-                if (cached.isFresh) return@launch
+            val filteredCached = if (categoryType == CategoryType.DOCUMENTS) {
+                cached?.folders?.filterNot { it.name.startsWith(".") || isInsideHiddenOrSystemFolder(it.path, isFolder = true) }
+            } else cached?.folders
+
+            if (filteredCached != null) {
+                _uiState.value = _uiState.value.copy(isLoading = false, folders = filteredCached)
+                if (cached?.isFresh == true) return@launch
             } else {
                 _uiState.value = _uiState.value.copy(isLoading = true)
             }
-            // Coalesced with DashboardViewModel's warm-up: if that background reconcile for this
-            // exact category is already running (a very likely race right after cold start — the
-            // dashboard kicks it off before the user can possibly have tapped in yet), this awaits
-            // that same scan instead of running a second one alongside it and fighting it for CPU.
-            val folders = folderCacheManager.reconcileMediaFolders(categoryType, savedSort) {
+            val rawFolders = folderCacheManager.reconcileMediaFolders(categoryType, savedSort) {
                 mediaUseCase.getFolders(categoryType, savedSort)
             }
+            val folders = if (categoryType == CategoryType.DOCUMENTS) {
+                rawFolders.filterNot { it.name.startsWith(".") || isInsideHiddenOrSystemFolder(it.path, isFolder = true) }
+            } else rawFolders
             _uiState.value = _uiState.value.copy(
                 isLoading = false,
                 folders = folders
@@ -298,7 +294,17 @@ class CategoriesViewModel @Inject constructor(
     private val imageExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng")
     private val videoExts = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v", "mpg", "mpeg", "vob", "ogv", "f4v")
     private val audioExts = setOf("mp3", "m4a", "wav", "flac", "aac", "ogg", "wma", "opus", "amr", "mid", "midi")
-    private val docExts = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "rtf", "epub")
+    private val docExts = setOf(
+        "pdf", "rtf", "wps", "wpd", "ps",
+        "doc", "docx", "docm", "dot", "dotx",
+        "xls", "xlsx", "xlsm", "xlt", "xltx", "csv", "tsv",
+        "ppt", "pptx", "pptm", "pps", "ppsx", "pot", "potx",
+        "odt", "ods", "odp", "ott", "ots", "otp", "sxw", "sxc", "sxi",
+        "pages", "numbers", "key", "keynote",
+        "txt", "text", "log", "md", "markdown", "rst", "tex", "latex", "note", "nfo", "diz",
+        "json", "xml", "yaml", "yml", "ini", "conf", "properties", "html", "htm", "msg", "eml", "vcf",
+        "epub", "mobi", "azw", "azw3", "prc", "fb2", "djvu", "chm", "lit"
+    )
 
     private suspend fun filterFilesForCategory(allFiles: List<FileItem>): List<FileItem> = withContext(Dispatchers.IO) {
         val exts = when (categoryType) {
@@ -312,6 +318,7 @@ class CategoriesViewModel @Inject constructor(
             CategoryType.IMAGES -> "image/"
             CategoryType.VIDEOS -> "video/"
             CategoryType.AUDIO -> "audio/"
+            CategoryType.DOCUMENTS -> "text/"
             else -> null
         }
         // A category bucket (e.g. Images > Pictures) is meant to be a flat view of the files
@@ -325,10 +332,11 @@ class CategoriesViewModel @Inject constructor(
         // and, incidentally, no longer touches the filesystem at all beyond what's already in
         // `allFiles`.
         allFiles.filter { item ->
-            !item.isDirectory && (
-                item.extension.lowercase(Locale.getDefault()) in exts ||
-                    (mimePrefix != null && item.mimeType.startsWith(mimePrefix))
-            )
+            !item.isDirectory && !item.name.startsWith(".") &&
+                (categoryType != CategoryType.DOCUMENTS || !isInsideHiddenOrSystemFolder(item.path, isFolder = false)) && (
+                    item.extension.lowercase(Locale.getDefault()) in exts ||
+                        (mimePrefix != null && item.mimeType.startsWith(mimePrefix))
+                )
         }
     }
 

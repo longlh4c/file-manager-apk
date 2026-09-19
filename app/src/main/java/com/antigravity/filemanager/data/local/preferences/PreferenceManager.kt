@@ -18,6 +18,7 @@ class PreferenceManager @Inject constructor(
 ) {
     private object Keys {
         val FTP_PORT = intPreferencesKey("ftp_port")
+        val HTTP_PORT = intPreferencesKey("http_port")
         val FTP_PASSWORD = stringPreferencesKey("ftp_password")
         val FTP_RANDOM_PASSWORD = booleanPreferencesKey("ftp_random_password")
         val FTP_WAS_RUNNING = booleanPreferencesKey("ftp_was_running")
@@ -28,9 +29,10 @@ class PreferenceManager @Inject constructor(
     }
 
     val ftpPortFlow: Flow<Int> = context.dataStore.data.map { it[Keys.FTP_PORT] ?: 1524 }
+    val httpPortFlow: Flow<Int> = context.dataStore.data.map { it[Keys.HTTP_PORT] ?: 8080 }
     val ftpPasswordFlow: Flow<String> = context.dataStore.data.map { it[Keys.FTP_PASSWORD] ?: "" }
     val ftpRandomPasswordFlow: Flow<Boolean> = context.dataStore.data.map { it[Keys.FTP_RANDOM_PASSWORD] ?: false }
-    // Whether the FTP server was left running (as opposed to explicitly stopped by the user) —
+    // Whether the FTP/HTTP server was left running (as opposed to explicitly stopped by the user) —
     // used to auto-restart it if the OS/OEM battery manager kills the app process outright while
     // it's on, since a plain Android low-memory kill doesn't otherwise bring the FTP listener back
     // on its own. See FtpServerService.onStartCommand's null-intent (system restart) branch.
@@ -43,6 +45,15 @@ class PreferenceManager @Inject constructor(
     suspend fun saveFtpConfig(port: Int, password: String, isRandom: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[Keys.FTP_PORT] = port
+            prefs[Keys.FTP_PASSWORD] = password
+            prefs[Keys.FTP_RANDOM_PASSWORD] = isRandom
+        }
+    }
+
+    suspend fun saveNetworkConfig(ftpPort: Int, httpPort: Int, password: String, isRandom: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.FTP_PORT] = ftpPort
+            prefs[Keys.HTTP_PORT] = httpPort
             prefs[Keys.FTP_PASSWORD] = password
             prefs[Keys.FTP_RANDOM_PASSWORD] = isRandom
         }

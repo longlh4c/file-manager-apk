@@ -37,6 +37,7 @@ import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FolderBadgeType
 import com.antigravity.filemanager.domain.model.MediaFolder
 import com.antigravity.filemanager.presentation.theme.*
+import java.util.Locale
 
 // A MediaFolder card's thumbnail (folder.latestThumbnailUri, used by both MediaFolderCard's grid
 // and AudioListItem's list row below) is requested at this fixed decode size rather than letting
@@ -516,16 +517,19 @@ fun FolderIconWithBadge(badgeType: FolderBadgeType, size: Dp = 46.dp) {
 
 fun getFileIcon(file: FileItem): ImageVector {
     if (file.isDirectory) return Icons.Default.Folder
-    return when (file.extension) {
+    val ext = file.extension.lowercase(Locale.getDefault())
+    return when (ext) {
         "pdf" -> Icons.Default.PictureAsPdf
-        "doc", "docx" -> Icons.Default.Description
-        "xls", "xlsx" -> Icons.Default.TableChart
-        "ppt", "pptx" -> Icons.Default.Slideshow
-        "txt", "log", "json", "xml" -> Icons.Default.Article
-        "zip", "rar", "7z", "tar", "gz" -> Icons.Default.FolderZip
-        "mp3", "flac", "wav", "m4a", "aac" -> Icons.Default.MusicNote
-        "mp4", "mkv", "avi", "mov", "webm" -> Icons.Default.Movie
-        "jpg", "jpeg", "png", "webp", "gif" -> Icons.Default.Image
+        "doc", "docx", "odt", "wps", "wpd", "pages", "rtf" -> Icons.Default.Description
+        "xls", "xlsx", "ods", "csv", "tsv", "numbers" -> Icons.Default.TableChart
+        "ppt", "pptx", "odp", "key", "keynote" -> Icons.Default.Slideshow
+        "epub", "mobi", "azw", "azw3", "fb2", "chm", "lit" -> Icons.Default.MenuBook
+        "txt", "text", "log", "md", "markdown", "rst", "tex", "latex", "note", "nfo", "diz" -> Icons.Default.Article
+        "json", "xml", "yaml", "yml", "ini", "conf", "properties", "html", "htm" -> Icons.Default.Code
+        "zip", "rar", "7z", "tar", "gz", "bz2", "iso" -> Icons.Default.FolderZip
+        "mp3", "flac", "wav", "m4a", "aac", "ogg", "wma", "opus" -> Icons.Default.MusicNote
+        "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp" -> Icons.Default.Movie
+        "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "svg" -> Icons.Default.Image
         "apk" -> Icons.Default.Android
         else -> Icons.Default.InsertDriveFile
     }
@@ -533,17 +537,20 @@ fun getFileIcon(file: FileItem): ImageVector {
 
 fun getFileIconColor(file: FileItem): Color {
     if (file.isDirectory) return Color(0xFFFFCC80) // Pastel Honey/Amber
-    return when (file.extension) {
+    val ext = file.extension.lowercase(Locale.getDefault())
+    return when (ext) {
         "pdf" -> Color(0xFFFFAB91) // Pastel Soft Coral
-        "doc", "docx" -> Color(0xFF90CAF9) // Pastel Sky Blue
-        "xls", "xlsx" -> Color(0xFFA5D6A7) // Pastel Mint Green
-        "ppt", "pptx" -> Color(0xFFFFCC80) // Pastel Peach
-        "zip", "rar", "7z", "tar", "gz" -> Color(0xFFFFE082) // Pastel Amber Gold
-        "mp3", "flac", "wav", "m4a", "aac" -> Color(0xFF80DEEA) // Pastel Aqua Cyan
-        "mp4", "mkv", "avi", "mov", "webm" -> Color(0xFFFFAB91) // Pastel Soft Rose
-        "jpg", "jpeg", "png", "webp", "gif" -> Color(0xFFCE93D8) // Pastel Lavender
+        "doc", "docx", "odt", "wps", "wpd", "pages", "rtf" -> Color(0xFF90CAF9) // Pastel Sky Blue
+        "xls", "xlsx", "ods", "csv", "tsv", "numbers" -> Color(0xFFA5D6A7) // Pastel Mint Green
+        "ppt", "pptx", "odp", "key", "keynote" -> Color(0xFFFFCC80) // Pastel Peach
+        "epub", "mobi", "azw", "azw3", "fb2", "chm", "lit" -> Color(0xFFD1C4E9) // Pastel Purple
+        "txt", "text", "log", "md", "markdown", "rst", "tex", "latex", "note", "nfo", "diz" -> Color(0xFF81D4FA) // Pastel Ice Blue
+        "json", "xml", "yaml", "yml", "ini", "conf", "properties", "html", "htm" -> Color(0xFF80CBC4) // Pastel Teal
+        "zip", "rar", "7z", "tar", "gz", "bz2", "iso" -> Color(0xFFFFE082) // Pastel Amber Gold
+        "mp3", "flac", "wav", "m4a", "aac", "ogg", "wma", "opus" -> Color(0xFF80DEEA) // Pastel Aqua Cyan
+        "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp" -> Color(0xFFFFAB91) // Pastel Soft Rose
+        "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "svg" -> Color(0xFFCE93D8) // Pastel Lavender
         "apk" -> Color(0xFFAED581) // Pastel Sage/Lime
-        "txt", "log", "json", "xml" -> Color(0xFF81D4FA) // Pastel Ice Blue
         else -> Color(0xFFB0BEC5) // Pastel Slate Grey
     }
 }

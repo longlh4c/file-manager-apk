@@ -19,6 +19,16 @@ import java.util.*
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * Returns true if the file or folder is inside a hidden/system directory (any directory starting with '.').
+ */
+fun isInsideHiddenOrSystemFolder(path: String, isFolder: Boolean = false): Boolean {
+    val normalized = path.replace('\\', '/')
+    val segments = normalized.split('/').filter { it.isNotEmpty() }
+    val checkSegments = if (isFolder) segments else if (segments.isNotEmpty()) segments.dropLast(1) else segments
+    return checkSegments.any { it.startsWith(".") }
+}
+
 @Singleton
 class LocalFileScanner @Inject constructor(
     @ApplicationContext private val context: Context
@@ -193,7 +203,27 @@ class LocalFileScanner @Inject constructor(
         val sizeBuckets = HashMap<Long, MutableList<File>>()
     }
 
-    private val docExts = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub")
+    val documentExtensions = setOf(
+        // Portable & Rich Text
+        "pdf", "rtf", "wps", "wpd", "ps",
+        // Microsoft Office Word & templates
+        "doc", "docx", "docm", "dot", "dotx",
+        // Microsoft Office Excel
+        "xls", "xlsx", "xlsm", "xlt", "xltx", "csv", "tsv",
+        // Microsoft Office PowerPoint
+        "ppt", "pptx", "pptm", "pps", "ppsx", "pot", "potx",
+        // OpenOffice & LibreOffice
+        "odt", "ods", "odp", "ott", "ots", "otp", "sxw", "sxc", "sxi",
+        // Apple iWork
+        "pages", "numbers", "key", "keynote",
+        // Plain Text, Notes, Markdown & Info
+        "txt", "text", "log", "md", "markdown", "rst", "tex", "latex", "note", "nfo", "diz",
+        // Data, Markup, Config & Email/Contacts
+        "json", "xml", "yaml", "yml", "ini", "conf", "properties", "html", "htm", "msg", "eml", "vcf",
+        // eBooks & Digital Readers
+        "epub", "mobi", "azw", "azw3", "prc", "fb2", "djvu", "chm", "lit"
+    )
+    private val docExts = documentExtensions
     private val archiveExts = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "iso", "apk")
     private val analysisImgExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "svg")
     private val analysisAudioExts = setOf("mp3", "flac", "wav", "m4a", "aac", "ogg", "wma", "opus")
@@ -708,15 +738,30 @@ class LocalFileScanner @Inject constructor(
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     "application/vnd.ms-powerpoint",
                     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    "text/plain", "text/csv", "text/rtf", "application/rtf", "application/epub+zip"
+                    "text/plain", "text/csv", "text/rtf", "text/html", "text/markdown", "text/xml",
+                    "application/rtf", "application/epub+zip", "application/json", "application/xml"
                 )
                 val typeSelection = mimeTypes.joinToString(" OR ") { "${MediaStore.Files.FileColumns.MIME_TYPE} = '$it'" } +
+                        " OR ${MediaStore.Files.FileColumns.MIME_TYPE} LIKE 'text/%'" +
                         " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.pdf'" +
                         " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.doc%'" +
                         " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.xls%'" +
                         " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.ppt%'" +
                         " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.txt'" +
-                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.epub'"
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.text'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.log'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.md'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.json'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.xml'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.csv'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.tsv'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.odt'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.ods'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.odp'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.wps'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.rtf'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.epub'" +
+                        " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.mobi'"
                 val nameSelection = "($typeSelection) AND ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE ?"
                 queryMediaStoreByName(
                     MediaStore.Files.getContentUri("external"),
@@ -754,6 +799,7 @@ class LocalFileScanner @Inject constructor(
                 while (it.moveToNext() && results.size < maxResults) {
                     val path = if (dataIdx >= 0) it.getString(dataIdx) else null ?: continue
                     val name = (if (nameIdx >= 0) it.getString(nameIdx) else null) ?: path.substringAfterLast('/')
+                    if (name.startsWith(".") || isInsideHiddenOrSystemFolder(path, isFolder = false)) continue
                     val size = if (sizeIdx >= 0) it.getLong(sizeIdx) else 0L
                     val dateSec = if (dateIdx >= 0) it.getLong(dateIdx) else 0L
                     results.add(
@@ -775,11 +821,6 @@ class LocalFileScanner @Inject constructor(
         }
         return results
     }
-
-    val documentExtensions = setOf(
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub",
-        "rtf", "csv", "mobi", "azw", "azw3", "prc", "odt", "ods", "odp", "wps"
-    )
 
     suspend fun getAllDocumentFiles(sortOption: FileSortOption = FileSortOption.BY_DATE_DESC): List<FileItem> = withContext(Dispatchers.IO) { coroutineScope {
         val fileMap = mutableMapOf<String, FileItem>()
@@ -809,16 +850,35 @@ class LocalFileScanner @Inject constructor(
                 "text/plain",
                 "text/csv",
                 "text/rtf",
+                "text/html",
+                "text/markdown",
+                "text/xml",
                 "application/rtf",
-                "application/epub+zip"
+                "application/epub+zip",
+                "application/json",
+                "application/xml"
             )
             val selection = mimeTypes.joinToString(" OR ") { "${MediaStore.Files.FileColumns.MIME_TYPE} = '$it'" } +
+                    " OR ${MediaStore.Files.FileColumns.MIME_TYPE} LIKE 'text/%'" +
                     " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.pdf'" +
                     " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.doc%'" +
                     " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.xls%'" +
                     " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.ppt%'" +
                     " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.txt'" +
-                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.epub'"
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.text'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.log'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.md'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.json'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.xml'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.csv'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.tsv'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.odt'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.ods'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.odp'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.wps'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.rtf'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.epub'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.mobi'"
 
             val cursor: Cursor? = context.contentResolver.query(
                 MediaStore.Files.getContentUri("external"),
@@ -854,12 +914,14 @@ class LocalFileScanner @Inject constructor(
 
         rows.map { row ->
             async {
+                if (isInsideHiddenOrSystemFolder(row.path, isFolder = false)) return@async null
                 val file = File(row.path)
-                if (!file.isFile) return@async null
+                if (!file.isFile || file.name.startsWith(".")) return@async null
                 val ext = file.extension.lowercase(Locale.getDefault())
                 if (ext !in documentExtensions) return@async null
                 val name = row.name?.ifBlank { file.name } ?: file.name
-                val size = if (row.size > 0) row.size else file.length()
+                if (name.startsWith(".")) return@async null
+                val size = if (row.size >= 0) row.size else file.length()
                 val modified = if (row.dateSec > 0) row.dateSec * 1000L else file.lastModified()
                 val mime = row.mime ?: getMimeType(file)
                 row.path to FileItem(
@@ -875,7 +937,7 @@ class LocalFileScanner @Inject constructor(
                     thumbnailUri = null,
                     appSourceBadge = detectBadgeFromPath(row.path),
                     folderBadgeType = FolderBadgeType.STANDARD,
-                    isHidden = file.name.startsWith(".")
+                    isHidden = false
                 )
             }
         }.awaitAll().filterNotNull().forEach { (path, item) -> fileMap[path] = item }
@@ -893,14 +955,17 @@ class LocalFileScanner @Inject constructor(
 
         fun scanRecursive(dir: File, depth: Int = 4) {
             if (!dir.exists() || !dir.isDirectory || depth < 0) return
+            if (dir.name.startsWith(".")) return
+            if (isInsideHiddenOrSystemFolder(dir.absolutePath, isFolder = true)) return
             val files = dir.listFiles() ?: return
             for (f in files) {
                 if (f.name.startsWith(".")) continue
                 if (f.isDirectory) {
-                    if (f.name != "Android") scanRecursive(f, depth - 1)
+                    if (f.name != "Android" && !f.name.startsWith(".")) scanRecursive(f, depth - 1)
                 } else {
                     val ext = f.extension.lowercase(Locale.getDefault())
                     if (ext in documentExtensions && !fileMap.containsKey(f.absolutePath)) {
+                        if (isInsideHiddenOrSystemFolder(f.absolutePath, isFolder = false)) continue
                         fileMap[f.absolutePath] = FileItem(
                             id = f.absolutePath,
                             name = f.name,
@@ -914,7 +979,7 @@ class LocalFileScanner @Inject constructor(
                             thumbnailUri = null,
                             appSourceBadge = detectBadgeFromPath(f.absolutePath),
                             folderBadgeType = FolderBadgeType.STANDARD,
-                            isHidden = f.name.startsWith(".")
+                            isHidden = false
                         )
                     }
                 }
@@ -956,16 +1021,35 @@ class LocalFileScanner @Inject constructor(
                 "text/plain",
                 "text/csv",
                 "text/rtf",
+                "text/html",
+                "text/markdown",
+                "text/xml",
                 "application/rtf",
-                "application/epub+zip"
+                "application/epub+zip",
+                "application/json",
+                "application/xml"
             )
             val selection = mimeTypes.joinToString(" OR ") { "${MediaStore.Files.FileColumns.MIME_TYPE} = '$it'" } +
+                    " OR ${MediaStore.Files.FileColumns.MIME_TYPE} LIKE 'text/%'" +
                     " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.pdf'" +
                     " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.doc%'" +
                     " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.xls%'" +
                     " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.ppt%'" +
                     " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.txt'" +
-                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.epub'"
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.text'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.log'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.md'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.json'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.xml'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.csv'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.tsv'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.odt'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.ods'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.odp'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.wps'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.rtf'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.epub'" +
+                    " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.mobi'"
 
             val cursor: Cursor? = context.contentResolver.query(
                 MediaStore.Files.getContentUri("external"),
@@ -990,14 +1074,18 @@ class LocalFileScanner @Inject constructor(
             // See queryImageFolders for why this trusts MediaStore's row data instead of
             // re-stat()'ing every file to "confirm" it.
             rows.forEach { row ->
-                val ext = row.path.substringAfterLast('.', "").lowercase(Locale.getDefault())
-                if (ext !in docExts) return@forEach
+                if (isInsideHiddenOrSystemFolder(row.path, isFolder = false)) return@forEach
                 val slashIdx = row.path.lastIndexOf('/')
                 if (slashIdx <= 0) return@forEach
-                val size = if (row.size > 0) row.size else File(row.path).length()
-                if (size <= 0) return@forEach
+                val fileName = row.path.substring(slashIdx + 1)
+                if (fileName.startsWith(".")) return@forEach
+                val ext = fileName.substringAfterLast('.', "").lowercase(Locale.getDefault())
+                if (ext !in docExts) return@forEach
+                val folderPath = row.path.substring(0, slashIdx)
+                if (isInsideHiddenOrSystemFolder(folderPath, isFolder = true)) return@forEach
+                val size = if (row.size >= 0) row.size else File(row.path).length()
                 val dateMs = if (row.dateSec > 0) row.dateSec * 1000L else File(row.path).lastModified()
-                folderMap.getOrPut(row.path.substring(0, slashIdx)) { mutableListOf() }.add(Triple(row.path, size, dateMs))
+                folderMap.getOrPut(folderPath) { mutableListOf() }.add(Triple(row.path, size, dateMs))
                 seenPaths.add(row.path)
             }
         } catch (e: Exception) {
@@ -1015,19 +1103,23 @@ class LocalFileScanner @Inject constructor(
             File(Environment.getExternalStorageDirectory(), "Telegram")
         )
 
-        fun scanFolderFast(dir: File, depth: Int = 2) {
+        fun scanFolderFast(dir: File, depth: Int = 4) {
             if (!dir.exists() || !dir.isDirectory || depth < 0) return
+            if (dir.name.startsWith(".")) return
+            if (isInsideHiddenOrSystemFolder(dir.absolutePath, isFolder = true)) return
             val files = dir.listFiles() ?: return
             for (f in files) {
                 if (f.name.startsWith(".")) continue
                 if (f.isDirectory) {
-                    if (f.name != "Android") {
+                    if (f.name != "Android" && !f.name.startsWith(".")) {
                         scanFolderFast(f, depth - 1)
                     }
                 } else {
                     val ext = f.extension.lowercase(Locale.getDefault())
-                    if (ext in docExts && f.length() > 0) {
+                    if (ext in docExts) {
                         val parent = f.parentFile?.absolutePath ?: continue
+                        if (f.parentFile?.name?.startsWith(".") == true) continue
+                        if (isInsideHiddenOrSystemFolder(parent, isFolder = true)) continue
                         if (seenPaths.add(f.absolutePath)) {
                             folderMap.getOrPut(parent) { mutableListOf() }.add(Triple(f.absolutePath, f.length(), f.lastModified()))
                         }
@@ -1037,22 +1129,22 @@ class LocalFileScanner @Inject constructor(
         }
 
         for (d in standardDirs) {
-            scanFolderFast(d, depth = 2)
+            scanFolderFast(d, depth = 4)
         }
 
         folderMap.mapNotNull { (path, rawItems) ->
-            // See queryImageFolders for why a loose-at-the-root synthetic "Internal storage"
-            // bucket is dropped rather than shown.
-            if (path == Environment.getExternalStorageDirectory().absolutePath) return@mapNotNull null
+            if (isInsideHiddenOrSystemFolder(path, isFolder = true)) return@mapNotNull null
+            val isRoot = path == Environment.getExternalStorageDirectory().absolutePath
 
             // One stat() per folder, not per file — see queryImageFolders.
             val folderFile = File(path)
             if (!folderFile.exists() || !folderFile.isDirectory) return@mapNotNull null
+            if (folderFile.name.startsWith(".")) return@mapNotNull null
 
             if (rawItems.isEmpty()) return@mapNotNull null
             val validItems = rawItems
 
-            val name = folderFile.name.ifEmpty { "Documents" }
+            val name = if (isRoot) "Main storage" else folderFile.name.ifEmpty { "Documents" }
             val badge = detectBadgeFromPath(path)
             val totalSize = validItems.sumOf { it.second }
             val effectiveTime = validItems.maxOfOrNull { it.third } ?: folderFile.lastModified()

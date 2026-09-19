@@ -22,6 +22,7 @@ browser = "1.8.0"
 playServicesDrive = "17.0.1"
 googleApiClientAndroid = "2.7.0"
 googleApiServicesDrive = "v3-rev20240914-2.0.0"
+nanohttpd = "2.3.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -86,6 +87,9 @@ slf4j-android = { group = "org.slf4j", name = "slf4j-android", version.ref = "sl
 
 # Archive Management (Zip, etc.)
 zip4j = { group = "net.lingala.zip4j", name = "zip4j", version.ref = "zip4j" }
+
+# Embedded HTTP Web Server
+nanohttpd = { group = "org.nanohttpd", name = "nanohttpd", version.ref = "nanohttpd" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

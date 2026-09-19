@@ -324,11 +324,15 @@ data class FtpServerState(
     val isRunning: Boolean = false,
     val ipAddress: String? = null,
     val port: Int = 1524,
+    val httpPort: Int = 8080,
     val password: String = "",
     val isRandomPassword: Boolean = false
 ) {
     val accessUrl: String
         get() = if (ipAddress != null) "ftp://$ipAddress:$port" else ""
+
+    val httpAccessUrl: String
+        get() = if (ipAddress != null) "http://$ipAddress:$httpPort" else ""
 }
 
 data class Bookmark(
