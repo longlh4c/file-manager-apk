@@ -193,7 +193,6 @@ class FileOperationsUseCase @Inject constructor(
         // a full MediaStore rescan on their next open just because one photo was deleted).
         if (result.isSuccess) {
             folderCacheManager.removeFromMediaFolders(paths)
-            folderCacheManager.clearDashboardSummaries()
             mediaChangeSignal.notifyChanged()
         }
         return result
@@ -241,14 +240,12 @@ class RecycleBinUseCase @Inject constructor(
     suspend fun deletePermanently(ids: List<Long>, onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null): Result<Int> =
         recycleBinRepository.deletePermanently(ids, onProgress).also {
             if (it.isSuccess) {
-                folderCacheManager.clearDashboardSummaries()
                 mediaChangeSignal.notifyChanged()
             }
         }
     suspend fun empty(onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)? = null): Result<Unit> =
         recycleBinRepository.emptyTrash(onProgress).also {
             if (it.isSuccess) {
-                folderCacheManager.clearDashboardSummaries()
                 mediaChangeSignal.notifyChanged()
             }
         }

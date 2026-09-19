@@ -103,14 +103,7 @@ class FolderCacheManager @Inject constructor(
     }
 
     private fun markMediaCachesUnreconciled() {
-        dashboardSummaryCache = null
-        ioScope.launch { dashboardCacheFile.delete() }
         reconciledOnceKeys.removeAll { it.startsWith("mediafolders_") || it.startsWith("catsub_") }
-    }
-
-    fun clearDashboardSummaries() {
-        dashboardSummaryCache = null
-        ioScope.launch { dashboardCacheFile.delete() }
     }
 
     fun clearLocalFolderCache() {
@@ -307,8 +300,6 @@ class FolderCacheManager @Inject constructor(
      * (copy/move/delete/download-to-local, etc). Clears every category rather than trying to
      * guess which bucket(s) were affected — cheap since it's just re-scanning MediaStore next visit. */
     fun invalidateMediaFolders() {
-        dashboardSummaryCache = null
-        ioScope.launch { dashboardCacheFile.delete() }
         markMediaCachesUnreconciled()
         val mediaKeys = mediaFoldersCache.keys.toList()
         mediaFoldersCache.clear()

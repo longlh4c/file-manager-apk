@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -187,7 +188,20 @@ class DashboardViewModel @Inject constructor(
 
     fun refresh() {
         usbOtgManager.refresh()
-        loadData()
+        loadDataJob?.cancel()
+        loadDataJob = viewModelScope.launch(Dispatchers.IO) {
+            val fresh = getDashboardDataUseCase.getSummaries()
+            val volume = getDashboardDataUseCase.getStorageInfo()
+            folderCacheManager.putDashboardSummaries(fresh)
+            withContext(Dispatchers.Main) {
+                baseCategories = fresh
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    storageVolume = volume
+                )
+                applyCategoriesWithUsb(_uiState.value.usbDrives)
+            }
+        }
     }
 
     fun clearClipboard() {
@@ -338,11 +352,26 @@ class DashboardViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(categories = finalCategories)
     }
 
+    private fun mergeWithExisting(current: List<CategorySummary>, incoming: List<CategorySummary>): List<CategorySummary> {
+        if (current.isEmpty() || current == INITIAL_DASHBOARD_CATEGORIES) return incoming
+        val currentMap = current.associateBy { it.type }
+        return incoming.map { inc ->
+            val cur = currentMap[inc.type] ?: return@map inc
+            val incomingHasDetails = inc.itemCount > 0 || inc.totalSizeBytes > 0L || !inc.subtitle.isNullOrEmpty()
+            val curHasDetails = cur.itemCount > 0 || cur.totalSizeBytes > 0L || !cur.subtitle.isNullOrEmpty()
+            if (!incomingHasDetails && curHasDetails) {
+                cur
+            } else {
+                inc
+            }
+        }
+    }
+
     private fun loadData() {
         loadDataJob?.cancel()
         loadDataJob = viewModelScope.launch {
             getDashboardDataUseCase.observeSummaries().collect { categories ->
-                baseCategories = categories
+                baseCategories = mergeWithExisting(baseCategories, categories)
                 val volume = getDashboardDataUseCase.getStorageInfo()
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
