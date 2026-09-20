@@ -621,7 +621,7 @@ class FileBrowserViewModel @Inject constructor(
         }
         _uiState.value = _uiState.value.copy(downloadProgress = null)
         if (result.isFailure) {
-            _uiState.value = _uiState.value.copy(toastMessage = "Lỗi khi $operationLabel: ${result.exceptionOrNull()?.message}")
+            _uiState.value = _uiState.value.copy(toastMessage = "Error during $operationLabel: ${result.exceptionOrNull()?.message}")
         }
     }
 

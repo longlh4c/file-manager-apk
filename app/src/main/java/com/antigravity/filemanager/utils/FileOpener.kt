@@ -95,7 +95,7 @@ object FileOpener {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
 
-            val chooser = Intent.createChooser(intent, "Mở bằng...")
+            val chooser = Intent.createChooser(intent, "Open with...")
             chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(chooser)
         } catch (e: Exception) {
@@ -121,7 +121,7 @@ object FileOpener {
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                val chooser = Intent.createChooser(intent, "Chia sẻ tệp tin")
+                val chooser = Intent.createChooser(intent, "Share file")
                 chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(chooser)
             } else {
@@ -140,7 +140,7 @@ object FileOpener {
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                val chooser = Intent.createChooser(intent, "Chia sẻ ${uris.size} tệp tin")
+                val chooser = Intent.createChooser(intent, "Share ${uris.size} files")
                 chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(chooser)
             }

@@ -50,6 +50,8 @@ import java.io.File
 fun MediaCategoriesScreen(
     onNavigateBack: () -> Unit,
     onOpenFile: (FileItem, FileSortOption, String?) -> Unit = { _, _, _ -> },
+    onDualPanelToggle: (() -> Unit)? = null,
+    isDualPanelActive: Boolean = false,
     viewModel: CategoriesViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -326,16 +328,28 @@ fun MediaCategoriesScreen(
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkBackground)
                 )
             } else {
-                // Top Bar with 3 action buttons on top right (Search, New Folder, Sort/More)
+                // Top Bar with action buttons on top right (Dual Panel, Search, Sort/More)
                 FileManagerTopBar(
                     title = currentTitle,
                     showBackButton = true,
+                    isDualPanelActive = isDualPanelActive,
                     onNavigationClick = {
                         if (!viewModel.navigateBack()) {
                             onNavigateBack()
                         }
                     },
                     actions = {
+                        // Dual panel toggle button for Foldable devices
+                        if (onDualPanelToggle != null) {
+                            IconButton(onClick = onDualPanelToggle) {
+                                Icon(
+                                    imageVector = Icons.Default.VerticalSplit,
+                                    contentDescription = if (isDualPanelActive) "Close Dual Panel" else "Dual Panel",
+                                    tint = if (isDualPanelActive) TealPrimary else TextPrimary
+                                )
+                            }
+                        }
+
                         // 1. Search Button
                         IconButton(onClick = { viewModel.setSearchActive(true) }) {
                             Icon(Icons.Default.Search, contentDescription = "Search", tint = TextPrimary)

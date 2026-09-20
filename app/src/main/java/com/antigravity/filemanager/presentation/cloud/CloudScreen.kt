@@ -51,6 +51,9 @@ import kotlinx.coroutines.launch
 fun CloudScreen(
     onNavigateBack: () -> Unit,
     onNavigateToCloudBrowser: (accountId: String, accountName: String) -> Unit = { _, _ -> },
+    onDualPanelToggle: (() -> Unit)? = null,
+    isDualPanelActive: Boolean = false,
+    onCloseDualPanel: (() -> Unit)? = null,
     viewModel: CloudViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -131,22 +134,34 @@ fun CloudScreen(
                     Text(
                         text = if (uiState.isReorderMode) "Edit Cloud Drives" else "Cloud",
                         color = TextPrimary,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Medium
+                        fontSize = if (isDualPanelActive) 17.sp else 20.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 },
                 navigationIcon = {
                     IconButton(onClick = {
                         if (uiState.isReorderMode) {
                             viewModel.cancelReorder()
+                        } else if (onCloseDualPanel != null) {
+                            onCloseDualPanel()
+                        } else if (onDualPanelToggle != null) {
+                            onDualPanelToggle()
                         } else {
                             onNavigateBack()
                         }
                     }) {
                         Icon(
-                            imageVector = if (uiState.isReorderMode) Icons.AutoMirrored.Filled.ArrowBack else Icons.Default.Menu,
-                            contentDescription = if (uiState.isReorderMode) "Cancel" else "Menu",
-                            tint = TextPrimary
+                            imageVector = if (uiState.isReorderMode) {
+                                Icons.AutoMirrored.Filled.ArrowBack
+                            } else if (onCloseDualPanel != null) {
+                                Icons.Default.Close
+                            } else {
+                                if (isDualPanelActive) Icons.Default.VerticalSplit else Icons.Default.Menu
+                            },
+                            contentDescription = if (uiState.isReorderMode) "Cancel" else (if (onCloseDualPanel != null) "Close Dual Panel" else (if (isDualPanelActive) "Close Dual Panel" else "Dual Panel")),
+                            tint = if (!uiState.isReorderMode && isDualPanelActive && onCloseDualPanel == null) TealPrimary else TextPrimary
                         )
                     }
                 },

@@ -46,6 +46,8 @@ fun FileBrowserScreen(
     onNavigateBack: () -> Unit,
     onOpenFile: (FileItem, FileSortOption, String?) -> Unit = { _, _, _ -> },
     onNavigateToStorageAnalysis: () -> Unit = {},
+    onDualPanelToggle: (() -> Unit)? = null,
+    isDualPanelActive: Boolean = false,
     viewModel: FileBrowserViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -353,6 +355,15 @@ fun FileBrowserScreen(
                         }
                     },
                     actions = {
+                        if (onDualPanelToggle != null) {
+                            IconButton(onClick = onDualPanelToggle) {
+                                Icon(
+                                    imageVector = Icons.Default.VerticalSplit,
+                                    contentDescription = if (isDualPanelActive) "Close Dual Panel" else "Dual Panel",
+                                    tint = if (isDualPanelActive) TealPrimary else TextPrimary
+                                )
+                            }
+                        }
 
                         // 1. Search Button
                         IconButton(onClick = { viewModel.setSearchActive(true) }) {

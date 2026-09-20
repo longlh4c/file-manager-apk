@@ -8,6 +8,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material3.*
@@ -39,6 +40,9 @@ private val SoftPastelSage = Color(0xFF80CBC4)
 fun AccessFromNetworkScreen(
     onNavigateBack: () -> Unit,
     showBackButton: Boolean = true,
+    onDualPanelToggle: (() -> Unit)? = null,
+    isDualPanelActive: Boolean = false,
+    onCloseDualPanel: (() -> Unit)? = null,
     viewModel: NetworkAccessViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -57,7 +61,21 @@ fun AccessFromNetworkScreen(
             FileManagerTopBar(
                 title = "FTP",
                 showBackButton = showBackButton,
-                onNavigationClick = onNavigateBack,
+                isDualPanelActive = isDualPanelActive,
+                navigationIcon = if (onCloseDualPanel != null) {
+                    {
+                        IconButton(onClick = onCloseDualPanel) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close Dual Panel",
+                                tint = TextPrimary
+                            )
+                        }
+                    }
+                } else null,
+                onNavigationClick = {
+                    if (showBackButton) onNavigateBack() else onDualPanelToggle?.invoke()
+                },
                 actions = {
                     IconButton(onClick = { /* Device scan / help */ }) {
                         Icon(

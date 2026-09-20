@@ -53,6 +53,8 @@ fun CloudExplorerScreen(
     title: String,
     onNavigateToCloudList: () -> Unit = {},
     onOpenFile: (FileItem, FileSortOption, String?) -> Unit = { _, _, _ -> },
+    onDualPanelToggle: (() -> Unit)? = null,
+    isDualPanelActive: Boolean = false,
     viewModel: CloudExplorerViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -265,6 +267,15 @@ fun CloudExplorerScreen(
                         }
                     },
                     actions = {
+                        if (onDualPanelToggle != null) {
+                            IconButton(onClick = onDualPanelToggle) {
+                                Icon(
+                                    imageVector = Icons.Default.VerticalSplit,
+                                    contentDescription = if (isDualPanelActive) "Close Dual Panel" else "Dual Panel",
+                                    tint = if (isDualPanelActive) TealPrimary else TextPrimary
+                                )
+                            }
+                        }
                         if (uiState.isInsideTrashView && uiState.files.isNotEmpty()) {
                             IconButton(onClick = { viewModel.setShowEmptyTrashDialog(true) }) {
                                 Icon(Icons.Default.DeleteSweep, contentDescription = "Empty Trash", tint = TextPrimary)

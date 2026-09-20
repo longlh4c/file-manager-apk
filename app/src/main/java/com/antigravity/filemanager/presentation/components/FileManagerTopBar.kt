@@ -16,8 +16,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.VerticalSplit
 import com.antigravity.filemanager.presentation.theme.DarkBackground
+import com.antigravity.filemanager.presentation.theme.TealPrimary
 import com.antigravity.filemanager.presentation.theme.TextPrimary
 import kotlinx.coroutines.launch
 
@@ -31,6 +35,8 @@ fun FileManagerTopBar(
     onRefreshClick: (() -> Unit)? = null,
     onMenuClick: (() -> Unit)? = null,
     isRefreshing: Boolean = false,
+    isDualPanelActive: Boolean = false,
+    navigationIcon: (@Composable () -> Unit)? = null,
     actions: @Composable (RowScope.() -> Unit)? = null
 ) {
     val rotation = remember { Animatable(0f) }
@@ -50,17 +56,27 @@ fun FileManagerTopBar(
             Text(
                 text = title,
                 color = TextPrimary,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Medium
+                fontSize = if (isDualPanelActive) 17.sp else 20.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         },
         navigationIcon = {
-            IconButton(onClick = onNavigationClick) {
-                Icon(
-                    imageVector = if (showBackButton) Icons.Default.ArrowBack else Icons.Default.Menu,
-                    contentDescription = if (showBackButton) "Back" else "Menu",
-                    tint = TextPrimary
-                )
+            if (navigationIcon != null) {
+                navigationIcon()
+            } else {
+                IconButton(onClick = onNavigationClick) {
+                    Icon(
+                        imageVector = if (showBackButton) {
+                            Icons.Default.ArrowBack
+                        } else {
+                            if (isDualPanelActive) Icons.Default.VerticalSplit else Icons.Default.Menu
+                        },
+                        contentDescription = if (showBackButton) "Back" else (if (isDualPanelActive) "Close Dual Panel" else "Dual Panel"),
+                        tint = if (!showBackButton && isDualPanelActive) TealPrimary else TextPrimary
+                    )
+                }
             }
         },
         actions = {

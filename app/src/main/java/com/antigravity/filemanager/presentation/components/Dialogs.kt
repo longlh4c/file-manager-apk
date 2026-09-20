@@ -949,7 +949,7 @@ fun CloudLoginWebViewDialog(
                                             val isDropboxHome = (parsedPath.startsWith("/home") || parsedPath.startsWith("/personal") || parsedPath.startsWith("/work") || parsedPath.startsWith("/browse")) && !parsedPath.contains("login")
                                             val isDropboxAuthed = cookies.contains("t=") || cookies.contains("lid=") || cookies.contains("jar=") || cookies.contains("sjar=")
                                             if (!isDropboxHome && !isDropboxAuthed && parsedPath.contains("login")) {
-                                                Toast.makeText(context, "Vui lòng hoàn tất đăng nhập Dropbox trước khi bấm DONE.", Toast.LENGTH_SHORT).show()
+                                                Toast.makeText(context, "Please complete Dropbox login before tapping DONE.", Toast.LENGTH_SHORT).show()
                                                 return@Button
                                             }
                                         }
@@ -957,7 +957,7 @@ fun CloudLoginWebViewDialog(
                                             val parsedPath = try { java.net.URI(wv.url ?: "").path?.lowercase(Locale.getDefault()) ?: "" } catch (e: Exception) { "" }
                                             val isAuthed = (parsedPath.contains("/drive/my-drive") || parsedPath.contains("/drive/u/")) || cookies.contains("SID=") || cookies.contains("SSID=")
                                             if (!isAuthed) {
-                                                Toast.makeText(context, "Vui lòng hoàn tất đăng nhập Google trước khi bấm DONE.", Toast.LENGTH_SHORT).show()
+                                                Toast.makeText(context, "Please complete Google login before tapping DONE.", Toast.LENGTH_SHORT).show()
                                                 return@Button
                                             }
                                         }
@@ -1124,7 +1124,7 @@ fun CloudLoginWebViewDialog(
                                             }
 
                                             if (provider == CloudProvider.MEGA && sid == "session_active" && email.startsWith("user@")) {
-                                                Toast.makeText(context, "Vui lòng hoàn tất đăng nhập MEGA trước khi bấm DONE.", Toast.LENGTH_SHORT).show()
+                                                Toast.makeText(context, "Please complete MEGA login before tapping DONE.", Toast.LENGTH_SHORT).show()
                                                 return@evaluateJavascript
                                             }
 

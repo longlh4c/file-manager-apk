@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.AlertDialog
@@ -49,6 +50,9 @@ fun DashboardScreen(
     onNavigateToBrowser: (path: String, title: String) -> Unit,
     onNavigateToTrash: () -> Unit,
     onNavigateToStorageAnalysis: () -> Unit,
+    onDualPanelToggle: (() -> Unit)? = null,
+    isDualPanelActive: Boolean = false,
+    onCloseDualPanel: (() -> Unit)? = null,
     viewModel: DashboardViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -74,7 +78,19 @@ fun DashboardScreen(
             FileManagerTopBar(
                 title = "Owl File +",
                 showBackButton = false,
-                onNavigationClick = { /* Open Navigation Drawer */ },
+                isDualPanelActive = isDualPanelActive,
+                navigationIcon = if (onCloseDualPanel != null) {
+                    {
+                        IconButton(onClick = onCloseDualPanel) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close Dual Panel",
+                                tint = TextPrimary
+                            )
+                        }
+                    }
+                } else null,
+                onNavigationClick = { onDualPanelToggle?.invoke() },
                 actions = {
                     IconButton(onClick = { viewModel.setShowBookmarksDialog(true) }) {
                         Icon(
