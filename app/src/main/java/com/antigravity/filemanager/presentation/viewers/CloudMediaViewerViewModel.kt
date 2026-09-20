@@ -30,8 +30,23 @@ sealed class ResolvedMedia {
 class CloudMediaViewerViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val cloudUseCase: CloudStorageUseCase,
-    private val fileOperationsUseCase: FileOperationsUseCase
+    private val fileOperationsUseCase: FileOperationsUseCase,
+    private val preferenceManager: com.antigravity.filemanager.data.local.preferences.PreferenceManager
 ) : ViewModel() {
+
+    suspend fun saveLastViewedImage(
+        path: String,
+        parentPath: String,
+        sortOption: String,
+        cloudAccountId: String?,
+        fileName: String
+    ) {
+        preferenceManager.saveLastViewedImage(path, parentPath, sortOption, cloudAccountId, fileName)
+    }
+
+    suspend fun clearLastViewedImage() {
+        preferenceManager.clearLastViewedImage()
+    }
 
     /** Deletes a local file straight to the recycle bin — used by the image/video viewer's
      * Delete action, whether the file was already local or just got downloaded here for viewing. */

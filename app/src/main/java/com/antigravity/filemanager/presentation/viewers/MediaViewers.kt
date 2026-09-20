@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.presentation.viewers
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -13,6 +14,7 @@ import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -25,11 +27,13 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -47,6 +51,7 @@ import com.antigravity.filemanager.presentation.theme.TealPrimary
 import com.antigravity.filemanager.presentation.theme.TextPrimary
 import com.antigravity.filemanager.presentation.theme.TextSecondary
 import com.antigravity.filemanager.utils.FileOpener
+import com.antigravity.filemanager.utils.rememberFoldablePosture
 import java.io.File
 import java.util.Locale
 
@@ -177,6 +182,36 @@ fun ImageViewerScreen(
     val currentName = currentEntry?.entryName ?: initialDisplayName
 
     val coroutineScope = rememberCoroutineScope()
+
+    // Automatically persist the current viewed image position so that if the app is minimized
+    // or killed by the OS in the background, it can restore right where the user left off.
+    LaunchedEffect(currentEntry) {
+        if (currentEntry != null) {
+            val entryPath = when (currentEntry) {
+                is ViewerEntry.Local -> currentEntry.file.absolutePath
+                is ViewerEntry.Cloud -> currentEntry.item.path
+            }
+            cloudMediaViewerViewModel.saveLastViewedImage(
+                path = entryPath,
+                parentPath = actualParentPath,
+                sortOption = sortOption.name,
+                cloudAccountId = cloudAccountId,
+                fileName = currentEntry.entryName
+            )
+        }
+    }
+
+    val handleBack: () -> Unit = {
+        coroutineScope.launch {
+            cloudMediaViewerViewModel.clearLastViewedImage()
+        }
+        onNavigateBack()
+    }
+
+    BackHandler {
+        handleBack()
+    }
+
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var isDeleting by remember { mutableStateOf(false) }
     var isPreparingAction by remember { mutableStateOf(false) }
@@ -234,7 +269,7 @@ fun ImageViewerScreen(
                                     if (deletedIndex in it.indices) it.removeAt(deletedIndex)
                                 }
                                 if (updated.isEmpty()) {
-                                    onNavigateBack()
+                                    handleBack()
                                 } else {
                                     imageEntries = updated
                                     val targetIndex = deletedIndex.coerceAtMost(updated.size - 1)
@@ -266,6 +301,8 @@ fun ImageViewerScreen(
         )
     }
 
+    val posture = rememberFoldablePosture()
+
     Scaffold(
         topBar = {
             AnimatedVisibility(
@@ -294,7 +331,7 @@ fun ImageViewerScreen(
                         }
                     },
                     navigationIcon = {
-                        IconButton(onClick = onNavigateBack) {
+                        IconButton(onClick = handleBack) {
                             Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = TextPrimary)
                         }
                     },
@@ -356,6 +393,7 @@ fun ImageViewerScreen(
                 // the opposite of HorizontalPager's own default page order, which advances on a
                 // left swipe.
                 reverseLayout = true,
+                beyondBoundsPageCount = 1,
                 modifier = Modifier.fillMaxSize()
             ) { page ->
                 val entry = imageEntries[page]
@@ -384,6 +422,9 @@ fun ImageViewerScreen(
                 } else {
                     ZoomableImagePage(
                         media = resolvedMedia,
+                        pagerState = pagerState,
+                        page = page,
+                        isUnfolded = posture.isUnfolded,
                         onTap = { showControls = !showControls }
                     )
                 }
@@ -392,13 +433,21 @@ fun ImageViewerScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ZoomableImagePage(
     media: ResolvedImageMedia,
+    pagerState: PagerState,
+    page: Int,
+    isUnfolded: Boolean,
     onTap: () -> Unit
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+    var intrinsicSize by remember { mutableStateOf<Size?>(null) }
+    val density = LocalDensity.current
+    val targetSpacingPx = remember(density) { with(density) { 16.dp.toPx() } }
+
     val displayName = when (media) {
         is ResolvedImageMedia.LocalFile -> media.file.name
         is ResolvedImageMedia.StreamUri -> media.url.substringAfterLast("/")
@@ -462,7 +511,9 @@ private fun ZoomableImagePage(
             contentDescription = displayName,
             contentScale = ContentScale.Fit,
             onState = { state ->
-                if (state is coil.compose.AsyncImagePainter.State.Error) {
+                if (state is coil.compose.AsyncImagePainter.State.Success) {
+                    intrinsicSize = state.painter.intrinsicSize
+                } else if (state is coil.compose.AsyncImagePainter.State.Error) {
                     android.util.Log.e("ZoomableImagePage", "Failed to load $displayName ($imageModel)", state.result.throwable)
                 }
             },
@@ -471,7 +522,35 @@ private fun ZoomableImagePage(
                 .graphicsLayer {
                     scaleX = scale
                     scaleY = scale
-                    translationX = offset.x
+
+                    val dynamicShift: Float = if (isUnfolded && scale <= 1.05f) {
+                        val pageOffset = (pagerState.currentPage - page) + pagerState.currentPageOffsetFraction
+                        val absOffset = kotlin.math.abs(pageOffset)
+                        if (absOffset < 1.0f) {
+                            val containerWidth = size.width
+                            val containerHeight = size.height
+                            if (containerWidth > 0f && containerHeight > 0f) {
+                                val currentIntrinsic = intrinsicSize
+                                val imageAspect = if (currentIntrinsic != null && currentIntrinsic.width > 0f && currentIntrinsic.height > 0f) {
+                                    currentIntrinsic.width / currentIntrinsic.height
+                                } else {
+                                    if (containerWidth >= containerHeight) 0.75f else (containerWidth / containerHeight)
+                                }
+                                val containerAspect = containerWidth / containerHeight
+                                if (containerAspect > imageAspect) {
+                                    val renderedWidth = containerHeight * imageAspect
+                                    val sideMargin = (containerWidth - renderedWidth) / 2f
+                                    val excessVoid = (sideMargin * 2f - targetSpacingPx).coerceAtLeast(0f)
+                                    val maxShift = (excessVoid / 2f).coerceAtMost(containerWidth * 0.25f)
+                                    val progress = kotlin.math.sin(absOffset * Math.PI.toFloat())
+                                    val shiftMagnitude = maxShift * progress
+                                    if (pageOffset < 0f) shiftMagnitude else -shiftMagnitude
+                                } else 0f
+                            } else 0f
+                        } else 0f
+                    } else 0f
+
+                    translationX = offset.x + dynamicShift
                     translationY = offset.y
                 }
         )

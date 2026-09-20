@@ -26,6 +26,12 @@ class PreferenceManager @Inject constructor(
         val DEFAULT_SORT_OPTION = stringPreferencesKey("default_sort_option")
         val DEFAULT_VIEW_MODE = stringPreferencesKey("default_view_mode")
         val DEFAULT_SHOW_HIDDEN = booleanPreferencesKey("default_show_hidden")
+        val LAST_VIEWED_IMAGE_PATH = stringPreferencesKey("last_viewed_image_path")
+        val LAST_VIEWED_IMAGE_PARENT = stringPreferencesKey("last_viewed_image_parent")
+        val LAST_VIEWED_IMAGE_SORT = stringPreferencesKey("last_viewed_image_sort")
+        val LAST_VIEWED_IMAGE_CLOUD_ID = stringPreferencesKey("last_viewed_image_cloud_id")
+        val LAST_VIEWED_IMAGE_NAME = stringPreferencesKey("last_viewed_image_name")
+        val IS_VIEWING_IMAGE = booleanPreferencesKey("is_viewing_image")
     }
 
     val ftpPortFlow: Flow<Int> = context.dataStore.data.map { it[Keys.FTP_PORT] ?: 1524 }
@@ -86,4 +92,51 @@ class PreferenceManager @Inject constructor(
             prefs[Keys.DEFAULT_SHOW_HIDDEN] = show
         }
     }
+
+    val lastViewedImageFlow: Flow<LastViewedImageState?> = context.dataStore.data.map { prefs ->
+        if (prefs[Keys.IS_VIEWING_IMAGE] == true) {
+            val path = prefs[Keys.LAST_VIEWED_IMAGE_PATH]
+            if (!path.isNullOrEmpty()) {
+                LastViewedImageState(
+                    path = path,
+                    parentPath = prefs[Keys.LAST_VIEWED_IMAGE_PARENT] ?: "",
+                    sortOption = prefs[Keys.LAST_VIEWED_IMAGE_SORT] ?: "BY_NAME_ASC",
+                    cloudAccountId = prefs[Keys.LAST_VIEWED_IMAGE_CLOUD_ID]?.takeIf { it.isNotEmpty() },
+                    fileName = prefs[Keys.LAST_VIEWED_IMAGE_NAME] ?: ""
+                )
+            } else null
+        } else null
+    }
+
+    suspend fun saveLastViewedImage(
+        path: String,
+        parentPath: String,
+        sortOption: String,
+        cloudAccountId: String?,
+        fileName: String
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.LAST_VIEWED_IMAGE_PATH] = path
+            prefs[Keys.LAST_VIEWED_IMAGE_PARENT] = parentPath
+            prefs[Keys.LAST_VIEWED_IMAGE_SORT] = sortOption
+            prefs[Keys.LAST_VIEWED_IMAGE_CLOUD_ID] = cloudAccountId ?: ""
+            prefs[Keys.LAST_VIEWED_IMAGE_NAME] = fileName
+            prefs[Keys.IS_VIEWING_IMAGE] = true
+        }
+    }
+
+    suspend fun clearLastViewedImage() {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.IS_VIEWING_IMAGE] = false
+            prefs.remove(Keys.LAST_VIEWED_IMAGE_PATH)
+        }
+    }
 }
+
+data class LastViewedImageState(
+    val path: String,
+    val parentPath: String,
+    val sortOption: String,
+    val cloudAccountId: String?,
+    val fileName: String
+)

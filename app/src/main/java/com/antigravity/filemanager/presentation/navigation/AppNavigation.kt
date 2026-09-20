@@ -38,7 +38,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -89,7 +92,8 @@ private const val RIGHT_STORAGE_ANALYSIS_GRAPH = "right_storage_analysis_graph"
 
 @Composable
 fun AppNavigation(
-    dualPanelManager: DualPanelManager
+    dualPanelManager: DualPanelManager,
+    preferenceManager: com.antigravity.filemanager.data.local.preferences.PreferenceManager
 ) {
     val context = LocalContext.current
     val foldablePosture = rememberFoldablePosture()
@@ -111,6 +115,29 @@ fun AppNavigation(
 
     val leftNavController = rememberNavController()
     val rightNavController = rememberNavController()
+
+    // Restore the last-viewed image on cold start or after process death
+    val lastViewedImage by preferenceManager.lastViewedImageFlow.collectAsStateWithLifecycle(initialValue = null)
+    var hasRestoredLastViewed by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(lastViewedImage) {
+        val state = lastViewedImage
+        if (state != null && !hasRestoredLastViewed) {
+            hasRestoredLastViewed = true
+            val isValid = if (state.cloudAccountId == null) File(state.path).exists() else true
+            if (isValid) {
+                leftNavController.navigate(
+                    Screen.ImageViewer.createRoute(
+                        path = state.path,
+                        parentPath = state.parentPath,
+                        sortOption = state.sortOption,
+                        cloudAccountId = state.cloudAccountId,
+                        fileName = state.fileName
+                    )
+                )
+            }
+        }
+    }
 
     // Reset the right pane in the background only when dual panel is closed
     LaunchedEffect(isDualSplit) {

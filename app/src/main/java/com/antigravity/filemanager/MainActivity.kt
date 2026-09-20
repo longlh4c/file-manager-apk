@@ -36,6 +36,9 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var dualPanelManager: DualPanelManager
 
+    @Inject
+    lateinit var preferenceManager: com.antigravity.filemanager.data.local.preferences.PreferenceManager
+
     private val storagePermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
@@ -49,6 +52,14 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // If an instance of MainActivity already exists in this task and the launcher opens it,
+        // finish this duplicate so the existing instance (and its backstack) is brought forward.
+        if (!isTaskRoot && intent.hasCategory(Intent.CATEGORY_LAUNCHER) && intent.action == Intent.ACTION_MAIN) {
+            super.onCreate(savedInstanceState)
+            finish()
+            return
+        }
+
         // Manifest declares Theme.FileManager.Splash (brand gradient + owl mascot as
         // windowBackground) so the very first frame isn't a blank window — swap back to the
         // normal theme now, before Compose draws anything, so the splash background is only ever
@@ -64,7 +75,10 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = DarkBackground
                 ) {
-                    AppNavigation(dualPanelManager = dualPanelManager)
+                    AppNavigation(
+                        dualPanelManager = dualPanelManager,
+                        preferenceManager = preferenceManager
+                    )
                 }
             }
         }
