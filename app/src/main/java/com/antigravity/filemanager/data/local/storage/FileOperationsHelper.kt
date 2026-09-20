@@ -7,13 +7,33 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import net.lingala.zip4j.ZipFile
+import net.lingala.zip4j.exception.ZipException
+import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry
+import org.apache.commons.compress.archivers.sevenz.SevenZFile
+import org.apache.commons.compress.archivers.sevenz.SevenZMethod
+import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
+import com.github.junrar.Junrar
+import com.github.junrar.Archive
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
+import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
+
+class ArchivePasswordRequiredException(
+    val archivePath: String,
+    message: String = "Password required for archive: ${File(archivePath).name}"
+) : IOException(message)
+
+class ArchiveInvalidPasswordException(
+    val archivePath: String,
+    message: String = "Incorrect password for archive: ${File(archivePath).name}"
+) : IOException(message)
 
 @Singleton
 class FileOperationsHelper @Inject constructor(
@@ -313,94 +333,917 @@ class FileOperationsHelper @Inject constructor(
     // files (index/total), never live within one, since that's the only part of this that was
     // ever actually safe.
 
-    suspend fun zipFiles(
+    suspend fun compressFiles(
         sourcePaths: List<String>,
-        targetZipPath: String,
-        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
+        targetArchivePath: String,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
     ): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
-            val zipFile = ZipFile(targetZipPath)
-
-            // Flattened per-file work list instead of one addFolder(f) call per top-level source:
-            // addFolder() zips an entire folder tree in a single opaque call with no progress
-            // inside it, so compressing one large folder (a single source, addFolder's whole job)
-            // used to report "1/1" for the entire operation — no percentage the whole time, no
-            // matter how long it took. Walking the tree ourselves and calling addFile() once per
-            // real file (still fully synchronous, still cancellable via ensureActive() — no
-            // isRunInThread/ProgressMonitor, see this function's own history above for exactly why
-            // not) gives a real per-file count from the very first tick.
-            data class FileEntry(val file: File, val entryPathInZip: String)
-            val fileEntries = mutableListOf<FileEntry>()
-            // A folder that turns out to be wholly empty (or contains only empty subfolders) has
-            // no file for addFile() to represent at all — addFolder() is the only way to still
-            // preserve that (empty) structure in the archive, so those fall back to it, one
-            // opaque-but-cheap call each.
-            val emptyFolderFallbacks = mutableListOf<File>()
-
-            fun collectFiles(dir: File, entryPrefix: String) {
-                val children = dir.listFiles() ?: return
-                for (child in children) {
-                    val childEntryPath = "$entryPrefix/${child.name}"
-                    if (child.isDirectory) {
-                        collectFiles(child, childEntryPath)
-                    } else if (child.isFile) {
-                        fileEntries.add(FileEntry(child, childEntryPath))
-                    }
-                }
+            if (targetArchivePath.endsWith(".7z", ignoreCase = true)) {
+                compress7z(sourcePaths, targetArchivePath, onProgress)
+            } else {
+                compressZip(sourcePaths, targetArchivePath, onProgress)
             }
-
-            for (path in sourcePaths) {
-                val f = File(path)
-                when {
-                    f.isDirectory -> {
-                        val before = fileEntries.size
-                        collectFiles(f, f.name)
-                        if (fileEntries.size == before) emptyFolderFallbacks.add(f)
-                    }
-                    f.isFile -> fileEntries.add(FileEntry(f, f.name))
-                }
-            }
-
-            val total = fileEntries.size + emptyFolderFallbacks.size
-            var current = 0
-            for (entry in fileEntries) {
-                currentCoroutineContext().ensureActive()
-                current++
-                onProgress?.invoke(entry.file.name, current, total)
-                val params = net.lingala.zip4j.model.ZipParameters().apply { fileNameInZip = entry.entryPathInZip }
-                zipFile.addFile(entry.file, params)
-            }
-            for (emptyFolder in emptyFolderFallbacks) {
-                currentCoroutineContext().ensureActive()
-                current++
-                onProgress?.invoke(emptyFolder.name, current, total)
-                zipFile.addFolder(emptyFolder)
-            }
-            val created = File(targetZipPath)
-            val item = FileItem(
-                id = created.absolutePath,
-                name = created.name,
-                path = created.absolutePath,
-                size = created.length(),
-                lastModified = created.lastModified(),
-                isDirectory = false,
-                extension = "zip"
-            )
-            Result.success(item)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Result.failure(e)
         }
     }
 
-    suspend fun extractZip(zipFilePath: String, targetDir: String): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun zipFiles(
+        sourcePaths: List<String>,
+        targetZipPath: String,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<FileItem> = compressFiles(sourcePaths, targetZipPath, onProgress)
+
+    private suspend fun compressZip(
+        sourcePaths: List<String>,
+        targetZipPath: String,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)?
+    ): Result<FileItem> {
+        val targetFile = File(targetZipPath)
+        targetFile.parentFile?.mkdirs()
+        if (targetFile.exists()) targetFile.delete()
+
+        data class FileEntry(val file: File, val entryPathInZip: String)
+        val fileEntries = mutableListOf<FileEntry>()
+        val emptyFolderFallbacks = mutableListOf<File>()
+
+        fun collectFiles(dir: File, entryPrefix: String) {
+            val children = dir.listFiles() ?: return
+            for (child in children) {
+                val childEntryPath = "$entryPrefix/${child.name}"
+                if (child.isDirectory) {
+                    collectFiles(child, childEntryPath)
+                } else if (child.isFile) {
+                    fileEntries.add(FileEntry(child, childEntryPath))
+                }
+            }
+        }
+
+        for (path in sourcePaths) {
+            val f = File(path)
+            when {
+                f.isDirectory -> {
+                    val before = fileEntries.size
+                    collectFiles(f, f.name)
+                    if (fileEntries.size == before) emptyFolderFallbacks.add(f)
+                }
+                f.isFile -> fileEntries.add(FileEntry(f, f.name))
+            }
+        }
+
+        val totalFiles = fileEntries.size
+        val totalBytes = fileEntries.sumOf { it.file.length() }
+        var currentFileIndex = 0
+        var bytesProcessed = 0L
+        var lastEmitTime = 0L
+
+        if (fileEntries.isNotEmpty()) {
+            onProgress?.invoke(fileEntries.first().file.name, 0, totalFiles, 0L, totalBytes)
+        }
+
+        val fos = FileOutputStream(targetFile)
+        val zos = net.lingala.zip4j.io.outputstream.ZipOutputStream(fos)
         try {
-            val zipFile = ZipFile(zipFilePath)
-            zipFile.extractAll(targetDir)
-            Result.success(Unit)
+            val buffer = ByteArray(64 * 1024)
+            for (entry in fileEntries) {
+                currentCoroutineContext().ensureActive()
+                currentFileIndex++
+                val params = net.lingala.zip4j.model.ZipParameters().apply {
+                    fileNameInZip = entry.entryPathInZip
+                }
+                zos.putNextEntry(params)
+                entry.file.inputStream().buffered(64 * 1024).use { input ->
+                    var count: Int
+                    while (input.read(buffer).also { count = it } != -1) {
+                        currentCoroutineContext().ensureActive()
+                        zos.write(buffer, 0, count)
+                        bytesProcessed += count
+                        val now = System.currentTimeMillis()
+                        if (now - lastEmitTime >= 100 || bytesProcessed == totalBytes) {
+                            lastEmitTime = now
+                            onProgress?.invoke(entry.file.name, currentFileIndex, totalFiles, bytesProcessed, totalBytes)
+                        }
+                    }
+                }
+                zos.closeEntry()
+            }
+            for (emptyFolder in emptyFolderFallbacks) {
+                currentCoroutineContext().ensureActive()
+                val folderPath = if (emptyFolder.name.endsWith("/")) emptyFolder.name else "${emptyFolder.name}/"
+                val params = net.lingala.zip4j.model.ZipParameters().apply {
+                    fileNameInZip = folderPath
+                }
+                zos.putNextEntry(params)
+                zos.closeEntry()
+            }
+            zos.close()
+            fos.close()
+        } catch (e: Exception) {
+            try { zos.close() } catch (_: Throwable) {}
+            try { fos.close() } catch (_: Throwable) {}
+            if (targetFile.exists()) targetFile.delete()
+            throw e
+        }
+
+        val item = FileItem(
+            id = targetFile.absolutePath,
+            name = targetFile.name,
+            path = targetFile.absolutePath,
+            size = targetFile.length(),
+            lastModified = targetFile.lastModified(),
+            isDirectory = false,
+            extension = "zip"
+        )
+        return Result.success(item)
+    }
+
+    private suspend fun compress7z(
+        sourcePaths: List<String>,
+        target7zPath: String,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)?
+    ): Result<FileItem> {
+        val targetFile = File(target7zPath)
+        targetFile.parentFile?.mkdirs()
+        if (targetFile.exists()) targetFile.delete()
+
+        data class FileEntry7z(val file: File, val entryPath: String, val isDirectory: Boolean)
+        val entries = mutableListOf<FileEntry7z>()
+
+        fun collectFiles(dir: File, entryPrefix: String) {
+            entries.add(FileEntry7z(dir, entryPrefix, true))
+            val children = dir.listFiles() ?: return
+            for (child in children) {
+                val childEntryPath = "$entryPrefix/${child.name}"
+                if (child.isDirectory) {
+                    collectFiles(child, childEntryPath)
+                } else if (child.isFile) {
+                    entries.add(FileEntry7z(child, childEntryPath, false))
+                }
+            }
+        }
+
+        for (path in sourcePaths) {
+            val f = File(path)
+            when {
+                f.isDirectory -> collectFiles(f, f.name)
+                f.isFile -> entries.add(FileEntry7z(f, f.name, false))
+            }
+        }
+
+        val fileEntries = entries.filter { !it.isDirectory }
+        val totalFiles = fileEntries.size
+        val totalBytes = fileEntries.sumOf { it.file.length() }
+        var currentFileIndex = 0
+        var bytesProcessed = 0L
+        var lastEmitTime = 0L
+
+        if (fileEntries.isNotEmpty()) {
+            onProgress?.invoke(fileEntries.first().file.name, 0, totalFiles, 0L, totalBytes)
+        }
+
+        val sevenZOutput = SevenZOutputFile(targetFile)
+        try {
+            sevenZOutput.setContentCompression(SevenZMethod.LZMA2)
+            val buffer = ByteArray(64 * 1024)
+
+            for (item in entries) {
+                currentCoroutineContext().ensureActive()
+
+                val archiveEntry = sevenZOutput.createArchiveEntry(item.file, item.entryPath)
+                archiveEntry.isDirectory = item.isDirectory
+                sevenZOutput.putArchiveEntry(archiveEntry)
+
+                if (!item.isDirectory) {
+                    currentFileIndex++
+                    item.file.inputStream().buffered(64 * 1024).use { input ->
+                        var count: Int
+                        while (input.read(buffer).also { count = it } != -1) {
+                            currentCoroutineContext().ensureActive()
+                            sevenZOutput.write(buffer, 0, count)
+                            bytesProcessed += count
+                            val now = System.currentTimeMillis()
+                            if (now - lastEmitTime >= 100 || bytesProcessed == totalBytes) {
+                                lastEmitTime = now
+                                onProgress?.invoke(item.file.name, currentFileIndex, totalFiles, bytesProcessed, totalBytes)
+                            }
+                        }
+                    }
+                }
+                sevenZOutput.closeArchiveEntry()
+            }
+            sevenZOutput.close()
+        } catch (e: Exception) {
+            try { sevenZOutput.close() } catch (_: Throwable) {}
+            if (targetFile.exists()) targetFile.delete()
+            throw e
+        }
+
+        val item = FileItem(
+            id = targetFile.absolutePath,
+            name = targetFile.name,
+            path = targetFile.absolutePath,
+            size = targetFile.length(),
+            lastModified = targetFile.lastModified(),
+            isDirectory = false,
+            extension = "7z"
+        )
+        return Result.success(item)
+    }
+
+    fun isArchiveEncrypted(archiveFilePath: String): Boolean {
+        val file = File(archiveFilePath)
+        if (!file.exists() || !file.isFile) return false
+        val ext = file.extension.lowercase(Locale.ROOT)
+        return try {
+            when (ext) {
+                "7z" -> {
+                    try {
+                        SevenZFile(file).use { sz ->
+                            var entry = sz.nextEntry
+                            while (entry != null) {
+                                if (!entry.isDirectory && entry.hasStream()) {
+                                    val buf = ByteArray(1)
+                                    sz.read(buf)
+                                    return false
+                                }
+                                entry = sz.nextEntry
+                            }
+                            false
+                        }
+                    } catch (e: org.apache.commons.compress.PasswordRequiredException) {
+                        true
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+                "rar" -> {
+                    try {
+                        Archive(file).use { it.isEncrypted || it.isPasswordProtected }
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+                "zip" -> {
+                    try {
+                        ZipFile(file).isEncrypted
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+                else -> false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun validateArchivePassword(archiveFile: File, password: String?) {
+        if (!archiveFile.exists() || !archiveFile.isFile) return
+        val ext = archiveFile.extension.lowercase(Locale.ROOT)
+        when (ext) {
+            "7z" -> {
+                val passwordChars = if (password.isNullOrEmpty()) null else password.toCharArray()
+                val sevenZFile = try {
+                    SevenZFile(archiveFile, passwordChars)
+                } catch (e: org.apache.commons.compress.PasswordRequiredException) {
+                    throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                } catch (e: IOException) {
+                    if (passwordChars != null) {
+                        throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                    }
+                    throw e
+                }
+
+                sevenZFile.use { archive ->
+                    try {
+                        var entry = archive.nextEntry
+                        while (entry != null) {
+                            if (!entry.isDirectory && entry.hasStream()) {
+                                val buf = ByteArray(32)
+                                val count = archive.read(buf)
+                                if (count != -1) {
+                                    break
+                                }
+                            }
+                            entry = archive.nextEntry
+                        }
+                    } catch (e: org.apache.commons.compress.PasswordRequiredException) {
+                        throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                    } catch (e: IOException) {
+                        if (passwordChars != null) {
+                            throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                        }
+                        throw e
+                    }
+                }
+            }
+            "rar" -> {
+                val archive = try {
+                    if (!password.isNullOrEmpty()) {
+                        Archive(archiveFile, password)
+                    } else {
+                        Archive(archiveFile)
+                    }
+                } catch (e: Exception) {
+                    val msg = e.message?.lowercase(Locale.ROOT) ?: ""
+                    if (msg.contains("password") || msg.contains("encrypted") || msg.contains("header")) {
+                        if (password.isNullOrEmpty()) {
+                            throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                        } else {
+                            throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                        }
+                    }
+                    throw e
+                }
+                archive.use { arc ->
+                    if ((arc.isEncrypted || arc.isPasswordProtected) && password.isNullOrEmpty()) {
+                        throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                    }
+                    val testHeader = arc.fileHeaders?.firstOrNull { !it.isDirectory && it.unpSize > 0 }
+                        ?: arc.fileHeaders?.firstOrNull { !it.isDirectory }
+                    if (testHeader != null && (!password.isNullOrEmpty() || arc.isEncrypted || arc.isPasswordProtected)) {
+                        try {
+                            val dummyOut = object : java.io.OutputStream() {
+                                override fun write(b: Int) {}
+                                override fun write(b: ByteArray, off: Int, len: Int) {}
+                            }
+                            arc.extractFile(testHeader, dummyOut)
+                        } catch (e: Exception) {
+                            if (e is ArchivePasswordRequiredException) throw e
+                            val msg = e.message?.lowercase(Locale.ROOT) ?: ""
+                            if (msg.contains("password") || msg.contains("encrypted") || msg.contains("header") || msg.contains("crc") || msg.contains("corrupt")) {
+                                if (password.isNullOrEmpty()) {
+                                    throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                                } else {
+                                    throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                                }
+                            }
+                            throw e
+                        }
+                    }
+                }
+            }
+            else -> {
+                val zipFile = ZipFile(archiveFile)
+                if (zipFile.isEncrypted) {
+                    if (password.isNullOrEmpty()) {
+                        throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                    }
+                    zipFile.setPassword(password.toCharArray())
+                }
+                val headers = try {
+                    zipFile.fileHeaders ?: emptyList()
+                } catch (e: ZipException) {
+                    if (e.type == ZipException.Type.WRONG_PASSWORD || e.message?.contains("password", ignoreCase = true) == true) {
+                        throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                    }
+                    throw e
+                }
+                val testHeader = headers.firstOrNull { !it.isDirectory && it.uncompressedSize > 0 }
+                    ?: headers.firstOrNull { !it.isDirectory }
+                if (testHeader != null && (testHeader.isEncrypted || zipFile.isEncrypted)) {
+                    try {
+                        zipFile.getInputStream(testHeader).use { stream ->
+                            val buf = ByteArray(32)
+                            stream.read(buf)
+                        }
+                    } catch (e: ZipException) {
+                        if (e.type == ZipException.Type.WRONG_PASSWORD ||
+                            e.message?.contains("password", ignoreCase = true) == true ||
+                            e.message?.contains("checksum", ignoreCase = true) == true ||
+                            e.message?.contains("crc", ignoreCase = true) == true
+                        ) {
+                            throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                        }
+                        throw e
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun getArchiveConflicts(
+        archiveFilePath: String,
+        targetDir: String,
+        password: String? = null
+    ): List<com.antigravity.filemanager.domain.model.OverwriteConflict> = withContext(Dispatchers.IO) {
+        val archiveFile = File(archiveFilePath)
+        if (!archiveFile.exists()) return@withContext emptyList()
+        // Pre-validate password first so invalid password triggers immediately without creating any conflict/extract state
+        validateArchivePassword(archiveFile, password)
+
+        val ext = archiveFile.extension.lowercase(Locale.ROOT)
+        val destDir = File(targetDir)
+        val targetCanonical = destDir.canonicalPath
+
+        when (ext) {
+            "7z" -> {
+                val passwordChars = if (password.isNullOrEmpty()) null else password.toCharArray()
+                val sevenZFile = try {
+                    SevenZFile(archiveFile, passwordChars)
+                } catch (e: org.apache.commons.compress.PasswordRequiredException) {
+                    throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                } catch (e: IOException) {
+                    if (passwordChars != null) {
+                        throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                    }
+                    throw e
+                }
+                sevenZFile.use { archive ->
+                    val conflicts = mutableListOf<com.antigravity.filemanager.domain.model.OverwriteConflict>()
+                    for (entry in archive.entries) {
+                        if (entry.isDirectory) continue
+                        val normName = entry.name.replace('\\', '/').trimStart('/')
+                        val destFile = File(destDir, normName)
+                        if (!destFile.canonicalPath.startsWith(targetCanonical + File.separator) && destFile.canonicalPath != targetCanonical) {
+                            continue
+                        }
+                        if (destFile.exists()) {
+                            conflicts.add(
+                                com.antigravity.filemanager.domain.model.OverwriteConflict(
+                                    name = normName,
+                                    existingSize = destFile.length(),
+                                    newSize = entry.size,
+                                    isDirectory = false
+                                )
+                            )
+                        }
+                    }
+                    conflicts
+                }
+            }
+            "rar" -> {
+                val arc = try {
+                    if (!password.isNullOrEmpty()) {
+                        Archive(archiveFile, password)
+                    } else {
+                        Archive(archiveFile)
+                    }
+                } catch (e: Exception) {
+                    val msg = e.message?.lowercase(Locale.ROOT) ?: ""
+                    if (msg.contains("password") || msg.contains("encrypted") || msg.contains("header")) {
+                        if (password.isNullOrEmpty()) {
+                            throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                        } else {
+                            throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                        }
+                    }
+                    throw e
+                }
+                arc.use { archive ->
+                    if ((archive.isEncrypted || archive.isPasswordProtected) && password.isNullOrEmpty()) {
+                        throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                    }
+                    val conflicts = mutableListOf<com.antigravity.filemanager.domain.model.OverwriteConflict>()
+                    val headers = archive.fileHeaders ?: emptyList()
+                    for (header in headers) {
+                        if (header.isDirectory) continue
+                        val normName = header.fileName.replace('\\', '/').trimStart('/')
+                        val destFile = File(destDir, normName)
+                        if (!destFile.canonicalPath.startsWith(targetCanonical + File.separator) && destFile.canonicalPath != targetCanonical) {
+                            continue
+                        }
+                        if (destFile.exists()) {
+                            conflicts.add(
+                                com.antigravity.filemanager.domain.model.OverwriteConflict(
+                                    name = normName,
+                                    existingSize = destFile.length(),
+                                    newSize = header.unpSize,
+                                    isDirectory = false
+                                )
+                            )
+                        }
+                    }
+                    conflicts
+                }
+            }
+            else -> {
+                val zipFile = ZipFile(archiveFile)
+                if (zipFile.isEncrypted) {
+                    if (password.isNullOrEmpty()) {
+                        throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                    }
+                    zipFile.setPassword(password.toCharArray())
+                }
+                val conflicts = mutableListOf<com.antigravity.filemanager.domain.model.OverwriteConflict>()
+                val headers = try {
+                    zipFile.fileHeaders ?: emptyList()
+                } catch (e: ZipException) {
+                    if (e.type == ZipException.Type.WRONG_PASSWORD || e.message?.contains("password", ignoreCase = true) == true) {
+                        throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                    }
+                    throw e
+                }
+                for (header in headers) {
+                    if (header.isDirectory) continue
+                    val normName = header.fileName.replace('\\', '/').trimStart('/')
+                    val destFile = File(destDir, normName)
+                    if (!destFile.canonicalPath.startsWith(targetCanonical + File.separator) && destFile.canonicalPath != targetCanonical) {
+                        continue
+                    }
+                    if (destFile.exists()) {
+                        conflicts.add(
+                            com.antigravity.filemanager.domain.model.OverwriteConflict(
+                                name = normName,
+                                existingSize = destFile.length(),
+                                newSize = header.uncompressedSize,
+                                isDirectory = false
+                            )
+                        )
+                    }
+                }
+                conflicts
+            }
+        }
+    }
+
+    suspend fun extractArchive(
+        archiveFilePath: String,
+        targetDir: String,
+        password: String? = null,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onProgress: ((currentEntry: String, currentIndex: Int, totalEntries: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<com.antigravity.filemanager.domain.model.ExtractResult> = withContext(Dispatchers.IO) {
+        try {
+            val archiveFile = File(archiveFilePath)
+            // Pre-validate password first before touching target filesystem!
+            validateArchivePassword(archiveFile, password)
+
+            val ext = archiveFile.extension.lowercase(Locale.ROOT)
+            val destDir = File(targetDir)
+            if (!destDir.exists()) destDir.mkdirs()
+
+            when (ext) {
+                "7z" -> extract7z(archiveFile, destDir, password, overwriteNames, skipNames, onProgress)
+                "rar" -> extractRar(archiveFile, destDir, password, overwriteNames, skipNames, onProgress)
+                else -> extractZipInternal(archiveFile, targetDir, password, overwriteNames, skipNames, onProgress)
+            }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Result.failure(e)
+        }
+    }
+
+    suspend fun extractZip(zipFilePath: String, targetDir: String): Result<com.antigravity.filemanager.domain.model.ExtractResult> =
+        extractArchive(zipFilePath, targetDir, null)
+
+    private suspend fun extract7z(
+        archiveFile: File,
+        targetDir: File,
+        password: String?,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onProgress: ((currentEntry: String, currentIndex: Int, totalEntries: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<com.antigravity.filemanager.domain.model.ExtractResult> {
+        val targetCanonical = targetDir.canonicalPath
+        val passwordChars = if (password.isNullOrEmpty()) null else password.toCharArray()
+
+        val sevenZFile = try {
+            SevenZFile(archiveFile, passwordChars)
+        } catch (e: org.apache.commons.compress.PasswordRequiredException) {
+            throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+        } catch (e: IOException) {
+            if (passwordChars != null) {
+                throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+            }
+            throw e
+        }
+
+        val createdFiles = mutableListOf<File>()
+        try {
+            sevenZFile.use { archive ->
+                val fileEntries = archive.entries.filter { !it.isDirectory }
+                val totalEntries = fileEntries.size
+                val totalBytes = fileEntries.sumOf { it.size }
+                var currentIndex = 0
+                var bytesProcessed = 0L
+                var lastProgressTime = 0L
+                var extractedCount = 0
+                var skippedCount = 0
+
+                onProgress?.invoke("", 0, totalEntries, 0L, totalBytes)
+
+                val buffer = ByteArray(64 * 1024)
+                var entry = archive.nextEntry
+                while (entry != null) {
+                    currentCoroutineContext().ensureActive()
+                    val normName = entry.name.replace('\\', '/').trimStart('/')
+                    val defaultDestFile = File(targetDir, normName)
+                    // Zip-Slip protection
+                    if (!defaultDestFile.canonicalPath.startsWith(targetCanonical + File.separator) && defaultDestFile.canonicalPath != targetCanonical) {
+                        throw SecurityException("Zip Slip detected in archive: ${entry.name}")
+                    }
+
+                    if (entry.isDirectory) {
+                        if (!defaultDestFile.exists()) {
+                            defaultDestFile.mkdirs()
+                            createdFiles.add(defaultDestFile)
+                        }
+                    } else {
+                        if (normName in skipNames) {
+                            skippedCount++
+                            currentIndex++
+                            bytesProcessed += entry.size
+                            onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
+                            entry = archive.nextEntry
+                            continue
+                        }
+                        currentIndex++
+                        val overwriteThis = normName in overwriteNames
+                        val destFile = if (overwriteThis || !defaultDestFile.exists()) {
+                            defaultDestFile
+                        } else {
+                            val parent = defaultDestFile.parentFile ?: targetDir
+                            uniqueDestination(parent, defaultDestFile.name)
+                        }
+
+                        if (!destFile.exists()) {
+                            createdFiles.add(destFile)
+                        }
+                        destFile.parentFile?.mkdirs()
+                        try {
+                            FileOutputStream(destFile).use { out ->
+                                var count: Int
+                                while (archive.read(buffer).also { count = it } != -1) {
+                                    currentCoroutineContext().ensureActive()
+                                    out.write(buffer, 0, count)
+                                    bytesProcessed += count
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastProgressTime >= 100) {
+                                        lastProgressTime = now
+                                        onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
+                                    }
+                                }
+                            }
+                            extractedCount++
+                            onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
+                        } catch (e: org.apache.commons.compress.PasswordRequiredException) {
+                            if (destFile.exists()) destFile.delete()
+                            throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                        } catch (e: IOException) {
+                            if (destFile.exists()) destFile.delete()
+                            if (passwordChars != null) {
+                                throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                            }
+                            throw e
+                        } catch (t: Throwable) {
+                            if (destFile.exists()) destFile.delete()
+                            throw t
+                        }
+                    }
+                    entry = archive.nextEntry
+                }
+                return Result.success(com.antigravity.filemanager.domain.model.ExtractResult(totalEntries, extractedCount, skippedCount))
+            }
+        } catch (t: Throwable) {
+            for (f in createdFiles) {
+                try {
+                    if (f.exists()) {
+                        if (f.isDirectory) f.deleteRecursively() else f.delete()
+                    }
+                } catch (_: Exception) {}
+            }
+            throw t
+        }
+    }
+
+    private suspend fun extractRar(
+        archiveFile: File,
+        targetDir: File,
+        password: String?,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onProgress: ((currentEntry: String, currentIndex: Int, totalEntries: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<com.antigravity.filemanager.domain.model.ExtractResult> {
+        val job = currentCoroutineContext().job
+        val createdFiles = mutableListOf<File>()
+        try {
+            val targetCanonical = targetDir.canonicalPath
+            val archive = if (!password.isNullOrEmpty()) {
+                Archive(archiveFile, password)
+            } else {
+                Archive(archiveFile)
+            }
+            archive.use { arc ->
+                if ((arc.isEncrypted || arc.isPasswordProtected) && password.isNullOrEmpty()) {
+                    throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                }
+                val allHeaders = arc.fileHeaders ?: emptyList()
+                val fileHeaders = allHeaders.filter { !it.isDirectory }
+                val totalEntries = fileHeaders.size
+                val totalBytes = fileHeaders.sumOf { it.unpSize }
+                var currentIndex = 0
+                var bytesProcessed = 0L
+                var lastProgressTime = 0L
+                var extractedCount = 0
+                var skippedCount = 0
+
+                onProgress?.invoke("", 0, totalEntries, 0L, totalBytes)
+
+                for (header in allHeaders) {
+                    job.ensureActive()
+                    val normName = header.fileName.replace('\\', '/').trimStart('/')
+                    val defaultDestFile = File(targetDir, normName)
+                    if (!defaultDestFile.canonicalPath.startsWith(targetCanonical + File.separator) && defaultDestFile.canonicalPath != targetCanonical) {
+                        throw SecurityException("Zip Slip detected in archive: ${header.fileName}")
+                    }
+
+                    if (header.isDirectory) {
+                        if (!defaultDestFile.exists()) {
+                            defaultDestFile.mkdirs()
+                            createdFiles.add(defaultDestFile)
+                        }
+                    } else {
+                        if (normName in skipNames) {
+                            skippedCount++
+                            currentIndex++
+                            bytesProcessed += header.unpSize
+                            onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
+                            continue
+                        }
+                        currentIndex++
+                        val overwriteThis = normName in overwriteNames
+                        val destFile = if (overwriteThis || !defaultDestFile.exists()) {
+                            defaultDestFile
+                        } else {
+                            val parent = defaultDestFile.parentFile ?: targetDir
+                            uniqueDestination(parent, defaultDestFile.name)
+                        }
+                        if (!destFile.exists()) {
+                            createdFiles.add(destFile)
+                        }
+                        destFile.parentFile?.mkdirs()
+                        try {
+                            val countingOut = object : java.io.OutputStream() {
+                                private val fos = FileOutputStream(destFile)
+                                override fun write(b: Int) {
+                                    job.ensureActive()
+                                    fos.write(b)
+                                    bytesProcessed++
+                                    notifyProgress()
+                                }
+                                override fun write(b: ByteArray, off: Int, len: Int) {
+                                    job.ensureActive()
+                                    fos.write(b, off, len)
+                                    bytesProcessed += len
+                                    notifyProgress()
+                                }
+                                private fun notifyProgress() {
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastProgressTime >= 100) {
+                                        lastProgressTime = now
+                                        onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
+                                    }
+                                }
+                                override fun flush() = fos.flush()
+                                override fun close() = fos.close()
+                            }
+                            countingOut.use { out ->
+                                arc.extractFile(header, out)
+                            }
+                            extractedCount++
+                            onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
+                        } catch (t: Throwable) {
+                            if (destFile.exists()) destFile.delete()
+                            throw t
+                        }
+                    }
+                }
+                return Result.success(com.antigravity.filemanager.domain.model.ExtractResult(totalEntries, extractedCount, skippedCount))
+            }
+        } catch (e: Throwable) {
+            for (f in createdFiles) {
+                try {
+                    if (f.exists()) {
+                        if (f.isDirectory) f.deleteRecursively() else f.delete()
+                    }
+                } catch (_: Exception) {}
+            }
+            if (e is ArchivePasswordRequiredException || e is ArchiveInvalidPasswordException) throw e
+            val msg = e.message?.lowercase(Locale.ROOT) ?: ""
+            if (msg.contains("password") || msg.contains("encrypted") || msg.contains("header") || msg.contains("crc") || msg.contains("corrupt")) {
+                if (password.isNullOrEmpty()) {
+                    throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+                } else {
+                    throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                }
+            }
+            throw e
+        }
+    }
+
+    private suspend fun extractZipInternal(
+        archiveFile: File,
+        targetDir: String,
+        password: String?,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onProgress: ((currentEntry: String, currentIndex: Int, totalEntries: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<com.antigravity.filemanager.domain.model.ExtractResult> {
+        val zipFile = ZipFile(archiveFile)
+        if (zipFile.isEncrypted) {
+            if (password.isNullOrEmpty()) {
+                throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+            }
+            zipFile.setPassword(password.toCharArray())
+        }
+        val createdFiles = mutableListOf<File>()
+        try {
+            val destDir = File(targetDir)
+            val targetCanonical = destDir.canonicalPath
+            val allHeaders = zipFile.fileHeaders ?: emptyList()
+            val fileHeaders = allHeaders.filter { !it.isDirectory }
+            val totalEntries = fileHeaders.size
+            val totalBytes = fileHeaders.sumOf { it.uncompressedSize }
+            var currentIndex = 0
+            var bytesProcessed = 0L
+            var lastProgressTime = 0L
+            var extractedCount = 0
+            var skippedCount = 0
+
+            onProgress?.invoke("", 0, totalEntries, 0L, totalBytes)
+
+            val buffer = ByteArray(64 * 1024)
+            for (header in allHeaders) {
+                val normName = header.fileName.replace('\\', '/').trimStart('/')
+                val defaultDestFile = File(destDir, normName)
+                if (!defaultDestFile.canonicalPath.startsWith(targetCanonical + File.separator) && defaultDestFile.canonicalPath != targetCanonical) {
+                    throw SecurityException("Zip Slip detected in archive: ${header.fileName}")
+                }
+
+                if (header.isDirectory) {
+                    if (!defaultDestFile.exists()) {
+                        defaultDestFile.mkdirs()
+                        createdFiles.add(defaultDestFile)
+                    }
+                } else {
+                    if (normName in skipNames) {
+                        skippedCount++
+                        currentIndex++
+                        bytesProcessed += header.uncompressedSize
+                        onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
+                        continue
+                    }
+                    currentIndex++
+                    val overwriteThis = normName in overwriteNames
+                    val destFile = if (overwriteThis || !defaultDestFile.exists()) {
+                        defaultDestFile
+                    } else {
+                        val parent = defaultDestFile.parentFile ?: destDir
+                        uniqueDestination(parent, defaultDestFile.name)
+                    }
+                    if (!destFile.exists()) {
+                        createdFiles.add(destFile)
+                    }
+                    destFile.parentFile?.mkdirs()
+                    try {
+                        zipFile.getInputStream(header).use { inStream ->
+                            FileOutputStream(destFile).use { outStream ->
+                                var count: Int
+                                while (inStream.read(buffer).also { count = it } != -1) {
+                                    currentCoroutineContext().ensureActive()
+                                    outStream.write(buffer, 0, count)
+                                    bytesProcessed += count
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastProgressTime >= 100) {
+                                        lastProgressTime = now
+                                        onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
+                                    }
+                                }
+                            }
+                        }
+                        extractedCount++
+                        onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
+                    } catch (e: ZipException) {
+                        if (destFile.exists()) destFile.delete()
+                        if (e.type == ZipException.Type.WRONG_PASSWORD || e.message?.contains("password", ignoreCase = true) == true) {
+                            throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                        }
+                        throw e
+                    } catch (t: Throwable) {
+                        if (destFile.exists()) destFile.delete()
+                        throw t
+                    }
+                }
+            }
+            return Result.success(com.antigravity.filemanager.domain.model.ExtractResult(totalEntries, extractedCount, skippedCount))
+        } catch (t: Throwable) {
+            for (f in createdFiles) {
+                try {
+                    if (f.exists()) {
+                        if (f.isDirectory) f.deleteRecursively() else f.delete()
+                    }
+                } catch (_: Exception) {}
+            }
+            if (t is ZipException) {
+                if (t.type == ZipException.Type.WRONG_PASSWORD || t.message?.contains("password", ignoreCase = true) == true) {
+                    throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+                }
+            }
+            throw t
         }
     }
 }

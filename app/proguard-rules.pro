@@ -48,9 +48,15 @@
 -dontwarn org.apache.mina.**
 -dontwarn org.slf4j.**
 
-# --- zip4j ---
+# --- Archive Management (Zip, 7z, RAR) ---
 -keep class net.lingala.zip4j.** { *; }
 -dontwarn net.lingala.zip4j.**
+-keep class org.apache.commons.compress.** { *; }
+-dontwarn org.apache.commons.compress.**
+-keep class org.tukaani.xz.** { *; }
+-dontwarn org.tukaani.xz.**
+-keep class com.github.junrar.** { *; }
+-dontwarn com.github.junrar.**
 
 # --- NanoHTTPD ---
 -keep class fi.iki.elonen.** { *; }

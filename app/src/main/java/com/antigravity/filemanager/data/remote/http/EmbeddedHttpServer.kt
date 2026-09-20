@@ -65,6 +65,33 @@ class EmbeddedHttpServer @Inject constructor(
 
         private val storageRoot: File = Environment.getExternalStorageDirectory()
 
+        private val systemFolderNames = setOf(
+            "android",
+            "lost.dir",
+            "system volume information",
+            "\$recycle.bin",
+            "__macosx"
+        )
+
+        private fun isSystemOrHiddenName(name: String, isDirectory: Boolean = false): Boolean {
+            if (name.startsWith(".")) return true
+            if (isDirectory && name.lowercase(java.util.Locale.ROOT) in systemFolderNames) return true
+            return false
+        }
+
+        private fun isSystemOrHidden(file: File): Boolean {
+            return isSystemOrHiddenName(file.name, file.isDirectory)
+        }
+
+        private fun isInsideSystemOrHiddenFolder(file: File): Boolean {
+            var curr: File? = file
+            while (curr != null && curr.canonicalPath != storageRoot.canonicalPath) {
+                if (isSystemOrHidden(curr)) return true
+                curr = curr.parentFile
+            }
+            return false
+        }
+
         override fun serve(session: IHTTPSession): Response {
             val method = session.method
             val uri = session.uri
@@ -128,10 +155,17 @@ class EmbeddedHttpServer @Inject constructor(
                 )
             }
 
+            if (targetDir != storageRoot && isInsideSystemOrHiddenFolder(targetDir)) {
+                return addCorsHeaders(
+                    newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Access to system directory is restricted\"}")
+                )
+            }
+
             val rawFiles = targetDir.listFiles() ?: emptyArray()
-            val sorted = rawFiles.sortedWith(
+            val visibleFiles = rawFiles.filterNot { isSystemOrHidden(it) }
+            val sorted = visibleFiles.sortedWith(
                 compareBy<File> { !it.isDirectory }
-                    .thenBy { it.name.lowercase() }
+                    .thenBy { it.name.lowercase(java.util.Locale.ROOT) }
             )
 
             val jsonArray = JSONArray()
@@ -172,6 +206,12 @@ class EmbeddedHttpServer @Inject constructor(
                 )
             }
 
+            if (targetDir != storageRoot && isInsideSystemOrHiddenFolder(targetDir)) {
+                return addCorsHeaders(
+                    newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Access to system directory is restricted\"}")
+                )
+            }
+
             if (query.isEmpty()) {
                 return handleList(session)
             }
@@ -185,10 +225,11 @@ class EmbeddedHttpServer @Inject constructor(
                 val files = dir.listFiles() ?: return
                 val sortedFiles = files.sortedWith(
                     compareBy<File> { !it.isDirectory }
-                        .thenBy { it.name.lowercase() }
+                        .thenBy { it.name.lowercase(java.util.Locale.ROOT) }
                 )
                 for (f in sortedFiles) {
                     if (count >= maxResults) break
+                    if (isSystemOrHidden(f)) continue
                     val childRel = if (currentRel.isEmpty()) f.name else "$currentRel/${f.name}"
                     if (f.name.contains(query, ignoreCase = true)) {
                         val obj = JSONObject().apply {
@@ -201,7 +242,7 @@ class EmbeddedHttpServer @Inject constructor(
                         jsonArray.put(obj)
                         count++
                     }
-                    if (f.isDirectory && !f.name.startsWith(".")) {
+                    if (f.isDirectory) {
                         walk(f, childRel)
                     }
                 }
@@ -235,9 +276,15 @@ class EmbeddedHttpServer @Inject constructor(
                 )
             }
 
+            if (targetFile != storageRoot && isInsideSystemOrHiddenFolder(targetFile)) {
+                return addCorsHeaders(
+                    newFixedLengthResponse(Response.Status.FORBIDDEN, "text/plain", "Access to system files or folders is restricted")
+                )
+            }
+
             if (targetFile.isDirectory) {
                 val rawName = if (relPath.isEmpty() || targetFile == storageRoot) "Storage" else targetFile.name
-                val cleanName = rawName.replace("\"", "").replace("'", "").trim().ifEmpty { "folder" }
+                val cleanName = rawName.replace("\"", "").replace("\\", "").trim().ifEmpty { "folder" }
                 val zipName = "$cleanName.zip"
 
                 val pos = PipedOutputStream()
@@ -249,7 +296,7 @@ class EmbeddedHttpServer @Inject constructor(
                             fun addDirToZip(dir: File, basePath: String) {
                                 val files = dir.listFiles() ?: return
                                 for (file in files) {
-                                    if (file.name.startsWith(".")) continue
+                                    if (isSystemOrHidden(file)) continue
                                     val entryPath = if (basePath.isEmpty()) file.name else "$basePath/${file.name}"
                                     if (file.isDirectory) {
                                         val zipEntry = ZipEntry("$entryPath/")
@@ -338,13 +385,32 @@ class EmbeddedHttpServer @Inject constructor(
             }
         }
 
+        private fun decodeUrlSafe(value: String): String {
+            return try {
+                java.net.URLDecoder.decode(value, "UTF-8")
+            } catch (e: Exception) {
+                value
+            }
+        }
+
         private fun handleUpload(session: IHTTPSession): Response {
             val relPath = session.parms["path"] ?: ""
             val targetDir = resolveSafeFile(relPath) ?: return addCorsHeaders(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
             )
 
+            if (targetDir != storageRoot && isInsideSystemOrHiddenFolder(targetDir)) {
+                return addCorsHeaders(
+                    newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Upload to system directory is restricted\"}")
+                )
+            }
+
             if (!targetDir.exists()) targetDir.mkdirs()
+
+            // Resolve explicit file name from query parameter or custom header to bypass NanoHTTPD's
+            // multipart regex bug where filenames containing single quotes are truncated (e.g. "Sid Meier's" -> "Sid Meier")
+            val explicitFileName = session.headers["x-file-name"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
+                ?: session.parms["filename"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
 
             val files = HashMap<String, String>()
             session.parseBody(files)
@@ -352,8 +418,16 @@ class EmbeddedHttpServer @Inject constructor(
             val uploadedPaths = mutableListOf<String>()
 
             for ((field, tempFilePath) in files) {
-                val originalFileName = session.parms[field] ?: "upload_${System.currentTimeMillis()}"
-                val safeFileName = File(originalFileName).name
+                val resolvedName = if (!explicitFileName.isNullOrBlank() && (files.size == 1 || field == "file")) {
+                    explicitFileName
+                } else {
+                    session.parms[field]?.takeIf { it.isNotBlank() } ?: explicitFileName ?: "upload_${System.currentTimeMillis()}"
+                }
+                val safeFileName = File(resolvedName).name
+                if (isSystemOrHiddenName(safeFileName, isDirectory = false)) {
+                    File(tempFilePath).delete()
+                    continue
+                }
                 val destFile = File(targetDir, safeFileName)
 
                 val tempFile = File(tempFilePath)
@@ -397,9 +471,23 @@ class EmbeddedHttpServer @Inject constructor(
                 ))
             }
 
+            if (isSystemOrHiddenName(folderName, isDirectory = true)) {
+                return addCorsHeaders(newFixedLengthResponse(
+                    Response.Status.BAD_REQUEST,
+                    "application/json",
+                    "{\"error\":\"Cannot create system or hidden folder\"}"
+                ))
+            }
+
             val parentDir = resolveSafeFile(relPath) ?: return addCorsHeaders(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid parent path\"}")
             )
+
+            if (parentDir != storageRoot && isInsideSystemOrHiddenFolder(parentDir)) {
+                return addCorsHeaders(
+                    newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Cannot create folder inside system directory\"}")
+                )
+            }
 
             val newDir = File(parentDir, folderName)
             val created = newDir.mkdirs()
@@ -417,11 +505,11 @@ class EmbeddedHttpServer @Inject constructor(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
             )
 
-            if (!target.exists() || target.canonicalPath == storageRoot.canonicalPath) {
+            if (!target.exists() || target.canonicalPath == storageRoot.canonicalPath || isInsideSystemOrHiddenFolder(target)) {
                 return addCorsHeaders(newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
-                    "{\"error\":\"Cannot delete root directory or item does not exist\"}"
+                    "{\"error\":\"Cannot delete system folder, hidden item, or root directory\"}"
                 ))
             }
 

@@ -153,13 +153,10 @@ fun StorageFolderBreakdownScreen(
 
     if (showCompressDialog) {
         val singleSelectedName = selectedPaths.singleOrNull()?.let { path -> folderItems.find { it.path == path }?.name }
-        TextInputDialog(
-            title = "Compress to Zip",
-            initialValue = com.antigravity.filemanager.presentation.components.defaultZipFileName(selectedPaths.size, singleSelectedName),
-            confirmButtonText = "COMPRESS",
-            selectNameWithoutExtension = true,
-            onConfirm = { zipName ->
-                viewModel.compress(selectedPaths.toList(), zipName, currentPath) {
+        com.antigravity.filemanager.presentation.components.CompressDialog(
+            initialBaseName = com.antigravity.filemanager.presentation.components.defaultArchiveBaseName(selectedPaths.size, singleSelectedName),
+            onConfirm = { archiveName ->
+                viewModel.compress(selectedPaths.toList(), archiveName, currentPath) {
                     selectedPaths = emptySet()
                 }
                 showCompressDialog = false
@@ -173,6 +170,23 @@ fun StorageFolderBreakdownScreen(
             fileName = File(uiState.pendingOverwriteZipPath!!).name,
             onConfirm = { viewModel.confirmCompressOverwrite() },
             onDismiss = { viewModel.cancelCompressOverwrite() }
+        )
+    }
+
+    if (uiState.pendingPasswordArchive != null) {
+        com.antigravity.filemanager.presentation.components.ArchivePasswordDialog(
+            archivePath = uiState.pendingPasswordArchive!!,
+            errorMessage = uiState.passwordError,
+            onConfirm = { viewModel.submitArchivePassword(it) },
+            onDismiss = { viewModel.dismissPasswordDialog() }
+        )
+    }
+
+    if (uiState.overwriteConflicts.isNotEmpty()) {
+        com.antigravity.filemanager.presentation.components.OverwriteConflictDialog(
+            conflicts = uiState.overwriteConflicts,
+            onConfirm = { overwriteNames, skipNames -> viewModel.resolveOverwriteConflict(overwriteNames, skipNames) },
+            onCancel = { viewModel.cancelOverwriteConflict() }
         )
     }
 

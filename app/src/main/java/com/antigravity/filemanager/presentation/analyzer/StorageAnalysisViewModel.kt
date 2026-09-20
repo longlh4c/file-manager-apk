@@ -8,10 +8,14 @@ import com.antigravity.filemanager.domain.model.StorageCategoryBreakdown
 import com.antigravity.filemanager.domain.model.StorageVolumeInfo
 import com.antigravity.filemanager.domain.usecase.StorageAnalysisUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 import com.antigravity.filemanager.domain.model.Bookmark
@@ -44,7 +48,11 @@ data class StorageAnalysisUiState(
     // so they still refresh even when a mutation only patched `data` in place.
     val mutationTick: Int = 0,
     val transferProgress: CloudTransferProgress? = null,
-    val pendingOverwriteZipPath: String? = null
+    val pendingOverwriteZipPath: String? = null,
+    val pendingPasswordArchive: String? = null,
+    val passwordError: String? = null,
+    val overwriteConflicts: List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList(),
+    val transferCancelledByUser: Boolean = false
 )
 
 @HiltViewModel
@@ -67,9 +75,12 @@ class StorageAnalysisViewModel @Inject constructor(
     }
 
     fun cancelTransfer() {
+        _uiState.value = _uiState.value.copy(
+            transferProgress = null,
+            transferCancelledByUser = true
+        )
         activeTransferJob?.cancel()
         activeTransferJob = null
-        _uiState.value = _uiState.value.copy(transferProgress = null)
     }
 
     private fun observeBookmarks() {
@@ -140,25 +151,27 @@ class StorageAnalysisViewModel @Inject constructor(
 
     private var pendingCompress: Triple<List<String>, String, () -> Unit>? = null
 
-    fun compress(paths: List<String>, zipName: String, targetDir: String, onComplete: () -> Unit = {}) {
-        val name = if (zipName.endsWith(".zip")) zipName else "$zipName.zip"
-        val targetZip = "$targetDir/$name"
-        if (File(targetZip).exists()) {
-            pendingCompress = Triple(paths, targetZip, onComplete)
-            _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = targetZip)
+    fun compress(paths: List<String>, archiveName: String, targetDir: String, onComplete: () -> Unit = {}) {
+        val name = if (archiveName.endsWith(".7z", ignoreCase = true) || archiveName.endsWith(".zip", ignoreCase = true)) {
+            archiveName
+        } else {
+            "$archiveName.zip"
+        }
+        val targetArchive = "$targetDir/$name"
+        if (File(targetArchive).exists()) {
+            pendingCompress = Triple(paths, targetArchive, onComplete)
+            _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = targetArchive)
             return
         }
-        runCompress(paths, targetZip, onComplete)
+        runCompress(paths, targetArchive, onComplete)
     }
 
     fun confirmCompressOverwrite() {
-        val (paths, targetZip, onComplete) = pendingCompress ?: return
+        val (paths, targetArchive, onComplete) = pendingCompress ?: return
         pendingCompress = null
         _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = null)
-        // zip4j appends into an existing archive rather than replacing it — delete the old one
-        // first so "Replace" actually replaces instead of silently merging into stale contents.
-        File(targetZip).delete()
-        runCompress(paths, targetZip, onComplete)
+        File(targetArchive).delete()
+        runCompress(paths, targetArchive, onComplete)
     }
 
     fun cancelCompressOverwrite() {
@@ -166,56 +179,255 @@ class StorageAnalysisViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = null)
     }
 
-    private fun runCompress(paths: List<String>, targetZip: String, onComplete: () -> Unit) {
+    private fun runCompress(paths: List<String>, targetArchive: String, onComplete: () -> Unit) {
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
-            fileOperationsUseCase.zip(paths, targetZip) { currentFile, currentIndex, totalFiles ->
-                _uiState.value = _uiState.value.copy(
-                    transferProgress = CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = "Compressing")
-                )
-            }
-            _uiState.value = _uiState.value.copy(transferProgress = null)
-            // The archive is a single new file — a cheap stat is enough to keep totals
-            // accurate without a full-device rescan (source files are left in place by zip).
-            val zipFile = File(targetZip)
-            if (zipFile.exists()) {
-                val currentData = _uiState.value.data
-                val zipSize = zipFile.length()
-                _uiState.value = _uiState.value.copy(
-                    data = currentData.copy(
-                        volumeInfo = currentData.volumeInfo.copy(
-                            usedBytes = currentData.volumeInfo.usedBytes + zipSize,
-                            freeBytes = (currentData.volumeInfo.freeBytes - zipSize).coerceAtLeast(0L)
+            try {
+                fileOperationsUseCase.compress(paths, targetArchive) { currentFile, currentIndex, totalFiles, bytesProcessed, totalBytes ->
+                    if (!this@launch.isActive || _uiState.value.transferCancelledByUser) return@compress
+                    val p = if (totalBytes > 0L) {
+                        ((bytesProcessed.toDouble() / totalBytes.toDouble()) * 100).toInt().coerceIn(0, 100)
+                    } else if (totalFiles > 0) {
+                        ((currentIndex.toFloat() / totalFiles.toFloat()) * 100).toInt().coerceIn(0, 100)
+                    } else 0
+                    _uiState.value = _uiState.value.copy(
+                        transferProgress = CloudTransferProgress(
+                            currentFileName = currentFile.ifEmpty { File(targetArchive).name },
+                            currentIndex = currentIndex,
+                            totalFiles = totalFiles,
+                            bytesTransferred = bytesProcessed,
+                            totalBytes = totalBytes,
+                            isIndeterminate = false,
+                            isUpload = true,
+                            operationLabel = "Compressing",
+                            percent = p
                         )
-                    ),
-                    mutationTick = _uiState.value.mutationTick + 1
-                )
+                    )
+                }
+                val archiveFile = File(targetArchive)
+                if (archiveFile.exists()) {
+                    val currentData = _uiState.value.data
+                    val archiveSize = archiveFile.length()
+                    _uiState.value = _uiState.value.copy(
+                        data = currentData.copy(
+                            volumeInfo = currentData.volumeInfo.copy(
+                                usedBytes = currentData.volumeInfo.usedBytes + archiveSize,
+                                freeBytes = (currentData.volumeInfo.freeBytes - archiveSize).coerceAtLeast(0L)
+                            )
+                        ),
+                        mutationTick = _uiState.value.mutationTick + 1
+                    )
+                }
+                onComplete()
+            } finally {
+                withContext(NonCancellable) {
+                    _uiState.value = _uiState.value.copy(
+                        transferProgress = null,
+                        transferCancelledByUser = false
+                    )
+                }
             }
-            onComplete()
         }
     }
 
+    private var pendingExtractDir: String? = null
+    private var pendingExtractOnComplete: (() -> Unit)? = null
+    private var pendingOverwriteAction: (suspend (overwriteNames: Set<String>, skipNames: Set<String>) -> Unit)? = null
+
+    fun resolveOverwriteConflict(overwriteNames: Set<String>, skipNames: Set<String>) {
+        val action = pendingOverwriteAction
+        pendingOverwriteAction = null
+        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+        if (action != null) {
+            activeTransferJob?.cancel()
+            activeTransferJob = viewModelScope.launch { action(overwriteNames, skipNames) }
+        }
+    }
+
+    fun cancelOverwriteConflict() {
+        pendingOverwriteAction = null
+        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+    }
+
     fun extract(paths: List<String>, targetDir: String, onComplete: () -> Unit = {}) {
+        if (paths.isEmpty()) return
+        pendingExtractDir = targetDir
+        pendingExtractOnComplete = onComplete
+        if (paths.size == 1 && fileOperationsUseCase.isArchiveEncrypted(paths[0])) {
+            _uiState.value = _uiState.value.copy(
+                pendingPasswordArchive = paths[0],
+                passwordError = null
+            )
+            return
+        }
+        checkExtractConflictsAndRun(paths, targetDir, null, onComplete)
+    }
+
+    private fun checkExtractConflictsAndRun(
+        paths: List<String>,
+        targetDir: String,
+        password: String?,
+        onComplete: () -> Unit
+    ) {
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
-            var anySucceeded = false
-            paths.forEachIndexed { index, p ->
-                val archiveName = File(p).name
-                _uiState.value = _uiState.value.copy(
-                    transferProgress = CloudTransferProgress.forItemCount(archiveName, index + 1, paths.size, isUpload = false, operationLabel = "Extracting")
-                )
-                val res = fileOperationsUseCase.unzip(p, targetDir)
-                if (res.isSuccess) anySucceeded = true
+            val allConflicts = mutableListOf<com.antigravity.filemanager.domain.model.OverwriteConflict>()
+            for (path in paths) {
+                try {
+                    val conflicts = fileOperationsUseCase.getArchiveConflicts(path, targetDir, password)
+                    allConflicts.addAll(conflicts)
+                } catch (e: com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
+                    pendingExtractDir = targetDir
+                    pendingExtractOnComplete = onComplete
+                    _uiState.value = _uiState.value.copy(
+                        transferProgress = null,
+                        pendingPasswordArchive = path,
+                        passwordError = null
+                    )
+                    return@launch
+                } catch (e: com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
+                    pendingExtractDir = targetDir
+                    pendingExtractOnComplete = onComplete
+                    _uiState.value = _uiState.value.copy(
+                        transferProgress = null,
+                        pendingPasswordArchive = path,
+                        passwordError = "Incorrect password. Please try again."
+                    )
+                    return@launch
+                } catch (e: Exception) {
+                    return@launch
+                }
             }
-            _uiState.value = _uiState.value.copy(transferProgress = null)
-            // Extraction can add an unknown number/size of files, so an accurate total
-            // genuinely requires a rescan — but only pay for it if something actually extracted.
-            if (anySucceeded) {
-                loadDataInternal()
-                _uiState.value = _uiState.value.copy(mutationTick = _uiState.value.mutationTick + 1)
+
+            if (allConflicts.isNotEmpty()) {
+                pendingOverwriteAction = { overwriteNames, skipNames ->
+                    runExtract(paths, targetDir, password, overwriteNames, skipNames, onComplete)
+                }
+                _uiState.value = _uiState.value.copy(overwriteConflicts = allConflicts)
+            } else {
+                runExtract(paths, targetDir, password, emptySet(), emptySet(), onComplete)
             }
-            onComplete()
         }
+    }
+
+    private fun runExtract(
+        paths: List<String>,
+        targetDir: String,
+        password: String?,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onComplete: () -> Unit
+    ) {
+        activeTransferJob?.cancel()
+        activeTransferJob = viewModelScope.launch {
+            try {
+                var anySucceeded = false
+                for ((index, p) in paths.withIndex()) {
+                    if (!isActive || _uiState.value.transferCancelledByUser) break
+                    val archiveName = File(p).name
+                    _uiState.value = _uiState.value.copy(
+                        transferProgress = CloudTransferProgress(
+                            currentFileName = archiveName,
+                            currentIndex = index + 1,
+                            totalFiles = paths.size,
+                            isIndeterminate = false,
+                            isUpload = false,
+                            operationLabel = if (paths.size > 1) "Extracting (${index + 1}/${paths.size})" else "Extracting",
+                            percent = 0
+                        )
+                    )
+                    val res = fileOperationsUseCase.extract(
+                        archivePath = p,
+                        targetDir = targetDir,
+                        password = password,
+                        overwriteNames = overwriteNames,
+                        skipNames = skipNames
+                    ) { currentEntry, currentIndex, totalEntries, bytesProcessed, totalBytes ->
+                        if (!this@launch.isActive || _uiState.value.transferCancelledByUser) return@extract
+                        val pPercent = if (totalBytes > 0L) {
+                            ((bytesProcessed.toDouble() / totalBytes.toDouble()) * 100).toInt().coerceIn(0, 100)
+                        } else if (totalEntries > 0) {
+                            ((currentIndex.toFloat() / totalEntries.toFloat()) * 100).toInt().coerceIn(0, 100)
+                        } else 0
+                        _uiState.value = _uiState.value.copy(
+                            transferProgress = CloudTransferProgress(
+                                currentFileName = currentEntry.ifEmpty { File(p).name },
+                                currentIndex = currentIndex,
+                                totalFiles = totalEntries,
+                                bytesTransferred = bytesProcessed,
+                                totalBytes = totalBytes,
+                                isIndeterminate = false,
+                                isUpload = false,
+                                operationLabel = if (paths.size > 1) "Extracting (${index + 1}/${paths.size})" else "Extracting",
+                                percent = pPercent
+                            )
+                        )
+                    }
+                    if (res.isSuccess) {
+                        val extractResult = res.getOrNull()
+                        if (extractResult != null && extractResult.extractedCount > 0) {
+                            anySucceeded = true
+                        }
+                    } else {
+                        val ex = res.exceptionOrNull()
+                        if (ex is CancellationException) {
+                            break
+                        }
+                        if (ex is com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
+                            pendingExtractDir = targetDir
+                            pendingExtractOnComplete = onComplete
+                            _uiState.value = _uiState.value.copy(
+                                transferProgress = null,
+                                pendingPasswordArchive = p,
+                                passwordError = null
+                            )
+                            return@launch
+                        } else if (ex is com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
+                            pendingExtractDir = targetDir
+                            pendingExtractOnComplete = onComplete
+                            _uiState.value = _uiState.value.copy(
+                                transferProgress = null,
+                                pendingPasswordArchive = p,
+                                passwordError = "Incorrect password. Please try again."
+                            )
+                            return@launch
+                        }
+                    }
+                }
+                _uiState.value = _uiState.value.copy(
+                    transferProgress = null,
+                    pendingPasswordArchive = null,
+                    passwordError = null
+                )
+                if (anySucceeded && !_uiState.value.transferCancelledByUser) {
+                    loadDataInternal()
+                    _uiState.value = _uiState.value.copy(mutationTick = _uiState.value.mutationTick + 1)
+                }
+                onComplete()
+            } finally {
+                withContext(NonCancellable) {
+                    _uiState.value = _uiState.value.copy(
+                        transferProgress = null,
+                        transferCancelledByUser = false
+                    )
+                }
+            }
+        }
+    }
+
+    fun submitArchivePassword(password: String) {
+        val archivePath = _uiState.value.pendingPasswordArchive ?: return
+        val targetDir = pendingExtractDir ?: return
+        val onComplete = pendingExtractOnComplete ?: {}
+        // Dismiss password dialog immediately
+        _uiState.value = _uiState.value.copy(pendingPasswordArchive = null, passwordError = null)
+        checkExtractConflictsAndRun(listOf(archivePath), targetDir, password, onComplete)
+    }
+
+    fun dismissPasswordDialog() {
+        _uiState.value = _uiState.value.copy(pendingPasswordArchive = null, passwordError = null)
+        pendingExtractDir = null
+        pendingExtractOnComplete = null
     }
 
     fun deleteSelected(paths: List<String>, onComplete: () -> Unit = {}) {

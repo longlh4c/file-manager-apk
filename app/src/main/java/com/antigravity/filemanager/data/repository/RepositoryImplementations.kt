@@ -405,15 +405,42 @@ class FileRepositoryImpl @Inject constructor(
     override suspend fun createDirectory(parentPath: String, directoryName: String): Result<FileItem> =
         operationsHelper.createDirectory(parentPath, directoryName)
 
+    override suspend fun compressFiles(
+        sourcePaths: List<String>,
+        targetArchivePath: String,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)?
+    ): Result<FileItem> =
+        operationsHelper.compressFiles(sourcePaths, targetArchivePath, onProgress)
+
+    override suspend fun extractArchive(
+        archiveFilePath: String,
+        targetDirectory: String,
+        password: String?,
+        overwriteNames: Set<String>,
+        skipNames: Set<String>,
+        onProgress: ((currentEntry: String, currentIndex: Int, totalEntries: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)?
+    ): Result<com.antigravity.filemanager.domain.model.ExtractResult> =
+        operationsHelper.extractArchive(archiveFilePath, targetDirectory, password, overwriteNames, skipNames, onProgress)
+
+    override suspend fun getArchiveConflicts(
+        archiveFilePath: String,
+        targetDirectory: String,
+        password: String?
+    ): List<com.antigravity.filemanager.domain.model.OverwriteConflict> =
+        operationsHelper.getArchiveConflicts(archiveFilePath, targetDirectory, password)
+
+    override fun isArchiveEncrypted(archiveFilePath: String): Boolean =
+        operationsHelper.isArchiveEncrypted(archiveFilePath)
+
     override suspend fun zipFiles(
         sourcePaths: List<String>,
         targetZipPath: String,
-        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)?
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)?
     ): Result<FileItem> =
-        operationsHelper.zipFiles(sourcePaths, targetZipPath, onProgress)
+        compressFiles(sourcePaths, targetZipPath, onProgress)
 
-    override suspend fun extractZip(zipFilePath: String, targetDirectory: String): Result<Unit> =
-        operationsHelper.extractZip(zipFilePath, targetDirectory)
+    override suspend fun extractZip(zipFilePath: String, targetDirectory: String): Result<com.antigravity.filemanager.domain.model.ExtractResult> =
+        extractArchive(zipFilePath, targetDirectory)
 
     override suspend fun getFileDetails(filePath: String): FileItem? = withContext(Dispatchers.IO) {
         val f = File(filePath)

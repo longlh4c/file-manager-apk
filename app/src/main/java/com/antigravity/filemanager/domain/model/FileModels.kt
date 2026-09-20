@@ -369,58 +369,67 @@ data class CloudTransferProgress(
     val isUpload: Boolean = false,
     // Overrides the upload/download title, icon, and placeholder text below with a generic
     // operation — e.g. "Compressing" / "Extracting" — while reusing the same progress dialog.
-    val operationLabel: String? = null
+    val operationLabel: String? = null,
+    val percent: Int? = null
 ) {
-    // Byte counts aren't available for count-only operations (delete, compress, extracting
-    // multiple archives) — those only ever know "item N of M", not bytes moved. Falls back to
-    // that count instead of leaving the dialog with nothing to show but a bare spinner and no
-    // percentage at all, which is what a purely byte-based fraction used to do for every one of
-    // them. Requires totalFiles > 1 (not just > 0): with exactly one item, currentIndex/totalFiles
-    // is 1/1 from the very first tick — showing "100%" while that one item is still being worked
-    // on would be actively misleading, so a single-item operation just stays a plain spinner.
+    // Has determinate progress whenever percent is provided, bytes are known, or file count is known
     val hasDeterminateProgress: Boolean
-        get() = totalBytes > 0 || (!isIndeterminate && totalFiles > 1)
+        get() = percent != null || totalBytes > 0 || (!isIndeterminate && totalFiles > 0)
 
     val progressFraction: Float
         get() = when {
             totalBytes > 0 -> (bytesTransferred.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
-            hasDeterminateProgress -> (currentIndex.toFloat() / totalFiles.toFloat()).coerceIn(0f, 1f)
+            percent != null -> (percent / 100f).coerceIn(0f, 1f)
+            totalFiles > 0 -> (currentIndex.toFloat() / totalFiles.toFloat()).coerceIn(0f, 1f)
             else -> 0f
         }
 
     val formattedProgressText: String
         get() {
-            if (totalBytes > 0) {
-                val percent = (progressFraction * 100).toInt()
-                return "${FileItem.formatBytes(bytesTransferred)} / ${FileItem.formatBytes(totalBytes)} ($percent%)"
+            val p = (progressFraction * 100).toInt()
+            if (totalBytes > 0 && totalFiles > 1) {
+                return "$currentIndex / $totalFiles ($p%) • ${FileItem.formatBytes(bytesTransferred)} / ${FileItem.formatBytes(totalBytes)}"
             }
-            if (hasDeterminateProgress) {
-                val percent = (progressFraction * 100).toInt()
-                return "$currentIndex / $totalFiles ($percent%)"
+            if (totalBytes > 0) {
+                return "${FileItem.formatBytes(bytesTransferred)} / ${FileItem.formatBytes(totalBytes)} ($p%)"
+            }
+            if (totalFiles > 1) {
+                return "$currentIndex / $totalFiles ($p%)"
+            }
+            if (percent != null) {
+                return "$p%"
+            }
+            if (totalFiles == 1) {
+                return "$p%"
             }
             if (bytesTransferred > 0) return FileItem.formatBytes(bytesTransferred)
             return operationLabel?.let { "$it..." } ?: if (isUpload) "Uploading..." else "Downloading..."
         }
 
     companion object {
-        /** A count-only progress tick (delete, compress, extract, local copy/move — anything that
-         * only ever knows "item N of M", never bytes moved). Was a several-line
-         * `CloudTransferProgress(..., isIndeterminate = false, ...)` block duplicated at every one
-         * of those call sites across half a dozen ViewModels; this is the one place that
-         * construction happens now. */
         fun forItemCount(
             currentFile: String,
             currentIndex: Int,
             totalFiles: Int,
             isUpload: Boolean,
             operationLabel: String
-        ) = CloudTransferProgress(
-            currentFileName = currentFile,
-            currentIndex = currentIndex,
-            totalFiles = totalFiles,
-            isIndeterminate = false,
-            isUpload = isUpload,
-            operationLabel = operationLabel
-        )
+        ): CloudTransferProgress {
+            val p = if (totalFiles > 0) ((currentIndex.toFloat() / totalFiles.toFloat()) * 100).toInt().coerceIn(0, 100) else 0
+            return CloudTransferProgress(
+                currentFileName = currentFile,
+                currentIndex = currentIndex,
+                totalFiles = totalFiles,
+                isIndeterminate = false,
+                isUpload = isUpload,
+                operationLabel = operationLabel,
+                percent = p
+            )
+        }
     }
 }
+
+data class ExtractResult(
+    val totalFiles: Int = 0,
+    val extractedCount: Int = 0,
+    val skippedCount: Int = 0
+)

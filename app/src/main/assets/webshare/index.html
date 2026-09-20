@@ -446,6 +446,15 @@
   let searchDebounceTimer = null;
   let currentSort = { column: 'name', direction: 'asc' };
 
+  const SYSTEM_FOLDER_NAMES = ['android', 'lost.dir', 'system volume information', '$recycle.bin', '__macosx'];
+
+  function isSystemOrHiddenItem(item) {
+    if (!item || !item.name) return false;
+    if (item.name.startsWith('.')) return true;
+    if (item.isDir && SYSTEM_FOLDER_NAMES.includes(item.name.toLowerCase())) return true;
+    return false;
+  }
+
   const ICONS = {
     folder: '<svg class="item-icon" fill="#eab308" viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>',
     image: '<svg class="item-icon" fill="#38bdf8" viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>',
@@ -549,7 +558,7 @@
         throw new Error('Failed to load directory');
       }
       const data = await res.json();
-      cachedItems = data.items || [];
+      cachedItems = (data.items || []).filter(item => !isSystemOrHiddenItem(item));
       displayedItems = [...cachedItems];
       renderItems(displayedItems);
     } catch (e) {
@@ -567,7 +576,8 @@
 
   function renderItems(rawItems) {
     const tbody = document.getElementById('fileTableBody');
-    const items = sortList(rawItems);
+    const filteredItems = (rawItems || []).filter(item => !isSystemOrHiddenItem(item));
+    const items = sortList(filteredItems);
     const query = (document.getElementById('searchInput')?.value || '').trim();
 
     if (!items || items.length === 0) {
@@ -583,7 +593,7 @@
     if (currentPath !== "" && !isSearching) {
       const parentPath = currentPath.includes('/') ? currentPath.substring(0, currentPath.lastIndexOf('/')) : "";
       html += `
-        <tr class="item-row" onclick="navigateTo('${parentPath}')">
+        <tr class="item-row" onclick="navigateTo('${escapeJs(parentPath)}')">
           <td class="item-name-cell">
             <svg class="item-icon" fill="var(--accent)" viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
             <span>.. (Parent Folder)</span>
@@ -603,7 +613,7 @@
 
       html += `
         <tr class="item-row">
-          <td class="item-name-cell" onclick="${item.isDir ? `navigateTo('${itemPath}')` : (isMedia ? `previewFile('${escapeJs(item.name)}', '${escapeJs(itemPath)}')` : `downloadFile('${escapeJs(itemPath)}')`)}">
+          <td class="item-name-cell" onclick="${item.isDir ? `navigateTo('${escapeJs(itemPath)}')` : (isMedia ? `previewFile('${escapeJs(item.name)}', '${escapeJs(itemPath)}')` : `downloadFile('${escapeJs(itemPath)}')`)}">
             ${getIcon(item)}
             <div style="display:flex; flex-direction:column; gap:2px; min-width:0; overflow:hidden;">
               <span style="text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">${escapeHtml(item.name)}</span>
@@ -704,7 +714,7 @@
         throw new Error('Search failed');
       }
       const data = await res.json();
-      displayedItems = data.items || [];
+      displayedItems = (data.items || []).filter(item => !isSystemOrHiddenItem(item));
       renderItems(displayedItems);
     } catch (e) {
       tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="color:var(--danger)">Error searching: ' + e.message + '</td></tr>';
@@ -712,7 +722,7 @@
   }
 
   function escapeJs(str) {
-    return (str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    return (str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
   }
 
   function isPreviewable(fileName) {
@@ -797,9 +807,11 @@
       bar.style.width = '0%';
 
       await new Promise((resolve, reject) => {
+        const uploadUrl = '/api/upload?path=' + encodeURIComponent(currentPath) + '&filename=' + encodeURIComponent(file.name);
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/api/upload?path=' + encodeURIComponent(currentPath));
+        xhr.open('POST', uploadUrl);
         if (authToken) xhr.setRequestHeader('X-Auth-Token', authToken);
+        xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
 
         xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) {

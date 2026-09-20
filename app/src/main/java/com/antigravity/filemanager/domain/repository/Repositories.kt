@@ -64,12 +64,32 @@ interface IFileRepository {
     suspend fun findCopyConflicts(sourcePaths: List<String>, targetDirectory: String): List<com.antigravity.filemanager.domain.model.OverwriteConflict>
     suspend fun renameFile(filePath: String, newName: String): Result<FileItem>
     suspend fun createDirectory(parentPath: String, directoryName: String): Result<FileItem>
+    suspend fun compressFiles(
+        sourcePaths: List<String>,
+        targetArchivePath: String,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<FileItem>
+    suspend fun extractArchive(
+        archiveFilePath: String,
+        targetDirectory: String,
+        password: String? = null,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onProgress: ((currentEntry: String, currentIndex: Int, totalEntries: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<ExtractResult>
+    suspend fun getArchiveConflicts(
+        archiveFilePath: String,
+        targetDirectory: String,
+        password: String? = null
+    ): List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList()
+    fun isArchiveEncrypted(archiveFilePath: String): Boolean = false
     suspend fun zipFiles(
         sourcePaths: List<String>,
         targetZipPath: String,
-        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
-    ): Result<FileItem>
-    suspend fun extractZip(zipFilePath: String, targetDirectory: String): Result<Unit>
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<FileItem> = compressFiles(sourcePaths, targetZipPath, onProgress)
+    suspend fun extractZip(zipFilePath: String, targetDirectory: String): Result<ExtractResult> =
+        extractArchive(zipFilePath, targetDirectory, null)
     suspend fun getFileDetails(filePath: String): FileItem?
 }
 

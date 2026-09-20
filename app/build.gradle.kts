@@ -122,8 +122,11 @@ dependencies {
     implementation("org.apache.mina:mina-core:2.1.6")
     implementation(libs.slf4j.android)
 
-    // Zip4j Archive Management
+    // Archive Management (Zip, 7z, RAR)
     implementation(libs.zip4j)
+    implementation(libs.commons.compress)
+    implementation(libs.tukaani.xz)
+    implementation(libs.junrar)
 
     // Embedded HTTP Web Server
     implementation(libs.nanohttpd)

@@ -225,12 +225,9 @@ fun FileBrowserScreen(
 
     if (uiState.showCompressDialog) {
         val singleSelectedName = uiState.selectedPaths.singleOrNull()?.let { path -> uiState.files.find { it.path == path }?.name }
-        TextInputDialog(
-            title = "Compress to Zip",
-            initialValue = defaultZipFileName(uiState.selectedPaths.size, singleSelectedName),
-            confirmButtonText = "COMPRESS",
-            selectNameWithoutExtension = true,
-            onConfirm = { viewModel.zipSelected(it) },
+        CompressDialog(
+            initialBaseName = defaultArchiveBaseName(uiState.selectedPaths.size, singleSelectedName),
+            onConfirm = { viewModel.compressSelected(it) },
             onDismiss = { viewModel.setShowCompressDialog(false) }
         )
     }
@@ -240,6 +237,15 @@ fun FileBrowserScreen(
             fileName = File(uiState.pendingOverwriteZipPath!!).name,
             onConfirm = { viewModel.confirmCompressOverwrite() },
             onDismiss = { viewModel.cancelCompressOverwrite() }
+        )
+    }
+
+    if (uiState.pendingPasswordArchive != null) {
+        ArchivePasswordDialog(
+            archivePath = uiState.pendingPasswordArchive!!,
+            errorMessage = uiState.passwordError,
+            onConfirm = { viewModel.submitArchivePassword(it) },
+            onDismiss = { viewModel.dismissPasswordDialog() }
         )
     }
 

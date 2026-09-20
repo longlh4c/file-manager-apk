@@ -198,24 +198,50 @@ class FileOperationsUseCase @Inject constructor(
         return result
     }
 
-    suspend fun zip(
+    suspend fun compress(
         sourcePaths: List<String>,
-        targetZipPath: String,
-        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
+        targetArchivePath: String,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
     ): Result<FileItem> =
-        fileRepository.zipFiles(sourcePaths, targetZipPath, onProgress).also {
+        fileRepository.compressFiles(sourcePaths, targetArchivePath, onProgress).also {
             if (it.isSuccess) {
                 mediaChangeSignal.notifyChanged()
             }
         }
 
-    suspend fun unzip(zipPath: String, targetDir: String): Result<Unit> =
-        fileRepository.extractZip(zipPath, targetDir).also {
+    suspend fun getArchiveConflicts(
+        archivePath: String,
+        targetDir: String,
+        password: String? = null
+    ): List<com.antigravity.filemanager.domain.model.OverwriteConflict> =
+        fileRepository.getArchiveConflicts(archivePath, targetDir, password)
+
+    suspend fun extract(
+        archivePath: String,
+        targetDir: String,
+        password: String? = null,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet(),
+        onProgress: ((currentEntry: String, currentIndex: Int, totalEntries: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<com.antigravity.filemanager.domain.model.ExtractResult> =
+        fileRepository.extractArchive(archivePath, targetDir, password, overwriteNames, skipNames, onProgress).also {
             if (it.isSuccess) {
                 folderCacheManager.invalidateMediaFolders()
                 mediaChangeSignal.notifyChanged()
             }
         }
+
+    fun isArchiveEncrypted(archivePath: String): Boolean =
+        fileRepository.isArchiveEncrypted(archivePath)
+
+    suspend fun zip(
+        sourcePaths: List<String>,
+        targetZipPath: String,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<FileItem> = compress(sourcePaths, targetZipPath, onProgress)
+
+    suspend fun unzip(zipPath: String, targetDir: String, password: String? = null): Result<com.antigravity.filemanager.domain.model.ExtractResult> =
+        extract(zipPath, targetDir, password)
 
     suspend fun search(query: String, rootPath: String? = null, category: CategoryType? = null): List<FileItem> =
         fileRepository.searchFiles(query, rootPath, category)

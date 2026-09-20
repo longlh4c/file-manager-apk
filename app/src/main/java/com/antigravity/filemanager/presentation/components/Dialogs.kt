@@ -2069,14 +2069,23 @@ fun CloudDownloadProgressDialog(
                 Spacer(modifier = Modifier.height(10.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
                         text = progress.formattedProgressText,
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
-                    if (progress.totalFiles > 1) {
+                    if (progress.hasDeterminateProgress) {
+                        val p = (progress.progressFraction * 100).toInt()
+                        Text(
+                            text = "$p%",
+                            color = TealPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    } else if (progress.totalFiles > 1) {
                         Text(
                             text = "${progress.currentIndex} / ${progress.totalFiles}",
                             color = TextSecondary,
