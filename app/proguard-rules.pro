@@ -52,6 +52,10 @@
 -keep class net.lingala.zip4j.** { *; }
 -dontwarn net.lingala.zip4j.**
 
+# --- NanoHTTPD ---
+-keep class fi.iki.elonen.** { *; }
+-dontwarn fi.iki.elonen.**
+
 # --- OkHttp / Okio ---
 -dontwarn okhttp3.**
 -dontwarn okio.**
