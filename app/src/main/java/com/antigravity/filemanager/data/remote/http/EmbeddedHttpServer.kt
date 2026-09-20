@@ -7,11 +7,17 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.concurrent.thread
 
 @Singleton
 class EmbeddedHttpServer @Inject constructor(
@@ -223,10 +229,60 @@ class EmbeddedHttpServer @Inject constructor(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Invalid path")
             )
 
-            if (!targetFile.exists() || !targetFile.isFile) {
+            if (!targetFile.exists()) {
                 return addCorsHeaders(
-                    newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "File not found")
+                    newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
                 )
+            }
+
+            if (targetFile.isDirectory) {
+                val rawName = if (relPath.isEmpty() || targetFile == storageRoot) "Storage" else targetFile.name
+                val cleanName = rawName.replace("\"", "").replace("'", "").trim().ifEmpty { "folder" }
+                val zipName = "$cleanName.zip"
+
+                val pos = PipedOutputStream()
+                val pis = PipedInputStream(pos, 64 * 1024)
+
+                thread(name = "ZipFolderThread", isDaemon = true) {
+                    try {
+                        ZipOutputStream(BufferedOutputStream(pos, 64 * 1024)).use { zos ->
+                            fun addDirToZip(dir: File, basePath: String) {
+                                val files = dir.listFiles() ?: return
+                                for (file in files) {
+                                    if (file.name.startsWith(".")) continue
+                                    val entryPath = if (basePath.isEmpty()) file.name else "$basePath/${file.name}"
+                                    if (file.isDirectory) {
+                                        val zipEntry = ZipEntry("$entryPath/")
+                                        zipEntry.time = file.lastModified()
+                                        zos.putNextEntry(zipEntry)
+                                        zos.closeEntry()
+                                        addDirToZip(file, entryPath)
+                                    } else if (file.isFile) {
+                                        val zipEntry = ZipEntry(entryPath)
+                                        zipEntry.time = file.lastModified()
+                                        zos.putNextEntry(zipEntry)
+                                        file.inputStream().buffered(32 * 1024).use { fis ->
+                                            fis.copyTo(zos, bufferSize = 32 * 1024)
+                                        }
+                                        zos.closeEntry()
+                                    }
+                                }
+                            }
+                            addDirToZip(targetFile, "")
+                            zos.finish()
+                        }
+                    } catch (e: Exception) {
+                        // Client aborted download or pipe was closed
+                    }
+                }
+
+                val response = newChunkedResponse(
+                    Response.Status.OK,
+                    "application/zip",
+                    pis
+                )
+                response.addHeader("Content-Disposition", "attachment; filename=\"$zipName\"")
+                return addCorsHeaders(response)
             }
 
             val fileLen = targetFile.length()
