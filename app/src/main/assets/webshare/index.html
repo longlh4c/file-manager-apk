@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>File Manager + Web Share</title>
+<title>Owl File + Web Share</title>
 <style>
   :root {
     --bg-primary: #121212;
@@ -145,20 +145,45 @@
     border: 1px solid var(--border);
   }
   .btn-secondary:hover { background: var(--bg-hover); color: var(--text-primary); }
-  .search-box {
+  .search-container {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     background: var(--bg-card);
     border: 1px solid var(--border);
-    color: var(--text-primary);
-    padding: 8px 14px;
     border-radius: 6px;
-    font-size: 13px;
-    outline: none;
-    width: 200px;
-    transition: width 0.2s, border-color 0.2s;
+    padding: 0 10px;
+    transition: border-color 0.2s;
   }
-  .search-box:focus {
-    width: 260px;
+  .search-container:focus-within {
     border-color: var(--accent);
+  }
+  .search-container .search-box {
+    background: transparent;
+    border: none;
+    padding: 8px 0;
+    width: 170px;
+  }
+  .search-container .search-box:focus {
+    outline: none;
+    width: 220px;
+  }
+  .subfolder-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+  .subfolder-toggle input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .subfolder-toggle:hover {
+    color: var(--text-primary);
   }
   .dropzone {
     border: 2px dashed var(--border);
@@ -193,6 +218,26 @@
     font-weight: 600;
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
+  }
+  th.sortable {
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s, color 0.15s;
+  }
+  th.sortable:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .sort-indicator {
+    display: inline-block;
+    margin-left: 4px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    opacity: 0.3;
+  }
+  th.sorted .sort-indicator {
+    opacity: 1;
+    color: var(--accent);
   }
   td {
     padding: 12px 16px;
@@ -322,7 +367,7 @@
 <header>
   <div class="brand">
     <svg viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
-    <div class="brand-title">File Manager +</div>
+    <div class="brand-title">Owl File +</div>
     <div class="status-badge"><span class="status-dot"></span> Online</div>
   </div>
   <div style="font-size: 13px; color: var(--text-secondary);" id="phoneModel">Android Storage</div>
@@ -334,7 +379,13 @@
       <span class="crumb" onclick="navigateTo('')">Home</span>
     </div>
     <div class="actions">
-      <input type="text" class="search-box" placeholder="Filter files..." id="searchInput" oninput="filterItems()">
+      <div class="search-container">
+        <input type="text" class="search-box" placeholder="Filter / search files..." id="searchInput" oninput="onSearchInput()">
+        <label class="subfolder-toggle" title="Search inside subfolders">
+          <input type="checkbox" id="searchSubfolders" onchange="onSearchInput()">
+          <span>Subfolders</span>
+        </label>
+      </div>
       <button class="btn btn-secondary" onclick="openNewFolderModal()">
         <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M20 6h-8l-2-2H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-1 8h-3v3h-2v-3h-3v-2h3V9h2v3h3v2z"/></svg>
         New Folder
@@ -358,9 +409,15 @@
     <table>
       <thead>
         <tr>
-          <th>Name</th>
-          <th style="width: 120px;">Size</th>
-          <th style="width: 180px;">Modified</th>
+          <th class="sortable sorted" id="th-name" onclick="handleSort('name')">
+            Name <span class="sort-indicator" id="sort-icon-name">▲</span>
+          </th>
+          <th class="sortable" id="th-size" style="width: 120px;" onclick="handleSort('size')">
+            Size <span class="sort-indicator" id="sort-icon-size">▲</span>
+          </th>
+          <th class="sortable" id="th-modified" style="width: 180px;" onclick="handleSort('modified')">
+            Modified <span class="sort-indicator" id="sort-icon-modified">▲</span>
+          </th>
           <th style="width: 140px; text-align: right;">Actions</th>
         </tr>
       </thead>
@@ -411,14 +468,17 @@
 <script>
   let currentPath = "";
   let cachedItems = [];
+  let displayedItems = [];
   let authToken = "";
+  let searchDebounceTimer = null;
+  let currentSort = { column: 'name', direction: 'asc' };
 
   const ICONS = {
     folder: '<svg class="item-icon" fill="#eab308" viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>',
-    image: '<svg class="item-icon" fill="#38bdf8" viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>',
+    image: '<svg class="item-icon" fill="#38bdf8" viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>',
     video: '<svg class="item-icon" fill="#ec4899" viewBox="0 0 24 24"><path d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4h-4z"/></svg>',
     audio: '<svg class="item-icon" fill="#a855f7" viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>',
-    archive: '<svg class="item-icon" fill="#f97316" viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>',
+    archive: '<svg class="item-icon" fill="#f97316" viewBox="0 0 24 24"><path d="M20 6h-4V4c0-1.11-.89-2-2-2h-4c-1.11 0-2 .89-2 2v2H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.1-.89-2-2-2zm-6 0h-4V4h4v2z"/></svg>',
     document: '<svg class="item-icon" fill="#60a5fa" viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>',
     file: '<svg class="item-icon" fill="#9ca3af" viewBox="0 0 24 24"><path d="M6 2c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6H6zm7 7V3.5L18.5 9H13z"/></svg>'
   };
@@ -448,8 +508,58 @@
     return ICONS.file;
   }
 
+  function handleSort(col) {
+    if (currentSort.column === col) {
+      currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+    } else {
+      currentSort.column = col;
+      currentSort.direction = (col === 'modified' || col === 'size') ? 'desc' : 'asc';
+    }
+    updateSortHeaders();
+    renderItems(displayedItems);
+  }
+
+  function updateSortHeaders() {
+    ['name', 'size', 'modified'].forEach(col => {
+      const th = document.getElementById('th-' + col);
+      const icon = document.getElementById('sort-icon-' + col);
+      if (!th || !icon) return;
+      if (currentSort.column === col) {
+        th.classList.add('sorted');
+        icon.textContent = currentSort.direction === 'asc' ? '▲' : '▼';
+      } else {
+        th.classList.remove('sorted');
+        icon.textContent = '▲';
+      }
+    });
+  }
+
+  function sortList(items) {
+    if (!items || !items.length) return [];
+    const { column, direction } = currentSort;
+    const dirFactor = direction === 'asc' ? 1 : -1;
+
+    return [...items].sort((a, b) => {
+      // Folders always on top
+      if (a.isDir && !b.isDir) return -1;
+      if (!a.isDir && b.isDir) return 1;
+
+      let comparison = 0;
+      if (column === 'name') {
+        comparison = (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' });
+      } else if (column === 'size') {
+        comparison = (a.size || 0) - (b.size || 0);
+      } else if (column === 'modified') {
+        comparison = (a.lastModified || 0) - (b.lastModified || 0);
+      }
+      return comparison * dirFactor;
+    });
+  }
+
   async function loadDirectory(path) {
     currentPath = path;
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput) searchInput.value = '';
     updateBreadcrumbs(path);
     const tbody = document.getElementById('fileTableBody');
     tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Loading files...</td></tr>';
@@ -467,7 +577,8 @@
       }
       const data = await res.json();
       cachedItems = data.items || [];
-      renderItems(cachedItems);
+      displayedItems = [...cachedItems];
+      renderItems(displayedItems);
     } catch (e) {
       tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="color:var(--danger)">Error loading directory: ' + e.message + '</td></tr>';
     }
@@ -481,16 +592,22 @@
     }
   }
 
-  function renderItems(items) {
+  function renderItems(rawItems) {
     const tbody = document.getElementById('fileTableBody');
+    const items = sortList(rawItems);
+    const query = (document.getElementById('searchInput')?.value || '').trim();
+
     if (!items || items.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="4" class="empty-state">This folder is empty</td></tr>';
+      tbody.innerHTML = query
+        ? `<tr><td colspan="4" class="empty-state">No files found matching "${escapeHtml(query)}"</td></tr>`
+        : '<tr><td colspan="4" class="empty-state">This folder is empty</td></tr>';
       return;
     }
 
     let html = '';
-    // Back to parent directory row if not at root
-    if (currentPath !== "") {
+    const isSearching = query.length > 0;
+    // Back to parent directory row if not at root and not searching
+    if (currentPath !== "" && !isSearching) {
       const parentPath = currentPath.includes('/') ? currentPath.substring(0, currentPath.lastIndexOf('/')) : "";
       html += `
         <tr class="item-row" onclick="navigateTo('${parentPath}')">
@@ -506,15 +623,19 @@
     }
 
     items.forEach(item => {
-      const itemPath = currentPath ? currentPath + '/' + item.name : item.name;
+      const itemPath = item.path || (currentPath ? currentPath + '/' + item.name : item.name);
       const downloadUrl = '/api/download?path=' + encodeURIComponent(itemPath);
       const isMedia = isPreviewable(item.name);
+      const isSubfolderItem = isSearching && item.path && item.path.includes('/') && item.path !== (currentPath ? currentPath + '/' + item.name : item.name);
 
       html += `
         <tr class="item-row">
-          <td class="item-name-cell" onclick="${item.isDir ? `navigateTo('${itemPath}')` : (isMedia ? `previewFile('${item.name}', '${itemPath}')` : `downloadFile('${itemPath}')`)}">
+          <td class="item-name-cell" onclick="${item.isDir ? `navigateTo('${itemPath}')` : (isMedia ? `previewFile('${escapeJs(item.name)}', '${escapeJs(itemPath)}')` : `downloadFile('${escapeJs(itemPath)}')`)}">
             ${getIcon(item)}
-            <span>${escapeHtml(item.name)}</span>
+            <div style="display:flex; flex-direction:column; gap:2px; min-width:0; overflow:hidden;">
+              <span style="text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">${escapeHtml(item.name)}</span>
+              ${isSubfolderItem ? `<span style="font-size:11px; color:var(--text-secondary); opacity:0.8; text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">📁 ${escapeHtml(item.path)}</span>` : ''}
+            </div>
           </td>
           <td>${item.isDir ? '-' : formatBytes(item.size)}</td>
           <td>${formatDate(item.lastModified)}</td>
@@ -526,11 +647,11 @@
                 </a>
               ` : ''}
               ${(!item.isDir && isMedia) ? `
-                <button class="icon-btn" title="Preview" onclick="event.stopPropagation(); previewFile('${item.name}', '${itemPath}')">
+                <button class="icon-btn" title="Preview" onclick="event.stopPropagation(); previewFile('${escapeJs(item.name)}', '${escapeJs(itemPath)}')">
                   <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
                 </button>
               ` : ''}
-              <button class="icon-btn danger" title="Delete" onclick="event.stopPropagation(); deleteItem('${item.name}', '${itemPath}', ${item.isDir})">
+              <button class="icon-btn danger" title="Delete" onclick="event.stopPropagation(); deleteItem('${escapeJs(item.name)}', '${escapeJs(itemPath)}', ${item.isDir})">
                 <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
               </button>
             </div>
@@ -572,10 +693,57 @@
     container.innerHTML = html;
   }
 
-  function filterItems() {
-    const query = document.getElementById('searchInput').value.toLowerCase();
-    const filtered = cachedItems.filter(i => i.name.toLowerCase().includes(query));
-    renderItems(filtered);
+  function onSearchInput() {
+    const query = document.getElementById('searchInput').value.trim();
+    const searchSubfolders = document.getElementById('searchSubfolders').checked;
+
+    if (searchDebounceTimer) {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = null;
+    }
+
+    if (!query) {
+      displayedItems = [...cachedItems];
+      renderItems(displayedItems);
+      return;
+    }
+
+    if (searchSubfolders) {
+      searchDebounceTimer = setTimeout(() => {
+        executeSubfolderSearch(query);
+      }, 300);
+    } else {
+      const lower = query.toLowerCase();
+      displayedItems = cachedItems.filter(i => i.name.toLowerCase().includes(lower));
+      renderItems(displayedItems);
+    }
+  }
+
+  async function executeSubfolderSearch(query) {
+    const tbody = document.getElementById('fileTableBody');
+    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Searching subfolders...</td></tr>';
+
+    try {
+      const res = await fetch(`/api/search?path=${encodeURIComponent(currentPath)}&q=${encodeURIComponent(query)}`, {
+        headers: authToken ? { 'X-Auth-Token': authToken } : {}
+      });
+      if (!res.ok) {
+        if (res.status === 401) {
+          promptPassword();
+          return;
+        }
+        throw new Error('Search failed');
+      }
+      const data = await res.json();
+      displayedItems = data.items || [];
+      renderItems(displayedItems);
+    } catch (e) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="color:var(--danger)">Error searching: ' + e.message + '</td></tr>';
+    }
+  }
+
+  function escapeJs(str) {
+    return (str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   }
 
   function isPreviewable(fileName) {

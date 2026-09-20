@@ -86,6 +86,7 @@ class EmbeddedHttpServer @Inject constructor(
                         newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", WebShareAssets.getIndexHtml(appContext))
                     }
                     uri == "/api/list" -> handleList(session)
+                    uri == "/api/search" -> handleSearch(session)
                     uri == "/api/download" -> handleDownload(session)
                     uri == "/api/upload" && method == Method.POST -> handleUpload(session)
                     uri == "/api/mkdir" && method == Method.POST -> handleMkdir(session)
@@ -129,8 +130,10 @@ class EmbeddedHttpServer @Inject constructor(
 
             val jsonArray = JSONArray()
             for (f in sorted) {
+                val childRel = if (relPath.isEmpty()) f.name else "$relPath/${f.name}"
                 val obj = JSONObject().apply {
                     put("name", f.name)
+                    put("path", childRel)
                     put("isDir", f.isDirectory)
                     put("size", if (f.isDirectory) 0L else f.length())
                     put("lastModified", f.lastModified())
@@ -140,6 +143,70 @@ class EmbeddedHttpServer @Inject constructor(
 
             val resObj = JSONObject().apply {
                 put("currentPath", relPath)
+                put("items", jsonArray)
+            }
+
+            return addCorsHeaders(newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                resObj.toString()
+            ))
+        }
+
+        private fun handleSearch(session: IHTTPSession): Response {
+            val relPath = session.parms["path"] ?: ""
+            val query = (session.parms["q"] ?: "").trim()
+            val targetDir = resolveSafeFile(relPath) ?: return addCorsHeaders(
+                newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
+            )
+
+            if (!targetDir.exists() || !targetDir.isDirectory) {
+                return addCorsHeaders(
+                    newFixedLengthResponse(Response.Status.NOT_FOUND, "application/json", "{\"error\":\"Folder not found\"}")
+                )
+            }
+
+            if (query.isEmpty()) {
+                return handleList(session)
+            }
+
+            val jsonArray = JSONArray()
+            var count = 0
+            val maxResults = 300
+
+            fun walk(dir: File, currentRel: String) {
+                if (count >= maxResults) return
+                val files = dir.listFiles() ?: return
+                val sortedFiles = files.sortedWith(
+                    compareBy<File> { !it.isDirectory }
+                        .thenBy { it.name.lowercase() }
+                )
+                for (f in sortedFiles) {
+                    if (count >= maxResults) break
+                    val childRel = if (currentRel.isEmpty()) f.name else "$currentRel/${f.name}"
+                    if (f.name.contains(query, ignoreCase = true)) {
+                        val obj = JSONObject().apply {
+                            put("name", f.name)
+                            put("path", childRel)
+                            put("isDir", f.isDirectory)
+                            put("size", if (f.isDirectory) 0L else f.length())
+                            put("lastModified", f.lastModified())
+                        }
+                        jsonArray.put(obj)
+                        count++
+                    }
+                    if (f.isDirectory && !f.name.startsWith(".")) {
+                        walk(f, childRel)
+                    }
+                }
+            }
+
+            walk(targetDir, relPath)
+
+            val resObj = JSONObject().apply {
+                put("currentPath", relPath)
+                put("query", query)
+                put("isSearchResult", true)
                 put("items", jsonArray)
             }
 
