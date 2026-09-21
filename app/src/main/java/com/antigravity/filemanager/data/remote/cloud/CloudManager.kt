@@ -512,8 +512,8 @@ class CloudManager @Inject constructor(
 
     /**
      * Like [getStreamableLink], but for the media viewers (image/video playback) rather than
-     * the video-thumbnail frame grab — also covers Google Drive, whose media endpoint needs a
-     * bearer token attached to the request rather than a bare pre-signed URL. Still unsupported
+     * the video-thumbnail frame grab — also covers Google Drive (media endpoint needs a bearer
+     * token attached to the request) and TeraBox (needs its session cookie). Still unsupported
      * for MEGA (client-side encrypted; a raw range fetch would return ciphertext).
      */
     suspend fun getStreamSource(account: CloudAccount, remotePath: String): Result<com.antigravity.filemanager.domain.model.CloudStreamSource> =
@@ -533,7 +533,9 @@ class CloudManager @Inject constructor(
                         ?: remotePath
                     googleDriveApi.getAuthenticatedMediaUrl(account, fileId)
                 }
-                CloudProvider.MEGA, CloudProvider.TERABOX -> Result.failure(Exception("Streaming not supported for ${account.provider}"))
+                // Like Drive, the URL only works with the session cookie sent as a header.
+                CloudProvider.TERABOX -> teraBoxApi.getStreamSource(account, remotePath)
+                CloudProvider.MEGA -> Result.failure(Exception("Streaming not supported for ${account.provider}"))
             }
         }
     //endregion

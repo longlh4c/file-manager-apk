@@ -2,6 +2,7 @@ package com.antigravity.filemanager.data.remote.cloud.api
 
 import android.webkit.MimeTypeMap
 import com.antigravity.filemanager.domain.model.CloudAccount
+import com.antigravity.filemanager.domain.model.CloudStreamSource
 import com.antigravity.filemanager.domain.model.FileItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -205,6 +206,29 @@ class TeraBoxApiClient @Inject constructor(
                 }
             }
 
+            // /api/home/info answers a plain session cookie with { data: { username, uk, loginstate } }.
+            // The /api/user/getinfo endpoint below rejects it (errno 2) without extra params, and
+            // TeraBox exposes no email over the web API, so the username is the best display name.
+            try {
+                val (homeResp, homeBody) = executeWithRetry("/api/home/info", cookie)
+                val homeJson = if (homeResp.isSuccessful && homeBody.isNotBlank()) {
+                    try { JSONObject(homeBody) } catch (_: Exception) { null }
+                } else null
+                val data = homeJson?.takeIf { it.optInt("errno", -1) == 0 }?.optJSONObject("data")
+                val homeName = data?.optString("username")?.takeIf { it.isNotBlank() }
+                if (data != null && homeName != null) {
+                    return@withContext Result.success(
+                        TeraBoxUserInfo(
+                            uname = homeName,
+                            uk = data.optString("uk", ""),
+                            email = data.optString("email").takeIf { it.isNotBlank() } ?: cookieEmail
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("TeraBoxApiClient", "home/info lookup failed: ${e.message}")
+            }
+
             var (response, body) = executeWithRetry("/api/user/getinfo", cookie)
             var json = if (response.isSuccessful && body.isNotBlank()) {
                 try { JSONObject(body) } catch (_: Exception) { null }
@@ -290,6 +314,52 @@ class TeraBoxApiClient @Inject constructor(
         }
     }
 
+    /** Picks the best thumbnail URL out of a file entry (list / filemetas) and remembers it. */
+    private fun cacheThumbnailUrl(account: CloudAccount, item: JSONObject, fsId: String, filePath: String): String? {
+        val thumbsObj = item.optJSONObject("thumbs") ?: (try { JSONObject(item.optString("thumbs")) } catch (_: Exception) { null })
+        val rawThumb = thumbsObj?.optString("url3")?.takeIf { it.isNotBlank() }
+            ?: thumbsObj?.optString("url2")?.takeIf { it.isNotBlank() }
+            ?: thumbsObj?.optString("url1")?.takeIf { it.isNotBlank() }
+            ?: thumbsObj?.optString("icon")?.takeIf { it.isNotBlank() }
+            ?: item.optString("thumb").takeIf { it.isNotBlank() }
+            ?: item.optString("thumbnail").takeIf { it.isNotBlank() }
+
+        val thumbUrl = rawThumb?.replace("\\/", "/")?.replace("&amp;", "&")
+        if (thumbUrl.isNullOrBlank()) return null
+        thumbnailUrls["${account.id}:$fsId"] = thumbUrl
+        thumbnailUrls["${account.id}:$filePath"] = thumbUrl
+        thumbnailUrls[fsId] = thumbUrl
+        thumbnailUrls[filePath] = thumbUrl
+        return thumbUrl
+    }
+
+    /**
+     * Re-lists [filePath]'s folder to get fresh signed thumbnail URLs. Needed when the URL map is
+     * empty (folder shown from the on-disk cache after an app restart, before the live listing
+     * lands) or a remembered URL has expired — TeraBox thumbnail URLs are only valid for ~8 hours.
+     */
+    private fun refreshThumbnailUrlsFromParent(account: CloudAccount, cookie: String, filePath: String): String? {
+        if (!filePath.startsWith("/")) return null
+        val parent = filePath.substringBeforeLast('/').ifBlank { "/" }
+        val encodedDir = URLEncoder.encode(parent, "UTF-8")
+        val (response, body) = executeWithRetry(
+            "/api/list?web=1&clienttype=0&app_id=250528&channel=dubox&dir=$encodedDir&order=name&desc=0&num=1000&page=1&showempty=0",
+            cookie
+        )
+        if (!response.isSuccessful) return null
+        val json = try { JSONObject(body) } catch (_: Exception) { return null }
+        if (json.optInt("errno", -1) != 0) return null
+        val list = json.optJSONArray("list") ?: return null
+        var found: String? = null
+        for (i in 0 until list.length()) {
+            val item = list.getJSONObject(i)
+            val path = item.optString("path")
+            val url = cacheThumbnailUrl(account, item, item.opt("fs_id")?.toString() ?: path, path)
+            if (path == filePath) found = url
+        }
+        return found
+    }
+
     suspend fun listFiles(account: CloudAccount, remotePath: String): Result<List<FileItem>> = withContext(Dispatchers.IO) {
         try {
             val cookie = getCookieString(account)
@@ -332,28 +402,13 @@ class TeraBoxApiClient @Inject constructor(
                 val mtimeSec = item.optLong("server_mtime", 0L)
                 val lastModified = if (mtimeSec > 0) mtimeSec * 1000L else System.currentTimeMillis()
                 val fsId = item.opt("fs_id")?.toString() ?: filePath
-                val thumbsObj = item.optJSONObject("thumbs") ?: (try { JSONObject(item.optString("thumbs")) } catch (_: Exception) { null })
-                val rawThumb = thumbsObj?.optString("url3")?.takeIf { it.isNotBlank() }
-                    ?: thumbsObj?.optString("url2")?.takeIf { it.isNotBlank() }
-                    ?: thumbsObj?.optString("url1")?.takeIf { it.isNotBlank() }
-                    ?: thumbsObj?.optString("icon")?.takeIf { it.isNotBlank() }
-                    ?: item.optString("thumb").takeIf { it.isNotBlank() }
-                    ?: item.optString("thumbnail").takeIf { it.isNotBlank() }
-
-                val thumbUrl = rawThumb?.replace("\\/", "/")?.replace("&amp;", "&")
-
-                if (!thumbUrl.isNullOrBlank()) {
-                    thumbnailUrls["${account.id}:$fsId"] = thumbUrl
-                    thumbnailUrls["${account.id}:$filePath"] = thumbUrl
-                    thumbnailUrls[fsId] = thumbUrl
-                    thumbnailUrls[filePath] = thumbUrl
-                }
+                cacheThumbnailUrl(account, item, fsId, filePath)
 
                 val ext = if (fileName.contains('.')) fileName.substringAfterLast('.').lowercase(Locale.ROOT) else ""
                 val mimeType = if (isDir) {
                     "vnd.android.document/directory"
                 } else {
-                    MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+                    MimeTypeMap.getSingleton()?.getMimeTypeFromExtension(ext) ?: "application/octet-stream"
                 }
 
                 items.add(
@@ -365,6 +420,9 @@ class TeraBoxApiClient @Inject constructor(
                         isDirectory = isDir,
                         lastModified = lastModified,
                         mimeType = mimeType,
+                        // FileItem.extension drives the file-type icon and decides which files get
+                        // a thumbnail fetched; left empty, every file looked like a generic file.
+                        extension = if (isDir) "" else ext,
                         itemCount = 0
                     )
                 )
@@ -572,6 +630,41 @@ class TeraBoxApiClient @Inject constructor(
         }
     }
 
+    /**
+     * A directly playable/decodable URL for the media viewers, plus the headers it needs. TeraBox
+     * has no anonymous pre-signed link that lasts, but its download endpoint answers Range
+     * requests (206) as long as the session cookie is attached. Like Google Drive, the URL is
+     * only usable together with these headers.
+     */
+    suspend fun getStreamSource(account: CloudAccount, remotePath: String): Result<CloudStreamSource> = withContext(Dispatchers.IO) {
+        try {
+            val cookie = buildCookieHeader(getCookieString(account))
+            if (cookie.isBlank()) {
+                return@withContext Result.failure(IOException("TeraBox session expired or missing token"))
+            }
+            // The regional cluster (Url-Domain-Prefix) is learned from API responses; make sure
+            // it is known before handing a URL to a player that cannot retry on its own.
+            if (currentDomainPrefix == null) {
+                executeWithRetry("/api/check/login", cookie)
+            }
+            val path = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
+            val encodedPath = URLEncoder.encode(path, "UTF-8").replace("+", "%20")
+            val url = appendStandardParams("${getBaseUrl()}/rest/2.0/pcs/file?method=download&path=$encodedPath")
+            Result.success(
+                CloudStreamSource(
+                    url = url,
+                    headers = mapOf(
+                        "Cookie" to cookie,
+                        "User-Agent" to USER_AGENT,
+                        "Referer" to REFERER
+                    )
+                )
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     private fun fetchThumbnailBytes(url: String, cookieHeader: String): ByteArray? {
         val finalCookie = buildCookieHeader(cookieHeader)
         val referers = listOf(
@@ -633,18 +726,31 @@ class TeraBoxApiClient @Inject constructor(
                 return@withContext Result.failure(IOException("TeraBox session expired or missing token"))
             }
 
-            var thumbUrl = thumbnailUrls["${account.id}:$nodeIdOrPath"]
+            val cachedUrl = thumbnailUrls["${account.id}:$nodeIdOrPath"]
                 ?: thumbnailUrls[nodeIdOrPath]
                 ?: if (nodeIdOrPath.startsWith("http://") || nodeIdOrPath.startsWith("https://")) nodeIdOrPath else null
 
-            // Fallback: If not cached, try querying metadata via /api/filemetas or /openapi/api/filemetas
+            var thumbUrl = cachedUrl
+            if (thumbUrl.isNullOrBlank()) {
+                // No remembered URL (e.g. the folder came from the on-disk cache after a restart).
+                // Re-listing the parent fills in every sibling at once, so try that before asking
+                // for this one file's metadata.
+                thumbUrl = try {
+                    refreshThumbnailUrlsFromParent(account, cookie, nodeIdOrPath)
+                } catch (e: Exception) {
+                    android.util.Log.w("TeraBoxApiClient", "Thumbnail parent refresh failed: ${e.message}")
+                    null
+                }
+            }
+
+            // Fallback: query metadata via /api/filemetas or /openapi/api/filemetas
             if (thumbUrl.isNullOrBlank()) {
                 val queryParam = if (nodeIdOrPath.startsWith("/")) {
                     val encoded = URLEncoder.encode("[\"$nodeIdOrPath\"]", "UTF-8")
-                    "target=$encoded&dlink=0"
+                    "target=$encoded&dlink=1&thumb=1&extra=1"
                 } else {
                     val encoded = URLEncoder.encode("[$nodeIdOrPath]", "UTF-8")
-                    "fsids=$encoded&dlink=0"
+                    "fsids=$encoded&dlink=1&thumb=1&extra=1"
                 }
 
                 var metaResp = executeWithRetry("/api/filemetas?$queryParam", cookie)
@@ -663,24 +769,13 @@ class TeraBoxApiClient @Inject constructor(
                     val info = metaJson.optJSONArray("info") ?: metaJson.optJSONArray("list")
                     if (info != null && info.length() > 0) {
                         val meta = info.getJSONObject(0)
-                        val thumbsObj = meta.optJSONObject("thumbs") ?: (try { JSONObject(meta.optString("thumbs")) } catch (_: Exception) { null })
-                        val rawThumb = thumbsObj?.optString("url3")?.takeIf { it.isNotBlank() }
-                            ?: thumbsObj?.optString("url2")?.takeIf { it.isNotBlank() }
-                            ?: thumbsObj?.optString("url1")?.takeIf { it.isNotBlank() }
-                            ?: thumbsObj?.optString("icon")?.takeIf { it.isNotBlank() }
-                            ?: meta.optString("thumb").takeIf { it.isNotBlank() }
-                            ?: meta.optString("thumbnail").takeIf { it.isNotBlank() }
-
-                        thumbUrl = rawThumb?.replace("\\/", "/")?.replace("&amp;", "&")
-                        if (!thumbUrl.isNullOrBlank()) {
-                            thumbnailUrls["${account.id}:$nodeIdOrPath"] = thumbUrl
-                            thumbnailUrls[nodeIdOrPath] = thumbUrl
-                        }
+                        thumbUrl = cacheThumbnailUrl(account, meta, meta.opt("fs_id")?.toString() ?: nodeIdOrPath, nodeIdOrPath)
                     }
                 }
             }
 
             if (thumbUrl.isNullOrBlank()) {
+                android.util.Log.w("TeraBoxApiClient", "No thumbnail URL for $nodeIdOrPath")
                 return@withContext Result.failure(IOException("No thumbnail found for $nodeIdOrPath"))
             }
 
@@ -690,7 +785,18 @@ class TeraBoxApiClient @Inject constructor(
                 "${getBaseUrl()}$thumbUrl"
             }
 
-            val bytes = fetchThumbnailBytes(finalUrl, cookie)
+            var bytes = fetchThumbnailBytes(finalUrl, cookie)
+            if ((bytes == null || bytes.isEmpty()) && !cachedUrl.isNullOrBlank() && nodeIdOrPath.startsWith("/")) {
+                // The remembered URL was rejected (signed URLs expire) — fetch a fresh one once.
+                val freshUrl = try {
+                    refreshThumbnailUrlsFromParent(account, cookie, nodeIdOrPath)
+                } catch (e: Exception) {
+                    null
+                }
+                if (!freshUrl.isNullOrBlank() && freshUrl != finalUrl) {
+                    bytes = fetchThumbnailBytes(freshUrl, cookie)
+                }
+            }
             if (bytes == null || bytes.isEmpty()) {
                 return@withContext Result.failure(IOException("Failed to download thumbnail bytes for $nodeIdOrPath"))
             }
@@ -750,7 +856,8 @@ class TeraBoxApiClient @Inject constructor(
                         path = targetPath,
                         size = fileSize,
                         isDirectory = false,
-                        lastModified = System.currentTimeMillis()
+                        lastModified = System.currentTimeMillis(),
+                        extension = localFile.extension
                     )
                 )
             }
@@ -823,7 +930,8 @@ class TeraBoxApiClient @Inject constructor(
                     path = targetPath,
                     size = fileSize,
                     isDirectory = false,
-                    lastModified = System.currentTimeMillis()
+                    lastModified = System.currentTimeMillis(),
+                    extension = localFile.extension
                 )
             )
         } catch (e: Exception) {

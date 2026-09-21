@@ -55,6 +55,16 @@ import com.antigravity.filemanager.utils.rememberFoldablePosture
 import java.io.File
 import java.util.Locale
 
+
+/**
+ * Route arguments are already decoded once by Navigation, so a streamed cloud URL arrives as a
+ * plain http(s) URL. Decoding it again rewrites its percent-escapes (e.g. TeraBox's "%2F" in the
+ * path parameter), which changes the URL and stops it matching the headers stored for it in
+ * [CloudStreamHeaders] — the request then goes out without its credentials.
+ */
+private fun decodeViewerPathArg(arg: String): String =
+    if (arg.startsWith("http://") || arg.startsWith("https://")) arg else Uri.decode(arg)
+
 private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng")
 private val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v")
 
@@ -110,7 +120,7 @@ fun ImageViewerScreen(
     cloudMediaViewerViewModel: CloudMediaViewerViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
-    val actualInitialPath = remember(initialPath) { Uri.decode(initialPath) }
+    val actualInitialPath = remember(initialPath) { decodeViewerPathArg(initialPath) }
     val actualParentPath = remember(parentPath) { Uri.decode(parentPath) }
     val actualFileName = remember(fileName) { Uri.decode(fileName) }
     // A tapped Dropbox/Google Drive image (including .gif) may already be a direct streamable
@@ -445,6 +455,8 @@ private fun ZoomableImagePage(
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var intrinsicSize by remember { mutableStateOf<Size?>(null) }
+    // A streamed image shows nothing (a black page) until Coil has fetched and decoded it.
+    var isImageLoading by remember(media) { mutableStateOf(true) }
     val density = LocalDensity.current
     val targetSpacingPx = remember(density) { with(density) { 16.dp.toPx() } }
 
@@ -511,6 +523,8 @@ private fun ZoomableImagePage(
             contentDescription = displayName,
             contentScale = ContentScale.Fit,
             onState = { state ->
+                isImageLoading = state is coil.compose.AsyncImagePainter.State.Loading ||
+                    state is coil.compose.AsyncImagePainter.State.Empty
                 if (state is coil.compose.AsyncImagePainter.State.Success) {
                     intrinsicSize = state.painter.intrinsicSize
                 } else if (state is coil.compose.AsyncImagePainter.State.Error) {
@@ -554,6 +568,9 @@ private fun ZoomableImagePage(
                     translationY = offset.y
                 }
         )
+        if (isImageLoading) {
+            CircularProgressIndicator(color = TealPrimary)
+        }
     }
 }
 
@@ -569,7 +586,7 @@ fun VideoPlayerScreen(
     cloudMediaViewerViewModel: CloudMediaViewerViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
-    val actualInitialPath = remember(initialPath) { Uri.decode(initialPath) }
+    val actualInitialPath = remember(initialPath) { decodeViewerPathArg(initialPath) }
     val actualParentPath = remember(parentPath) { Uri.decode(parentPath) }
     val actualFileName = remember(fileName) { Uri.decode(fileName) }
     // A tapped Dropbox video may already be a pre-signed streamable https URL (see
@@ -854,22 +871,42 @@ fun VideoPlayerScreen(
                         }
                     }
 
+                    // PlayerView stays black until the first frame is ready — for a stream that
+                    // means the whole connect/buffer time, so show a spinner over it meanwhile.
+                    var isBuffering by remember(exoPlayer) { mutableStateOf(true) }
                     DisposableEffect(exoPlayer) {
+                        val listener = object : androidx.media3.common.Player.Listener {
+                            override fun onPlaybackStateChanged(playbackState: Int) {
+                                isBuffering = playbackState == androidx.media3.common.Player.STATE_BUFFERING ||
+                                    (playbackState == androidx.media3.common.Player.STATE_IDLE && exoPlayer.playerError == null)
+                            }
+
+                            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                                isBuffering = false
+                            }
+                        }
+                        exoPlayer.addListener(listener)
                         onDispose {
+                            exoPlayer.removeListener(listener)
                             exoPlayer.release()
                         }
                     }
 
-                    AndroidView(
-                        factory = { ctx ->
-                            PlayerView(ctx).apply {
-                                player = exoPlayer
-                                useController = true
-                            }
-                        },
-                        update = { view -> view.player = exoPlayer },
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        AndroidView(
+                            factory = { ctx ->
+                                PlayerView(ctx).apply {
+                                    player = exoPlayer
+                                    useController = true
+                                }
+                            },
+                            update = { view -> view.player = exoPlayer },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        if (isBuffering) {
+                            CircularProgressIndicator(color = TealPrimary)
+                        }
+                    }
                 }
             }
         }

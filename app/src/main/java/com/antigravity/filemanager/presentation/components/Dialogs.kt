@@ -600,7 +600,8 @@ fun AddCloudDialog(
     onDismiss: () -> Unit,
     isAddingAccount: Boolean = false,
     addAccountError: String? = null,
-    onClearAddAccountError: () -> Unit = {}
+    onClearAddAccountError: () -> Unit = {},
+    validateTeraBoxSession: (suspend (String) -> Boolean)? = null
 ) {
     var selectedProvider by remember { mutableStateOf(CloudProvider.GOOGLE_DRIVE) }
     var accountName by remember { mutableStateOf("Google Drive") }
@@ -608,7 +609,6 @@ fun AddCloudDialog(
     var megaEmail by remember { mutableStateOf("") }
     var megaPassword by remember { mutableStateOf("") }
     var megaPasswordVisible by remember { mutableStateOf(false) }
-    var teraboxToken by remember { mutableStateOf("") }
     var showTeraBoxWebView by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
 
@@ -616,6 +616,7 @@ fun AddCloudDialog(
         CloudLoginWebViewDialog(
             provider = CloudProvider.TERABOX,
             customAccountName = accountName.ifBlank { "TeraBox" },
+            validateTeraBoxSession = validateTeraBoxSession,
             onAuthSuccess = { provider, accName, email, token, session ->
                 showTeraBoxWebView = false
                 onSelectProvider(provider, accName, email, token, session)
@@ -827,27 +828,10 @@ fun AddCloudDialog(
                     }
                 } else if (selectedProvider == CloudProvider.TERABOX) {
                     Text(
-                        text = "Sign in via in-app browser or enter your TeraBox 'ndus' cookie/token below:",
+                        text = "Sign in to your TeraBox account with the in-app browser.",
                         color = TextSecondary,
                         fontSize = 12.sp,
                         lineHeight = 16.sp
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = teraboxToken,
-                        onValueChange = { teraboxToken = it; errorMessage = null; onClearAddAccountError() },
-                        label = { Text("TeraBox token (ndus)") },
-                        placeholder = { Text("ndus=... or token value", color = TextSecondary.copy(alpha = 0.5f)) },
-                        singleLine = true,
-                        enabled = !isAddingAccount,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = TextPrimary,
-                            unfocusedTextColor = TextPrimary,
-                            focusedBorderColor = TealPrimary,
-                            unfocusedBorderColor = TextSecondary,
-                            cursorColor = TealPrimary
-                        ),
-                        modifier = Modifier.fillMaxWidth()
                     )
                     if (isAddingAccount) {
                         Spacer(modifier = Modifier.height(10.dp))
@@ -891,13 +875,8 @@ fun AddCloudDialog(
                             }
                         }
                         CloudProvider.TERABOX -> {
-                            val trimmedToken = teraboxToken.trim()
-                            if (trimmedToken.isBlank()) {
-                                showTeraBoxWebView = true
-                            } else {
-                                errorMessage = null
-                                onSelectProvider(CloudProvider.TERABOX, accountName.ifBlank { "TeraBox" }, "", trimmedToken, trimmedToken)
-                            }
+                            errorMessage = null
+                            showTeraBoxWebView = true
                         }
                     }
                 },
@@ -920,7 +899,7 @@ fun AddCloudDialog(
                 Text(
                     text = when (selectedProvider) {
                         CloudProvider.MEGA -> if (isAddingAccount) "SIGNING IN..." else "SIGN IN"
-                        CloudProvider.TERABOX -> if (isAddingAccount) "CONNECTING..." else if (teraboxToken.isNotBlank()) "CONNECT" else "SIGN IN VIA BROWSER"
+                        CloudProvider.TERABOX -> if (isAddingAccount) "CONNECTING..." else "SIGN IN VIA BROWSER"
                         else -> "SIGN IN & CONNECT"
                     },
                     fontWeight = FontWeight.Bold,
@@ -945,6 +924,7 @@ fun CloudLoginWebViewDialog(
     provider: CloudProvider,
     customAccountName: String,
     initialEmail: String = "",
+    validateTeraBoxSession: (suspend (String) -> Boolean)? = null,
     onAuthSuccess: (CloudProvider, String, String, String?, String?) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -954,6 +934,53 @@ fun CloudLoginWebViewDialog(
     val finalAccountName = remember { customAccountName.ifBlank { provider.name } }
     var hasRedirected by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    val currentOnAuthSuccess by rememberUpdatedState(onAuthSuccess)
+    val loginScope = rememberCoroutineScope()
+
+    // TeraBox sets an "ndus" cookie before the login is actually complete, so its mere presence
+    // can't be trusted: finishing on it closed the browser with a session the API rejects, and the
+    // user had to sign in a second time. The session is confirmed against the API instead, and
+    // re-checked periodically because TeraBox's login is an in-page flow that doesn't always
+    // trigger a page load.
+    val teraBoxCheck = remember { object { var cookies = ""; var at = 0L } }
+    suspend fun tryFinishTeraBoxLogin(force: Boolean = false): Boolean {
+        if (hasRedirected) return true
+        val cm = CookieManager.getInstance()
+        val c1 = cm.getCookie("https://www.terabox.com") ?: ""
+        val c2 = cm.getCookie("https://terabox.com") ?: ""
+        val cookies = if (c1.isNotBlank() && c2.isNotBlank() && c1 != c2) "$c1; $c2" else c1.ifBlank { c2 }
+        if (!cookies.contains("ndus=")) return false
+        val now = System.currentTimeMillis()
+        if (!force && cookies == teraBoxCheck.cookies && now - teraBoxCheck.at < 8_000L) return false
+        teraBoxCheck.cookies = cookies
+        teraBoxCheck.at = now
+        if (validateTeraBoxSession?.invoke(cookies) == false || hasRedirected) return false
+        val ndus = cookies.substringAfter("ndus=").substringBefore(";").trim()
+        hasRedirected = true
+        currentOnAuthSuccess(
+            CloudProvider.TERABOX,
+            finalAccountName,
+            detectedEmail.ifBlank { initialEmail.ifBlank { "terabox_user" } },
+            ndus,
+            cookies
+        )
+        return true
+    }
+
+    if (provider == CloudProvider.TERABOX && validateTeraBoxSession != null) {
+        LaunchedEffect(provider) {
+            while (!hasRedirected) {
+                kotlinx.coroutines.delay(1500)
+                try {
+                    if (tryFinishTeraBoxLogin()) break
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w("TeraBoxLogin", "Session check failed: ${e.message}")
+                }
+            }
+        }
+    }
 
     val startUrl = remember(provider) {
         when (provider) {
@@ -1035,11 +1062,17 @@ fun CloudLoginWebViewDialog(
                                         CloudProvider.MEGA -> {}
                                         CloudProvider.TERABOX -> {
                                             cookieManager.flush()
-                                            val tbCookies = (cookieManager.getCookie("https://www.terabox.com") ?: "") + "; " + (cookieManager.getCookie("https://terabox.com") ?: "")
-                                            if (!tbCookies.contains("ndus=")) {
-                                                Toast.makeText(context, "Please complete TeraBox login before tapping DONE.", Toast.LENGTH_SHORT).show()
-                                                return@Button
+                                            loginScope.launch {
+                                                val finished = try {
+                                                    tryFinishTeraBoxLogin(force = true)
+                                                } catch (e: Exception) {
+                                                    false
+                                                }
+                                                if (!finished) {
+                                                    Toast.makeText(context, "Please complete TeraBox login before tapping DONE.", Toast.LENGTH_SHORT).show()
+                                                }
                                             }
+                                            return@Button
                                         }
                                     }
 
@@ -1966,7 +1999,9 @@ fun CloudLoginWebViewDialog(
                                     val parsedPath = try { java.net.URI(url ?: "").path?.lowercase(Locale.getDefault()) ?: "" } catch (e: Exception) { "" }
                                     val isDropboxHome = (parsedPath.startsWith("/home") || parsedPath.startsWith("/personal") || parsedPath.startsWith("/work") || parsedPath.startsWith("/browse")) && !parsedPath.contains("login") && !parsedPath.contains("verify") && !parsedPath.contains("twofactor")
                                     val isGoogleDriveHome = (parsedPath.contains("/drive/my-drive") || parsedPath.contains("/drive/u/")) && !parsedPath.contains("signin") && !parsedPath.contains("identifier")
-                                    val isTeraBoxAuthed = provider == CloudProvider.TERABOX && ((cookieManager.getCookie("https://www.terabox.com") ?: "") + "; " + (cookieManager.getCookie("https://terabox.com") ?: "")).contains("ndus=")
+                                    // With a session validator the periodic check above finishes TeraBox login.
+                                    val isTeraBoxAuthed = provider == CloudProvider.TERABOX && validateTeraBoxSession == null &&
+                                        ((cookieManager.getCookie("https://www.terabox.com") ?: "") + "; " + (cookieManager.getCookie("https://terabox.com") ?: "")).contains("ndus=")
 
                                     if ((isDropboxHome || isGoogleDriveHome || isTeraBoxAuthed) && !hasRedirected) {
                                         cookieManager.flush()

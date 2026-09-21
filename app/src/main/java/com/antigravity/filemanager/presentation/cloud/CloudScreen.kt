@@ -83,7 +83,8 @@ fun CloudScreen(
             onDismiss = { viewModel.setShowAddDialog(false) },
             isAddingAccount = uiState.isAddingAccount,
             addAccountError = uiState.addAccountError,
-            onClearAddAccountError = { viewModel.clearAddAccountError() }
+            onClearAddAccountError = { viewModel.clearAddAccountError() },
+            validateTeraBoxSession = { viewModel.validateTeraBoxSession(it) }
         )
     }
 
