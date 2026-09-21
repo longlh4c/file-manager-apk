@@ -1597,8 +1597,11 @@ fun CloudLoginWebViewDialog(
                                             ?: sid
 
                                         if (provider == CloudProvider.TERABOX) {
-                                            val tbCookies = cookieManager.getCookie("https://www.terabox.com") ?: ""
-                                            val ndus = if (tbCookies.contains("ndus=")) tbCookies.substringAfter("ndus=").substringBefore(";") else ""
+                                            cookieManager.flush()
+                                            val c1 = cookieManager.getCookie("https://www.terabox.com") ?: ""
+                                            val c2 = cookieManager.getCookie("https://terabox.com") ?: ""
+                                            val tbCookies = if (c1.isNotBlank() && c2.isNotBlank() && c1 != c2) "$c1; $c2" else c1.ifBlank { c2 }
+                                            val ndus = if (tbCookies.contains("ndus=")) tbCookies.substringAfter("ndus=").substringBefore(";").trim() else ""
                                             hasRedirected = true
                                             onAuthSuccess(CloudProvider.TERABOX, finalAccountName, detectedEmail.ifBlank { "terabox_user" }, ndus, tbCookies)
                                             return@evaluateJavascript

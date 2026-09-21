@@ -20,6 +20,17 @@ class TeraBoxApiClientTest {
     }
 
     @Test
+    fun testDomainPrefixAndBaseUrl() {
+        assertEquals("https://www.terabox.com", client.getBaseUrl())
+        client.setDomainPrefix("dm")
+        assertEquals("https://dm.terabox.com", client.getBaseUrl())
+        client.setDomainPrefix("jp")
+        assertEquals("https://jp.terabox.com", client.getBaseUrl())
+        client.setDomainPrefix(null)
+        assertEquals("https://www.terabox.com", client.getBaseUrl())
+    }
+
+    @Test
     fun testExtractCleanNdus() {
         // Direct value
         assertEquals("test_token_123", client.extractCleanNdus("test_token_123"))

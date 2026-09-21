@@ -163,8 +163,8 @@ class CloudViewModel @Inject constructor(
             val accountId = UUID.randomUUID().toString()
 
             if (provider == CloudProvider.TERABOX) {
-                val rawToken = token ?: session ?: ""
-                val cleanNdus = teraBoxApiClient.extractCleanNdus(rawToken)
+                val rawCookie = if (!session.isNullOrBlank() && session.contains("ndus=")) session!! else (token ?: session ?: "")
+                val cleanNdus = teraBoxApiClient.extractCleanNdus(rawCookie)
                 if (cleanNdus.isBlank()) {
                     _uiState.value = _uiState.value.copy(
                         isAddingAccount = false,
@@ -172,7 +172,9 @@ class CloudViewModel @Inject constructor(
                     )
                     return@launch
                 }
-                val quotaRes = teraBoxApiClient.getQuota(cleanNdus)
+                // Use full rawCookie (or fallback to ndus) to authenticate
+                val effectiveCookie = if (rawCookie.contains("ndus=")) rawCookie else "ndus=$cleanNdus"
+                val quotaRes = teraBoxApiClient.getQuota(effectiveCookie)
                 if (quotaRes.isFailure) {
                     _uiState.value = _uiState.value.copy(
                         isAddingAccount = false,
@@ -183,7 +185,7 @@ class CloudViewModel @Inject constructor(
                 val quota = quotaRes.getOrNull()
                 val actualTotal = if (quota != null && quota.totalBytes > 0) quota.totalBytes else totalBytes
                 val actualUsed = quota?.usedBytes ?: 0L
-                val userInfoRes = teraBoxApiClient.getUserInfo(cleanNdus)
+                val userInfoRes = teraBoxApiClient.getUserInfo(effectiveCookie)
                 val uInfo = userInfoRes.getOrNull()
                 val resolvedEmail = if (!uInfo?.email.isNullOrBlank()) {
                     uInfo!!.email!!
@@ -204,7 +206,7 @@ class CloudViewModel @Inject constructor(
                     totalSpaceBytes = actualTotal,
                     usedSpaceBytes = actualUsed,
                     accessToken = cleanNdus,
-                    sessionHandle = cleanNdus,
+                    sessionHandle = effectiveCookie,
                     refreshToken = null
                 )
                 cloudUseCase.addAccount(newAccount)

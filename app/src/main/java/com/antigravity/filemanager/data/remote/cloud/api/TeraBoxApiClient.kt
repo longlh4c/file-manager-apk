@@ -40,9 +40,22 @@ class TeraBoxApiClient @Inject constructor(
     private val okHttpClient: OkHttpClient
 ) {
     companion object {
-        const val BASE_URL = "https://www.terabox.com"
+        const val DEFAULT_BASE_URL = "https://www.terabox.com"
         const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         const val REFERER = "https://www.terabox.com/main"
+        const val APP_ID = "250528"
+    }
+
+    @Volatile
+    private var currentDomainPrefix: String? = null
+
+    fun getBaseUrl(): String {
+        val prefix = currentDomainPrefix
+        return if (!prefix.isNullOrBlank()) "https://$prefix.terabox.com" else DEFAULT_BASE_URL
+    }
+
+    fun setDomainPrefix(prefix: String?) {
+        currentDomainPrefix = prefix?.takeIf { it.isNotBlank() }
     }
 
     fun extractCleanNdus(rawToken: String?): String {
@@ -60,19 +73,61 @@ class TeraBoxApiClient @Inject constructor(
         return trimmed
     }
 
-    private fun getNdusToken(account: CloudAccount): String {
+    private fun getCookieString(account: CloudAccount): String {
+        val session = account.sessionHandle
+        if (!session.isNullOrBlank() && session.contains("ndus=")) {
+            return session
+        }
         val raw = account.accessToken ?: account.sessionHandle ?: ""
-        return extractCleanNdus(raw)
+        val cleanNdus = extractCleanNdus(raw)
+        return if (cleanNdus.isNotBlank()) "ndus=$cleanNdus" else ""
     }
 
-    private fun buildAuthorizedRequest(url: String, ndus: String, method: String = "GET", body: RequestBody? = null): Request {
-        val cleanNdus = extractCleanNdus(ndus)
+    private fun buildCookieHeader(raw: String): String {
+        val trimmed = raw.trim()
+        return if (trimmed.contains("ndus=")) {
+            trimmed
+        } else if (trimmed.isNotBlank()) {
+            "ndus=$trimmed"
+        } else {
+            ""
+        }
+    }
+
+    /**
+     * Appends standard TeraBox query parameters: app_id=250528, web=1, channel=dubox, clienttype=0
+     */
+    private fun appendStandardParams(url: String): String {
+        val httpUrl = url.toHttpUrlOrNull() ?: return url
+        val builder = httpUrl.newBuilder()
+        if (httpUrl.queryParameter("app_id") == null) {
+            builder.addQueryParameter("app_id", APP_ID)
+        }
+        if (httpUrl.queryParameter("web") == null) {
+            builder.addQueryParameter("web", "1")
+        }
+        if (httpUrl.queryParameter("channel") == null) {
+            builder.addQueryParameter("channel", "dubox")
+        }
+        if (httpUrl.queryParameter("clienttype") == null) {
+            builder.addQueryParameter("clienttype", "0")
+        }
+        return builder.build().toString()
+    }
+
+    private fun buildAuthorizedRequest(url: String, cookieHeader: String, method: String = "GET", body: RequestBody? = null): Request {
+        val finalUrl = appendStandardParams(url)
+        val finalCookie = buildCookieHeader(cookieHeader)
         val builder = Request.Builder()
-            .url(url)
+            .url(finalUrl)
             .addHeader("User-Agent", USER_AGENT)
             .addHeader("Referer", REFERER)
             .addHeader("Accept", "application/json, text/plain, */*")
-            .addHeader("Cookie", "ndus=$cleanNdus")
+            .addHeader("X-Requested-With", "XMLHttpRequest")
+
+        if (finalCookie.isNotBlank()) {
+            builder.addHeader("Cookie", finalCookie)
+        }
 
         if (method.equals("POST", ignoreCase = true)) {
             builder.post(body ?: FormBody.Builder().build())
@@ -82,15 +137,49 @@ class TeraBoxApiClient @Inject constructor(
         return builder.build()
     }
 
-    suspend fun getUserInfo(ndus: String): Result<TeraBoxUserInfo> = withContext(Dispatchers.IO) {
+    /**
+     * Executes request with automatic regional domain prefix redirection if errno == -6.
+     */
+    private fun executeWithRetry(
+        pathWithQuery: String,
+        cookieHeader: String,
+        method: String = "GET",
+        body: RequestBody? = null
+    ): Pair<Response, String> {
+        val fullUrl = "${getBaseUrl()}$pathWithQuery"
+        val req = buildAuthorizedRequest(fullUrl, cookieHeader, method, body)
+        val resp = okHttpClient.newCall(req).execute()
+
+        // Capture Url-Domain-Prefix header if present in any response
+        val domainPrefix = resp.header("Url-Domain-Prefix")
+        if (!domainPrefix.isNullOrBlank() && domainPrefix != currentDomainPrefix) {
+            currentDomainPrefix = domainPrefix
+        }
+
+        val bodyString = resp.body?.string() ?: ""
+
+        // Check if errno == -6 ("user not login" due to wrong domain cluster)
+        if (bodyString.contains("\"errno\":-6") || bodyString.contains("\"errno\": -6")) {
+            val targetPrefix = domainPrefix?.takeIf { it.isNotBlank() } ?: if (currentDomainPrefix == null) "dm" else null
+            if (targetPrefix != null && targetPrefix != currentDomainPrefix) {
+                currentDomainPrefix = targetPrefix
+                val retryUrl = "${getBaseUrl()}$pathWithQuery"
+                val retryReq = buildAuthorizedRequest(retryUrl, cookieHeader, method, body)
+                val retryResp = okHttpClient.newCall(retryReq).execute()
+                val retryBody = retryResp.body?.string() ?: ""
+                return Pair(retryResp, retryBody)
+            }
+        }
+
+        return Pair(resp, bodyString)
+    }
+
+    suspend fun getUserInfo(cookie: String): Result<TeraBoxUserInfo> = withContext(Dispatchers.IO) {
         try {
-            val url = "$BASE_URL/api/user/getinfo"
-            val request = buildAuthorizedRequest(url, ndus)
-            val response = okHttpClient.newCall(request).execute()
+            val (response, body) = executeWithRetry("/api/user/getinfo", cookie)
             if (!response.isSuccessful) {
                 return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
             }
-            val body = response.body?.string() ?: ""
             val json = JSONObject(body)
             val errno = json.optInt("errno", -1)
             if (errno != 0) {
@@ -112,15 +201,12 @@ class TeraBoxApiClient @Inject constructor(
         }
     }
 
-    suspend fun getQuota(ndus: String): Result<TeraBoxQuota> = withContext(Dispatchers.IO) {
+    suspend fun getQuota(cookie: String): Result<TeraBoxQuota> = withContext(Dispatchers.IO) {
         try {
-            val url = "$BASE_URL/api/quota?checkexpire=1&checkfree=1"
-            val request = buildAuthorizedRequest(url, ndus)
-            val response = okHttpClient.newCall(request).execute()
+            val (response, body) = executeWithRetry("/api/quota?checkexpire=1&checkfree=1", cookie)
             if (!response.isSuccessful) {
                 return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
             }
-            val body = response.body?.string() ?: ""
             val json = JSONObject(body)
             val errno = json.optInt("errno", -1)
             if (errno != 0) {
@@ -137,8 +223,8 @@ class TeraBoxApiClient @Inject constructor(
 
     suspend fun listFiles(account: CloudAccount, remotePath: String): Result<List<FileItem>> = withContext(Dispatchers.IO) {
         try {
-            val ndus = getNdusToken(account)
-            if (ndus.isBlank()) {
+            val cookie = getCookieString(account)
+            if (cookie.isBlank()) {
                 return@withContext Result.failure(IOException("TeraBox session expired or missing token"))
             }
 
@@ -149,14 +235,12 @@ class TeraBoxApiClient @Inject constructor(
             }
 
             val encodedDir = URLEncoder.encode(cleanPath, "UTF-8")
-            val url = "$BASE_URL/api/list?dir=$encodedDir&order=name&desc=0&num=1000&page=1&showempty=0"
-            val request = buildAuthorizedRequest(url, ndus)
-            val response = okHttpClient.newCall(request).execute()
+            val pathWithQuery = "/api/list?dir=$encodedDir&order=name&desc=0&num=1000&page=1&showempty=0"
+            val (response, body) = executeWithRetry(pathWithQuery, cookie)
             if (!response.isSuccessful) {
                 return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
             }
 
-            val body = response.body?.string() ?: ""
             val json = JSONObject(body)
             val errno = json.optInt("errno", -1)
             if (errno != 0) {
@@ -211,7 +295,7 @@ class TeraBoxApiClient @Inject constructor(
 
     suspend fun createFolder(account: CloudAccount, folderName: String, parentPath: String): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
-            val ndus = getNdusToken(account)
+            val cookie = getCookieString(account)
             val cleanParent = when {
                 parentPath.isBlank() || parentPath == "/" -> ""
                 parentPath.endsWith("/") -> parentPath.trimEnd('/')
@@ -219,7 +303,6 @@ class TeraBoxApiClient @Inject constructor(
             }
             val targetPath = "$cleanParent/$folderName"
 
-            val url = "$BASE_URL/api/create"
             val formBody = FormBody.Builder()
                 .add("path", targetPath)
                 .add("isdir", "1")
@@ -227,13 +310,11 @@ class TeraBoxApiClient @Inject constructor(
                 .add("block_list", "[]")
                 .build()
 
-            val request = buildAuthorizedRequest(url, ndus, method = "POST", body = formBody)
-            val response = okHttpClient.newCall(request).execute()
+            val (response, body) = executeWithRetry("/api/create", cookie, method = "POST", body = formBody)
             if (!response.isSuccessful) {
                 return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
             }
 
-            val body = response.body?.string() ?: ""
             val json = JSONObject(body)
             val errno = json.optInt("errno", -1)
             if (errno != 0 && errno != -8) { // errno -8 = already exists
@@ -260,20 +341,17 @@ class TeraBoxApiClient @Inject constructor(
 
     suspend fun deleteFile(account: CloudAccount, remotePath: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val ndus = getNdusToken(account)
-            val url = "$BASE_URL/api/filemanager?opera=delete"
+            val cookie = getCookieString(account)
             val fileListJson = JSONArray().put(remotePath).toString()
             val formBody = FormBody.Builder()
                 .add("filelist", fileListJson)
                 .build()
 
-            val request = buildAuthorizedRequest(url, ndus, method = "POST", body = formBody)
-            val response = okHttpClient.newCall(request).execute()
+            val (response, body) = executeWithRetry("/api/filemanager?opera=delete", cookie, method = "POST", body = formBody)
             if (!response.isSuccessful) {
                 return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
             }
 
-            val body = response.body?.string() ?: ""
             val json = JSONObject(body)
             val errno = json.optInt("errno", -1)
             if (errno != 0) {
@@ -287,8 +365,7 @@ class TeraBoxApiClient @Inject constructor(
 
     suspend fun renameFile(account: CloudAccount, oldPath: String, newName: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val ndus = getNdusToken(account)
-            val url = "$BASE_URL/api/filemanager?opera=rename"
+            val cookie = getCookieString(account)
             val renameEntry = JSONObject().apply {
                 put("path", oldPath)
                 put("newname", newName)
@@ -298,13 +375,11 @@ class TeraBoxApiClient @Inject constructor(
                 .add("filelist", fileListJson)
                 .build()
 
-            val request = buildAuthorizedRequest(url, ndus, method = "POST", body = formBody)
-            val response = okHttpClient.newCall(request).execute()
+            val (response, body) = executeWithRetry("/api/filemanager?opera=rename", cookie, method = "POST", body = formBody)
             if (!response.isSuccessful) {
                 return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
             }
 
-            val body = response.body?.string() ?: ""
             val json = JSONObject(body)
             val errno = json.optInt("errno", -1)
             if (errno != 0) {
@@ -323,15 +398,28 @@ class TeraBoxApiClient @Inject constructor(
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
-            val ndus = getNdusToken(account)
+            val cookie = getCookieString(account)
             // 1. Get file download link
             val encodedPath = URLEncoder.encode(remotePath, "UTF-8")
-            val downloadApiUrl = "$BASE_URL/rest/2.0/pcs/file?method=download&path=$encodedPath"
+            val downloadApiUrl = "${getBaseUrl()}/rest/2.0/pcs/file?method=download&path=$encodedPath"
 
-            val request = buildAuthorizedRequest(downloadApiUrl, ndus)
-            val response = okHttpClient.newCall(request).execute()
+            var request = buildAuthorizedRequest(downloadApiUrl, cookie)
+            var response = okHttpClient.newCall(request).execute()
+            val domainPrefix = response.header("Url-Domain-Prefix")
+            if (!domainPrefix.isNullOrBlank() && domainPrefix != currentDomainPrefix) {
+                currentDomainPrefix = domainPrefix
+            }
+
             if (!response.isSuccessful) {
-                return@withContext Result.failure(IOException("Download failed with HTTP ${response.code}"))
+                // If failed, try regional baseUrl once
+                if (currentDomainPrefix != null) {
+                    val retryUrl = "${getBaseUrl()}/rest/2.0/pcs/file?method=download&path=$encodedPath"
+                    request = buildAuthorizedRequest(retryUrl, cookie)
+                    response = okHttpClient.newCall(request).execute()
+                }
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(IOException("Download failed with HTTP ${response.code}"))
+                }
             }
 
             val responseBody = response.body ?: return@withContext Result.failure(IOException("Empty response body"))
@@ -371,7 +459,7 @@ class TeraBoxApiClient @Inject constructor(
         onProgress: ((bytesUploaded: Long, totalBytes: Long) -> Unit)? = null
     ): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
-            val ndus = getNdusToken(account)
+            val cookie = getCookieString(account)
             val cleanParent = when {
                 remoteParentDir.isBlank() || remoteParentDir == "/" -> ""
                 remoteParentDir.endsWith("/") -> remoteParentDir.trimEnd('/')
@@ -385,7 +473,6 @@ class TeraBoxApiClient @Inject constructor(
             val blockListJson = JSONArray().put(md5).toString()
 
             // 2. Precreate file
-            val precreateUrl = "$BASE_URL/api/precreate"
             val precreateBody = FormBody.Builder()
                 .add("path", targetPath)
                 .add("size", fileSize.toString())
@@ -394,13 +481,12 @@ class TeraBoxApiClient @Inject constructor(
                 .add("block_list", blockListJson)
                 .build()
 
-            val precreateReq = buildAuthorizedRequest(precreateUrl, ndus, method = "POST", body = precreateBody)
-            val precreateResp = okHttpClient.newCall(precreateReq).execute()
+            val (precreateResp, precreateBodyStr) = executeWithRetry("/api/precreate", cookie, method = "POST", body = precreateBody)
             if (!precreateResp.isSuccessful) {
                 return@withContext Result.failure(IOException("Precreate failed: HTTP ${precreateResp.code}"))
             }
 
-            val precreateJson = JSONObject(precreateResp.body?.string() ?: "")
+            val precreateJson = JSONObject(precreateBodyStr)
             val precreateErr = precreateJson.optInt("errno", -1)
             val returnType = precreateJson.optInt("return_type", 1) // 2 = rapid upload (already exists on server)
 
@@ -423,7 +509,7 @@ class TeraBoxApiClient @Inject constructor(
             val uploadId = precreateJson.optString("uploadid", "")
 
             // 3. Upload slice
-            val uploadUrl = "$BASE_URL/rest/2.0/pcs/superfile2?method=upload&type=tmpfile&path=${URLEncoder.encode(targetPath, "UTF-8")}&uploadid=$uploadId&partseq=0"
+            val uploadUrl = "${getBaseUrl()}/rest/2.0/pcs/superfile2?method=upload&type=tmpfile&path=${URLEncoder.encode(targetPath, "UTF-8")}&uploadid=$uploadId&partseq=0"
 
             val fileRequestBody = object : RequestBody() {
                 private val fileBody = localFile.asRequestBody("application/octet-stream".toMediaTypeOrNull())
@@ -453,14 +539,13 @@ class TeraBoxApiClient @Inject constructor(
                 .addFormDataPart("file", localFile.name, fileRequestBody)
                 .build()
 
-            val uploadReq = buildAuthorizedRequest(uploadUrl, ndus, method = "POST", body = multipartBody)
+            val uploadReq = buildAuthorizedRequest(uploadUrl, cookie, method = "POST", body = multipartBody)
             val uploadResp = okHttpClient.newCall(uploadReq).execute()
             if (!uploadResp.isSuccessful) {
                 return@withContext Result.failure(IOException("Slice upload failed: HTTP ${uploadResp.code}"))
             }
 
             // 4. Create / Finalize
-            val createUrl = "$BASE_URL/api/create"
             val createBody = FormBody.Builder()
                 .add("path", targetPath)
                 .add("size", fileSize.toString())
@@ -469,13 +554,12 @@ class TeraBoxApiClient @Inject constructor(
                 .add("block_list", blockListJson)
                 .build()
 
-            val createReq = buildAuthorizedRequest(createUrl, ndus, method = "POST", body = createBody)
-            val createResp = okHttpClient.newCall(createReq).execute()
+            val (createResp, createBodyStr) = executeWithRetry("/api/create", cookie, method = "POST", body = createBody)
             if (!createResp.isSuccessful) {
                 return@withContext Result.failure(IOException("Create file failed: HTTP ${createResp.code}"))
             }
 
-            val createJson = JSONObject(createResp.body?.string() ?: "")
+            val createJson = JSONObject(createBodyStr)
             val createErr = createJson.optInt("errno", -1)
             if (createErr != 0) {
                 return@withContext Result.failure(IOException("Create file failed (errno: $createErr)"))
