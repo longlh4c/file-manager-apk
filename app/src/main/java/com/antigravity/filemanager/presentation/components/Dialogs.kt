@@ -600,7 +600,8 @@ fun AddCloudDialog(
     onDismiss: () -> Unit,
     isAddingAccount: Boolean = false,
     addAccountError: String? = null,
-    onClearAddAccountError: () -> Unit = {}
+    onClearAddAccountError: () -> Unit = {},
+    validateTeraBoxSession: (suspend (String) -> Boolean)? = null
 ) {
     var selectedProvider by remember { mutableStateOf(CloudProvider.GOOGLE_DRIVE) }
     var accountName by remember { mutableStateOf("Google Drive") }
@@ -608,7 +609,21 @@ fun AddCloudDialog(
     var megaEmail by remember { mutableStateOf("") }
     var megaPassword by remember { mutableStateOf("") }
     var megaPasswordVisible by remember { mutableStateOf(false) }
+    var showTeraBoxWebView by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
+
+    if (showTeraBoxWebView) {
+        CloudLoginWebViewDialog(
+            provider = CloudProvider.TERABOX,
+            customAccountName = accountName.ifBlank { "TeraBox" },
+            validateTeraBoxSession = validateTeraBoxSession,
+            onAuthSuccess = { provider, accName, email, token, session ->
+                showTeraBoxWebView = false
+                onSelectProvider(provider, accName, email, token, session)
+            },
+            onDismiss = { showTeraBoxWebView = false }
+        )
+    }
 
     val googleSignInLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -633,12 +648,6 @@ fun AddCloudDialog(
             .requestScopes(com.google.android.gms.common.api.Scope(com.google.api.services.drive.DriveScopes.DRIVE))
             .build()
         val client = GoogleSignIn.getClient(context, gso)
-        // Google Play Services silently reuses the last-signed-in account for this app and skips
-        // the account picker unless the client's cached session is cleared first — without this,
-        // adding a second Google account is impossible; every sign-in silently returns the same
-        // one already connected. signOut() only clears the local cached session (not the user's
-        // Google login elsewhere), so it's safe to call every time regardless of whether an
-        // account was already connected.
         client.signOut().addOnCompleteListener {
             googleSignInLauncher.launch(client.signInIntent)
         }
@@ -649,6 +658,7 @@ fun AddCloudDialog(
             CloudProvider.GOOGLE_DRIVE -> "Google Drive"
             CloudProvider.DROPBOX -> "Dropbox"
             CloudProvider.MEGA -> "MEGA"
+            CloudProvider.TERABOX -> "TeraBox"
         }
     }
 
@@ -671,7 +681,7 @@ fun AddCloudDialog(
                 Text(text = "Select Cloud Service:", color = TextSecondary, fontSize = 13.sp)
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // 3 Supported Cloud Providers: Google Drive, Dropbox, Mega
+                // 4 Supported Cloud Providers: Google Drive, Dropbox, Mega, TeraBox
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -700,6 +710,12 @@ fun AddCloudDialog(
                         },
                         modifier = Modifier.weight(1f)
                     )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     CloudProviderButton(
                         provider = CloudProvider.MEGA,
                         name = "MEGA",
@@ -708,6 +724,18 @@ fun AddCloudDialog(
                         onClick = {
                             selectedProvider = CloudProvider.MEGA
                             accountName = "MEGA"
+                            errorMessage = null
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    CloudProviderButton(
+                        provider = CloudProvider.TERABOX,
+                        name = "TeraBox (1TB)",
+                        pastelColor = Color(0xFF0084FF),
+                        isSelected = selectedProvider == CloudProvider.TERABOX,
+                        onClick = {
+                            selectedProvider = CloudProvider.TERABOX
+                            accountName = "TeraBox"
                             errorMessage = null
                         },
                         modifier = Modifier.weight(1f)
@@ -798,6 +826,22 @@ fun AddCloudDialog(
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(text = megaError, color = Color(0xFFFF6B6B), fontSize = 11.sp)
                     }
+                } else if (selectedProvider == CloudProvider.TERABOX) {
+                    Text(
+                        text = "Sign in to your TeraBox account with the in-app browser.",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+                    if (isAddingAccount) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = TealPrimary)
+                    }
+                    val tbError = errorMessage ?: addAccountError
+                    if (tbError != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(text = tbError, color = Color(0xFFFF6B6B), fontSize = 11.sp)
+                    }
                 } else {
                     Text(
                         text = "Tap 'SIGN IN & CONNECT' below to sign in securely to $providerDisplayName via the in-app browser.",
@@ -830,6 +874,10 @@ fun AddCloudDialog(
                                 onSelectProvider(CloudProvider.MEGA, accountName.ifBlank { "MEGA" }, trimmedEmail, null, megaPassword)
                             }
                         }
+                        CloudProvider.TERABOX -> {
+                            errorMessage = null
+                            showTeraBoxWebView = true
+                        }
                     }
                 },
                 enabled = !isAddingAccount,
@@ -849,10 +897,10 @@ fun AddCloudDialog(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (selectedProvider == CloudProvider.MEGA) {
-                        if (isAddingAccount) "SIGNING IN..." else "SIGN IN"
-                    } else {
-                        "SIGN IN & CONNECT"
+                    text = when (selectedProvider) {
+                        CloudProvider.MEGA -> if (isAddingAccount) "SIGNING IN..." else "SIGN IN"
+                        CloudProvider.TERABOX -> if (isAddingAccount) "CONNECTING..." else "SIGN IN VIA BROWSER"
+                        else -> "SIGN IN & CONNECT"
                     },
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp,
@@ -876,6 +924,7 @@ fun CloudLoginWebViewDialog(
     provider: CloudProvider,
     customAccountName: String,
     initialEmail: String = "",
+    validateTeraBoxSession: (suspend (String) -> Boolean)? = null,
     onAuthSuccess: (CloudProvider, String, String, String?, String?) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -885,12 +934,60 @@ fun CloudLoginWebViewDialog(
     val finalAccountName = remember { customAccountName.ifBlank { provider.name } }
     var hasRedirected by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    val currentOnAuthSuccess by rememberUpdatedState(onAuthSuccess)
+    val loginScope = rememberCoroutineScope()
+
+    // TeraBox sets an "ndus" cookie before the login is actually complete, so its mere presence
+    // can't be trusted: finishing on it closed the browser with a session the API rejects, and the
+    // user had to sign in a second time. The session is confirmed against the API instead, and
+    // re-checked periodically because TeraBox's login is an in-page flow that doesn't always
+    // trigger a page load.
+    val teraBoxCheck = remember { object { var cookies = ""; var at = 0L } }
+    suspend fun tryFinishTeraBoxLogin(force: Boolean = false): Boolean {
+        if (hasRedirected) return true
+        val cm = CookieManager.getInstance()
+        val c1 = cm.getCookie("https://www.terabox.com") ?: ""
+        val c2 = cm.getCookie("https://terabox.com") ?: ""
+        val cookies = if (c1.isNotBlank() && c2.isNotBlank() && c1 != c2) "$c1; $c2" else c1.ifBlank { c2 }
+        if (!cookies.contains("ndus=")) return false
+        val now = System.currentTimeMillis()
+        if (!force && cookies == teraBoxCheck.cookies && now - teraBoxCheck.at < 8_000L) return false
+        teraBoxCheck.cookies = cookies
+        teraBoxCheck.at = now
+        if (validateTeraBoxSession?.invoke(cookies) == false || hasRedirected) return false
+        val ndus = cookies.substringAfter("ndus=").substringBefore(";").trim()
+        hasRedirected = true
+        currentOnAuthSuccess(
+            CloudProvider.TERABOX,
+            finalAccountName,
+            detectedEmail.ifBlank { initialEmail.ifBlank { "terabox_user" } },
+            ndus,
+            cookies
+        )
+        return true
+    }
+
+    if (provider == CloudProvider.TERABOX && validateTeraBoxSession != null) {
+        LaunchedEffect(provider) {
+            while (!hasRedirected) {
+                kotlinx.coroutines.delay(1500)
+                try {
+                    if (tryFinishTeraBoxLogin()) break
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w("TeraBoxLogin", "Session check failed: ${e.message}")
+                }
+            }
+        }
+    }
 
     val startUrl = remember(provider) {
         when (provider) {
             CloudProvider.GOOGLE_DRIVE -> "https://accounts.google.com/signin/v2/identifier?service=wise&passive=1209600&continue=https%3A%2F%2Fdrive.google.com%2Fdrive%2Fmy-drive&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
             CloudProvider.DROPBOX -> "https://www.dropbox.com/login"
             CloudProvider.MEGA -> "https://mega.nz/login"
+            CloudProvider.TERABOX -> "https://www.terabox.com/vietnamese"
         }
     }
 
@@ -939,6 +1036,7 @@ fun CloudLoginWebViewDialog(
                                         CloudProvider.GOOGLE_DRIVE -> "https://drive.google.com"
                                         CloudProvider.DROPBOX -> "https://www.dropbox.com"
                                         CloudProvider.MEGA -> "https://mega.nz"
+                                        CloudProvider.TERABOX -> "https://www.terabox.com"
                                     }
                                     val cookies = cookieManager.getCookie(cookieUrl) ?: cookieManager.getCookie("https://accounts.google.com") ?: ""
 
@@ -962,6 +1060,20 @@ fun CloudLoginWebViewDialog(
                                             }
                                         }
                                         CloudProvider.MEGA -> {}
+                                        CloudProvider.TERABOX -> {
+                                            cookieManager.flush()
+                                            loginScope.launch {
+                                                val finished = try {
+                                                    tryFinishTeraBoxLogin(force = true)
+                                                } catch (e: Exception) {
+                                                    false
+                                                }
+                                                if (!finished) {
+                                                    Toast.makeText(context, "Please complete TeraBox login before tapping DONE.", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                            return@Button
+                                        }
                                     }
 
                                     // Trigger unified extraction logic
@@ -971,6 +1083,39 @@ fun CloudLoginWebViewDialog(
                                             try {
                                                 var sid = window.u_sid || (window.localStorage ? window.localStorage.getItem('sid') : '') || '';
                                                 var email = (window.M && window.M.account ? window.M.account.email : '') || '';
+                                                
+                                                if (window.yunData) {
+                                                    try {
+                                                        if (window.yunData.SHOWNAME) email = window.yunData.SHOWNAME;
+                                                        else if (window.yunData.MYNAME) email = window.yunData.MYNAME;
+                                                        else if (window.yunData.USERNAME) email = window.yunData.USERNAME;
+                                                        else if (window.yunData.EMAIL) email = window.yunData.EMAIL;
+                                                    } catch(e) {}
+                                                }
+                                                try {
+                                                    if (!email && window.localStorage) {
+                                                        for (var lki = 0; lki < window.localStorage.length; lki++) {
+                                                            var lk = window.localStorage.key(lki);
+                                                            var lv = window.localStorage.getItem(lk) || '';
+                                                            if (lk && (lk.indexOf('user') !== -1 || lk.indexOf('account') !== -1 || lk.indexOf('profile') !== -1)) {
+                                                                var lm = lv.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                                                                if (lm) { email = lm[0]; break; }
+                                                                try {
+                                                                    var lp = JSON.parse(lv);
+                                                                    var lc = lp.email || lp.mail || lp.user_name || lp.username || lp.uname || lp.nickname || lp.show_name;
+                                                                    if (lc && typeof lc === 'string' && lc.length < 50) { email = lc; break; }
+                                                                } catch(e){}
+                                                            }
+                                                        }
+                                                    }
+                                                } catch(e) {}
+                                                if (!email) {
+                                                    var tbEl = document.querySelector('[class*="userName"], [class*="username"], [class*="user-name"], [class*="account-name"], [class*="profile-name"], [class*="nickname"]');
+                                                    if (tbEl && tbEl.innerText) {
+                                                        var tbt = tbEl.innerText.trim();
+                                                        if (tbt && tbt.length < 50) email = tbt;
+                                                    }
+                                                }
                                                 
                                                 if (!email && window.Dropbox) {
                                                     if (window.Dropbox.accountData && window.Dropbox.accountData.email) email = window.Dropbox.accountData.email;
@@ -1116,6 +1261,46 @@ fun CloudLoginWebViewDialog(
                                                 currentCookies = "$currentCookies; uid=$uidVal"
                                             }
 
+                                            if (provider == CloudProvider.TERABOX) {
+                                                val c1 = cookieManager.getCookie("https://www.terabox.com") ?: ""
+                                                val c2 = cookieManager.getCookie("https://terabox.com") ?: ""
+                                                val tbCookies = if (c1.isNotBlank() && c2.isNotBlank() && c1 != c2) "$c1; $c2" else c1.ifBlank { c2 }
+                                                val ndus = if (tbCookies.contains("ndus=")) tbCookies.substringAfter("ndus=").substringBefore(";").trim() else ""
+
+                                                var resolvedEmail = json.optString("email").trim()
+                                                if (resolvedEmail.isBlank() || resolvedEmail == "null") {
+                                                    val cookiePairs = tbCookies.split(";")
+                                                    for (p in cookiePairs) {
+                                                        val pair = p.trim()
+                                                        val eqIdx = pair.indexOf('=')
+                                                        if (eqIdx > 0) {
+                                                            val k = pair.substring(0, eqIdx).trim()
+                                                            val v = try { java.net.URLDecoder.decode(pair.substring(eqIdx + 1).trim(), "UTF-8") } catch (_: Exception) { pair.substring(eqIdx + 1).trim() }
+                                                            if ((k.equals("passport_uname", true) || k.equals("show_name", true) || k.equals("PANWEB_UNAME", true) || k.equals("TERABOX_UNAME", true) || k.equals("user_name", true)) && v.isNotBlank()) {
+                                                                resolvedEmail = v
+                                                                break
+                                                            }
+                                                            if (k.equals("email", true) || k.equals("login_email", true)) {
+                                                                if (v.contains("@")) {
+                                                                    resolvedEmail = v
+                                                                    break
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                if (resolvedEmail.isBlank() || resolvedEmail == "null") {
+                                                    resolvedEmail = detectedEmail.ifBlank {
+                                                        if (initialEmail.isNotBlank()) initialEmail else "terabox_user"
+                                                    }
+                                                }
+
+                                                hasRedirected = true
+                                                onAuthSuccess(CloudProvider.TERABOX, finalAccountName, resolvedEmail, ndus, tbCookies)
+                                                return@evaluateJavascript
+                                            }
+
                                             var email = json.optString("email").trim()
                                             if (email.isBlank() || email.contains("dropbox.com-") || email.length > 45) {
                                                 email = detectedEmail.ifBlank {
@@ -1173,6 +1358,8 @@ fun CloudLoginWebViewDialog(
                                 // a blank page — so only spoof for Google Drive.
                                 if (provider == CloudProvider.GOOGLE_DRIVE) {
                                     userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0"
+                                } else if (provider == CloudProvider.TERABOX) {
+                                    userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
                                 }
                             }
 
@@ -1187,7 +1374,40 @@ fun CloudLoginWebViewDialog(
                                         try {
                                             var sid = window.u_sid || (window.localStorage ? window.localStorage.getItem('sid') : '') || '';
                                             var email = '';
-                                            // 0. MEGA specific properties
+                                            // 0. TeraBox specific properties
+                                            if (window.yunData) {
+                                                try {
+                                                    if (window.yunData.SHOWNAME) email = window.yunData.SHOWNAME;
+                                                    else if (window.yunData.MYNAME) email = window.yunData.MYNAME;
+                                                    else if (window.yunData.USERNAME) email = window.yunData.USERNAME;
+                                                    else if (window.yunData.EMAIL) email = window.yunData.EMAIL;
+                                                } catch(e) {}
+                                            }
+                                            try {
+                                                if (!email && window.localStorage) {
+                                                    for (var lki = 0; lki < window.localStorage.length; lki++) {
+                                                        var lk = window.localStorage.key(lki);
+                                                        var lv = window.localStorage.getItem(lk) || '';
+                                                        if (lk && (lk.indexOf('user') !== -1 || lk.indexOf('account') !== -1 || lk.indexOf('profile') !== -1)) {
+                                                            var lm = lv.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                                                            if (lm) { email = lm[0]; break; }
+                                                            try {
+                                                                var lp = JSON.parse(lv);
+                                                                var lc = lp.email || lp.mail || lp.user_name || lp.username || lp.uname || lp.nickname || lp.show_name;
+                                                                if (lc && typeof lc === 'string' && lc.length < 50) { email = lc; break; }
+                                                            } catch(e){}
+                                                        }
+                                                    }
+                                                }
+                                            } catch(e) {}
+                                            if (!email) {
+                                                var tbEl = document.querySelector('[class*="userName"], [class*="username"], [class*="user-name"], [class*="account-name"], [class*="profile-name"], [class*="nickname"]');
+                                                if (tbEl && tbEl.innerText) {
+                                                    var tbt = tbEl.innerText.trim();
+                                                    if (tbt && tbt.length < 50) email = tbt;
+                                                }
+                                            }
+                                            // MEGA specific properties
                                             if (window.u_attr && window.u_attr.email) email = window.u_attr.email;
                                             else if (window.M && window.M.account && window.M.account.email) email = window.M.account.email;
                                             else if (window.M && window.M.user && window.M.user.email) email = window.M.user.email;
@@ -1505,10 +1725,52 @@ fun CloudLoginWebViewDialog(
                                             CloudProvider.GOOGLE_DRIVE -> "https://drive.google.com"
                                             CloudProvider.DROPBOX -> "https://www.dropbox.com"
                                             CloudProvider.MEGA -> "https://mega.nz"
+                                            CloudProvider.TERABOX -> "https://www.terabox.com"
                                         }
                                         var cookies = cookieManager.getCookie(cookieUrl) 
                                             ?: cookieManager.getCookie("https://accounts.google.com")
                                             ?: sid
+
+                                        if (provider == CloudProvider.TERABOX) {
+                                            cookieManager.flush()
+                                            val c1 = cookieManager.getCookie("https://www.terabox.com") ?: ""
+                                            val c2 = cookieManager.getCookie("https://terabox.com") ?: ""
+                                            val tbCookies = if (c1.isNotBlank() && c2.isNotBlank() && c1 != c2) "$c1; $c2" else c1.ifBlank { c2 }
+                                            val ndus = if (tbCookies.contains("ndus=")) tbCookies.substringAfter("ndus=").substringBefore(";").trim() else ""
+
+                                            var resolvedEmail = json.optString("email").trim()
+                                            if (resolvedEmail.isBlank() || resolvedEmail == "null") {
+                                                val cookiePairs = tbCookies.split(";")
+                                                for (p in cookiePairs) {
+                                                    val pair = p.trim()
+                                                    val eqIdx = pair.indexOf('=')
+                                                    if (eqIdx > 0) {
+                                                        val k = pair.substring(0, eqIdx).trim()
+                                                        val v = try { java.net.URLDecoder.decode(pair.substring(eqIdx + 1).trim(), "UTF-8") } catch (_: Exception) { pair.substring(eqIdx + 1).trim() }
+                                                        if ((k.equals("passport_uname", true) || k.equals("show_name", true) || k.equals("PANWEB_UNAME", true) || k.equals("TERABOX_UNAME", true) || k.equals("user_name", true)) && v.isNotBlank()) {
+                                                            resolvedEmail = v
+                                                            break
+                                                        }
+                                                        if (k.equals("email", true) || k.equals("login_email", true)) {
+                                                            if (v.contains("@")) {
+                                                                resolvedEmail = v
+                                                                break
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            if (resolvedEmail.isBlank() || resolvedEmail == "null") {
+                                                resolvedEmail = detectedEmail.ifBlank {
+                                                    if (initialEmail.isNotBlank()) initialEmail else "terabox_user"
+                                                }
+                                            }
+
+                                            hasRedirected = true
+                                            onAuthSuccess(CloudProvider.TERABOX, finalAccountName, resolvedEmail, ndus, tbCookies)
+                                            return@evaluateJavascript
+                                        }
 
                                         if (uidVal.isNotBlank() && !cookies.contains("uid=")) {
                                             cookies = "$cookies; uid=$uidVal"
@@ -1576,6 +1838,8 @@ fun CloudLoginWebViewDialog(
                                         settings.javaScriptCanOpenWindowsAutomatically = true
                                         if (provider == CloudProvider.GOOGLE_DRIVE) {
                                             settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0"
+                                        } else if (provider == CloudProvider.TERABOX) {
+                                            settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
                                         }
                                         CookieManager.getInstance().setAcceptCookie(true)
                                         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
@@ -1667,6 +1931,30 @@ fun CloudLoginWebViewDialog(
                                         """
                                         (function() {
                                             try {
+                                                if (window.yunData) {
+                                                    var y = window.yunData.SHOWNAME || window.yunData.MYNAME || window.yunData.USERNAME || window.yunData.EMAIL;
+                                                    if (y) return y;
+                                                }
+                                                try {
+                                                    if (window.localStorage) {
+                                                        for (var lki = 0; lki < window.localStorage.length; lki++) {
+                                                            var lk = window.localStorage.key(lki);
+                                                            var lv = window.localStorage.getItem(lk) || '';
+                                                            if (lk && (lk.indexOf('user') !== -1 || lk.indexOf('account') !== -1 || lk.indexOf('profile') !== -1)) {
+                                                                var lm = lv.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                                                                if (lm) return lm[0];
+                                                                try {
+                                                                    var lp = JSON.parse(lv);
+                                                                    var lc = lp.email || lp.mail || lp.user_name || lp.username || lp.uname || lp.nickname || lp.show_name;
+                                                                    if (lc && typeof lc === 'string' && lc.length < 50) return lc;
+                                                                } catch(e){}
+                                                            }
+                                                        }
+                                                    }
+                                                } catch(e){}
+                                                var tbEl = document.querySelector('[class*="userName"], [class*="username"], [class*="user-name"], [class*="account-name"], [class*="profile-name"], [class*="nickname"]');
+                                                if (tbEl && tbEl.innerText && tbEl.innerText.trim().length < 50) return tbEl.innerText.trim();
+
                                                 var emailEl = document.querySelector('[data-email], a[aria-label*="@"], div[data-identifier], .gb_d, [aria-label*="Google Account"], [aria-label*="Tài khoản Google"]');
                                                 if (emailEl) {
                                                     var attr = emailEl.getAttribute('data-email') || emailEl.getAttribute('data-identifier') || emailEl.getAttribute('aria-label') || emailEl.innerText || '';
@@ -1682,8 +1970,28 @@ fun CloudLoginWebViewDialog(
                                         """.trimIndent()
                                     ) { res ->
                                         val cleaned = res?.trim('"', ' ') ?: ""
-                                        if (cleaned.isNotBlank() && cleaned.contains("@")) {
+                                        if (cleaned.isNotBlank() && cleaned != "null") {
                                             detectedEmail = cleaned
+                                        }
+                                    }
+
+                                    if (provider == CloudProvider.TERABOX && detectedEmail.isBlank()) {
+                                        val tbCookies = (cookieManager.getCookie("https://www.terabox.com") ?: "") + "; " + (cookieManager.getCookie("https://terabox.com") ?: "")
+                                        for (p in tbCookies.split(";")) {
+                                            val pair = p.trim()
+                                            val eq = pair.indexOf('=')
+                                            if (eq > 0) {
+                                                val k = pair.substring(0, eq).trim()
+                                                val v = try { java.net.URLDecoder.decode(pair.substring(eq + 1).trim(), "UTF-8") } catch (_: Exception) { pair.substring(eq + 1).trim() }
+                                                if ((k.equals("passport_uname", true) || k.equals("show_name", true) || k.equals("PANWEB_UNAME", true) || k.equals("TERABOX_UNAME", true)) && v.isNotBlank()) {
+                                                    detectedEmail = v
+                                                    break
+                                                }
+                                                if ((k.equals("email", true) || k.equals("login_email", true)) && v.contains("@")) {
+                                                    detectedEmail = v
+                                                    break
+                                                }
+                                            }
                                         }
                                     }
 
@@ -1691,8 +1999,11 @@ fun CloudLoginWebViewDialog(
                                     val parsedPath = try { java.net.URI(url ?: "").path?.lowercase(Locale.getDefault()) ?: "" } catch (e: Exception) { "" }
                                     val isDropboxHome = (parsedPath.startsWith("/home") || parsedPath.startsWith("/personal") || parsedPath.startsWith("/work") || parsedPath.startsWith("/browse")) && !parsedPath.contains("login") && !parsedPath.contains("verify") && !parsedPath.contains("twofactor")
                                     val isGoogleDriveHome = (parsedPath.contains("/drive/my-drive") || parsedPath.contains("/drive/u/")) && !parsedPath.contains("signin") && !parsedPath.contains("identifier")
+                                    // With a session validator the periodic check above finishes TeraBox login.
+                                    val isTeraBoxAuthed = provider == CloudProvider.TERABOX && validateTeraBoxSession == null &&
+                                        ((cookieManager.getCookie("https://www.terabox.com") ?: "") + "; " + (cookieManager.getCookie("https://terabox.com") ?: "")).contains("ndus=")
 
-                                    if ((isDropboxHome || isGoogleDriveHome) && !hasRedirected) {
+                                    if ((isDropboxHome || isGoogleDriveHome || isTeraBoxAuthed) && !hasRedirected) {
                                         cookieManager.flush()
                                         postDelayed({
                                             if (!hasRedirected) {

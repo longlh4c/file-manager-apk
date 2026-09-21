@@ -245,7 +245,8 @@ class DashboardViewModel @Inject constructor(
                             itemSizes = itemSizes,
                             isMove = isMove,
                             overwriteNames = overwriteNames,
-                            skipNames = skipNames
+                            skipNames = skipNames,
+                            itemIsDirectory = clip.itemIsDirectory
                         ) { progress -> _uiState.value = _uiState.value.copy(downloadProgress = progress) }
 
                         _uiState.value = _uiState.value.copy(

@@ -83,7 +83,8 @@ fun CloudScreen(
             onDismiss = { viewModel.setShowAddDialog(false) },
             isAddingAccount = uiState.isAddingAccount,
             addAccountError = uiState.addAccountError,
-            onClearAddAccountError = { viewModel.clearAddAccountError() }
+            onClearAddAccountError = { viewModel.clearAddAccountError() },
+            validateTeraBoxSession = { viewModel.validateTeraBoxSession(it) }
         )
     }
 
@@ -589,6 +590,22 @@ fun CloudProviderIcon(
                 ) {
                     Text(
                         text = "M",
+                        color = Color.White,
+                        fontSize = (size.value * 0.5f).sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+            CloudProvider.TERABOX -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape)
+                        .background(Color(0xFF0084FF)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "T",
                         color = Color.White,
                         fontSize = (size.value * 0.5f).sp,
                         fontWeight = FontWeight.Bold

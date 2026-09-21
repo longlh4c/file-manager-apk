@@ -48,7 +48,8 @@ enum class CategoryType {
 enum class CloudProvider {
     GOOGLE_DRIVE,
     DROPBOX,
-    MEGA
+    MEGA,
+    TERABOX
 }
 
 enum class FileSortOption {
@@ -276,6 +277,7 @@ data class CloudAccount(
             CloudProvider.GOOGLE_DRIVE -> 15L * 1024 * 1024 * 1024
             CloudProvider.DROPBOX -> 2L * 1024 * 1024 * 1024
             CloudProvider.MEGA -> 50L * 1024 * 1024 * 1024
+            CloudProvider.TERABOX -> 1024L * 1024 * 1024 * 1024 // 1 TB
         }
 
     val effectiveUsedBytes: Long

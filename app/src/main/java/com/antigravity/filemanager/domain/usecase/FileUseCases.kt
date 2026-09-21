@@ -549,29 +549,83 @@ class CloudStorageUseCase @Inject constructor(
         isMove: Boolean,
         overwriteNames: Set<String> = emptySet(),
         skipNames: Set<String> = emptySet(),
+        itemIsDirectory: Map<String, Boolean> = emptyMap(),
         onProgress: (com.antigravity.filemanager.domain.model.CloudTransferProgress) -> Unit
     ): CloudDownloadToLocalResult {
         val targetFolder = File(targetDir)
-        val totalCount = remotePaths.size
         val progressThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
         val scannedPaths = mutableListOf<String>()
         val failedNames = mutableListOf<String>()
-        // A Move deletes the remote source item below, but that only patches DropboxApiClient's
-        // own whole-account tree cache (see patchTreeAfterDelete) — it never touches
-        // FolderCacheManager's per-folder listing cache, the one the Cloud tab actually paints
-        // from. Without telling it too, a folder open in the Cloud tab kept showing the "moved"
-        // file as still there until something else happened to invalidate it. We already know
-        // exactly which remote paths just disappeared, grouped by parent folder, so this can drop
-        // them straight out of a listening screen's list (see notifyCloudFilesRemoved) rather than
-        // forcing a refetch the way a plain invalidate would.
         val movedFromFolders = mutableMapOf<String, MutableSet<String>>()
 
-        remotePaths.forEachIndexed { index, remotePath ->
+        data class FileDownloadItem(
+            val remotePath: String,
+            val localFile: File,
+            val expectedSize: Long,
+            val topSourcePath: String
+        )
+        val filesToDownload = mutableListOf<FileDownloadItem>()
+        val emptyFolders = mutableListOf<Pair<File, String>>()
+
+        suspend fun crawlFolder(currentRemoteDir: String, currentLocalDir: File, topSource: String) {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            currentLocalDir.mkdirs()
+            val childrenResult = cloudRepository.getCloudFiles(accountId, currentRemoteDir)
+            val children = childrenResult.getOrNull()
+            if (children.isNullOrEmpty()) {
+                if (childrenResult.isSuccess) {
+                    emptyFolders.add(currentLocalDir to topSource)
+                }
+                return
+            }
+            for (child in children) {
+                val childDest = File(currentLocalDir, child.name)
+                if (child.isDirectory) {
+                    crawlFolder(child.path, childDest, topSource)
+                } else {
+                    filesToDownload.add(FileDownloadItem(child.path, childDest, child.size, topSource))
+                }
+            }
+        }
+
+        // 1. Resolve destination targets and recursively flatten any directories
+        val validTopSources = mutableListOf<String>()
+        for (remotePath in remotePaths) {
             kotlinx.coroutines.currentCoroutineContext().ensureActive()
             val name = File(remotePath).name
-            if (name in skipNames) return@forEachIndexed
-            val destFile = File(targetFolder, name)
-            val expectedSize = itemSizes[remotePath] ?: 0L
+            if (name in skipNames) continue
+            validTopSources.add(remotePath)
+
+            val destFile = if (name in overwriteNames) {
+                File(targetFolder, name)
+            } else if (File(targetFolder, name).exists()) {
+                uniqueLocalDestination(targetFolder, name)
+            } else {
+                File(targetFolder, name)
+            }
+
+            var isDir = itemIsDirectory[remotePath] ?: false
+            if (!isDir && itemIsDirectory.isEmpty()) {
+                // Fallback directory detection if itemIsDirectory wasn't supplied
+                isDir = runCatching { cloudRepository.getCloudFiles(accountId, remotePath).isSuccess }.getOrDefault(false)
+            }
+
+            if (isDir) {
+                destFile.mkdirs()
+                crawlFolder(remotePath, destFile, remotePath)
+            } else {
+                filesToDownload.add(FileDownloadItem(remotePath, destFile, itemSizes[remotePath] ?: 0L, remotePath))
+            }
+        }
+
+        val totalCount = filesToDownload.size
+        val failedTopSources = mutableSetOf<String>()
+
+        // 2. Download all files
+        filesToDownload.forEachIndexed { index, item ->
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            val name = item.localFile.name
+            val expectedSize = item.expectedSize
 
             onProgress(
                 com.antigravity.filemanager.domain.model.CloudTransferProgress(
@@ -587,7 +641,7 @@ class CloudStorageUseCase @Inject constructor(
 
             val tempDir = File(context.cacheDir, "cloud_paste_temp_${System.nanoTime()}").apply { mkdirs() }
             try {
-                val result = downloadFile(accountId, remotePath, tempDir.absolutePath) { bytesRead, totalBytes ->
+                val result = downloadFile(accountId, item.remotePath, tempDir.absolutePath) { bytesRead, totalBytes ->
                     val effTotal = if (totalBytes > 0) totalBytes else expectedSize
                     if (progressThrottler.shouldEmit(bytesRead, effTotal)) {
                         onProgress(
@@ -606,13 +660,8 @@ class CloudStorageUseCase @Inject constructor(
                 if (result.isSuccess) {
                     val downloaded = result.getOrNull()
                     if (downloaded != null && downloaded.exists() && downloaded.isFile) {
-                        val finalFile = if (name in overwriteNames) {
-                            destFile
-                        } else if (destFile.exists()) {
-                            uniqueLocalDestination(targetFolder, name)
-                        } else {
-                            destFile
-                        }
+                        val finalFile = item.localFile
+                        finalFile.parentFile?.mkdirs()
                         if (finalFile.exists()) {
                             finalFile.delete()
                         }
@@ -627,25 +676,41 @@ class CloudStorageUseCase @Inject constructor(
                             }
                         }
                         scannedPaths.add(finalFile.absolutePath)
-                        if (isMove) {
-                            deleteItem(accountId, remotePath)
-                            val parentPath = remotePath.substringBeforeLast('/', "/").ifEmpty { "/" }
-                            movedFromFolders.getOrPut(parentPath) { mutableSetOf() }.add(remotePath)
-                        }
                     } else {
                         failedNames.add(name)
+                        failedTopSources.add(item.topSourcePath)
                     }
                 } else {
-                    android.util.Log.e("CloudStorageUseCase", "downloadFilesToLocal: download failed for '$remotePath'", result.exceptionOrNull())
+                    android.util.Log.e("CloudStorageUseCase", "downloadFilesToLocal: download failed for '${item.remotePath}'", result.exceptionOrNull())
                     failedNames.add(name)
+                    failedTopSources.add(item.topSourcePath)
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                android.util.Log.e("CloudStorageUseCase", "downloadFilesToLocal: failed for '$remotePath'", e)
+                android.util.Log.e("CloudStorageUseCase", "downloadFilesToLocal: failed for '${item.remotePath}'", e)
                 failedNames.add(name)
+                failedTopSources.add(item.topSourcePath)
             } finally {
                 tempDir.deleteRecursively()
+            }
+        }
+
+        // 3. Track any empty folders created
+        for ((emptyFolder, topSource) in emptyFolders) {
+            if (topSource !in failedTopSources) {
+                scannedPaths.add(emptyFolder.absolutePath)
+            }
+        }
+
+        // 4. If move operation, delete successfully transferred top-level sources
+        if (isMove) {
+            for (topSource in validTopSources) {
+                if (topSource !in failedTopSources) {
+                    deleteItem(accountId, topSource)
+                    val parentPath = topSource.substringBeforeLast('/', "/").ifEmpty { "/" }
+                    movedFromFolders.getOrPut(parentPath) { mutableSetOf() }.add(topSource)
+                }
             }
         }
 

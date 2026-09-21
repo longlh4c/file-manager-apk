@@ -810,10 +810,16 @@ class CloudRepositoryImpl @Inject constructor(
 
     override suspend fun addAccount(account: CloudAccount): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val count = database.cloudDao().getAll().size
+            // Keep an existing account's position: this is also used to update one in place
+            // (e.g. once its real email is resolved), which must not push it to the end.
+            val count = database.cloudDao().getById(account.id)?.displayOrder
+                ?: database.cloudDao().getAll().size
             val rawSession = account.sessionHandle ?: ""
             // Offload large JSON payload to disk to prevent SQLiteBlobTooBigException (SQLite CursorWindow limit)
-            val lightAccount = if (rawSession.length > 500 || rawSession.contains("\"folders\":") || rawSession.contains("\"files\":")) {
+            // A TeraBox session is the cookie string itself (API credentials, not a bulky node
+            // tree), so keep it in the row — offloading it left only "session_active" behind.
+            val lightAccount = if (account.provider != CloudProvider.TERABOX &&
+                (rawSession.length > 500 || rawSession.contains("\"folders\":") || rawSession.contains("\"files\":"))) {
                 cloudManager.saveSessionPayload(account.id, rawSession)
                 val lightSession = if (rawSession.contains("\"sid\":")) {
                     try {

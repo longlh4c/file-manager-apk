@@ -4,6 +4,7 @@ import android.content.Context
 import com.antigravity.filemanager.data.remote.cloud.api.DropboxApiClient
 import com.antigravity.filemanager.data.remote.cloud.api.GoogleDriveApiClient
 import com.antigravity.filemanager.data.remote.cloud.api.MegaApiClient
+import com.antigravity.filemanager.data.remote.cloud.api.TeraBoxApiClient
 import com.antigravity.filemanager.domain.model.CloudAccount
 import com.antigravity.filemanager.domain.model.CloudProvider
 import com.antigravity.filemanager.domain.model.FileItem
@@ -24,7 +25,8 @@ class CloudManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val googleDriveApi: GoogleDriveApiClient,
     private val dropboxApi: DropboxApiClient,
-    private val megaApi: MegaApiClient
+    private val megaApi: MegaApiClient,
+    private val teraBoxApi: TeraBoxApiClient
 ) {
 
     init {
@@ -304,6 +306,9 @@ class CloudManager @Inject constructor(
                         result
                     }
                 }
+                CloudProvider.TERABOX -> {
+                    teraBoxApi.listFiles(account, remotePath)
+                }
             }
 
             if (remoteResult.isSuccess) {
@@ -375,6 +380,7 @@ class CloudManager @Inject constructor(
                 CloudProvider.GOOGLE_DRIVE -> googleDriveApi.getStorageQuota(account)
                 CloudProvider.DROPBOX -> dropboxApi.getSpaceUsage(account)
                 CloudProvider.MEGA -> megaApi.getStorageQuota(account)
+                CloudProvider.TERABOX -> teraBoxApi.getQuota(account.accessToken ?: account.sessionHandle ?: "").map { it.totalBytes to it.usedBytes }
             }
             if (apiQuota.isSuccess) {
                 val (apiTotal, apiUsed) = apiQuota.getOrThrow()
@@ -410,6 +416,7 @@ class CloudManager @Inject constructor(
             CloudProvider.GOOGLE_DRIVE -> 15L * 1024 * 1024 * 1024
             CloudProvider.DROPBOX -> 2L * 1024 * 1024 * 1024
             CloudProvider.MEGA -> 50L * 1024 * 1024 * 1024
+            CloudProvider.TERABOX -> 1024L * 1024 * 1024 * 1024
         }
         var used = account.usedSpaceBytes ?: 0L
 
@@ -454,6 +461,7 @@ class CloudManager @Inject constructor(
         when (account.provider) {
             CloudProvider.MEGA -> megaApi.downloadThumbnail(account, nodeId)
             CloudProvider.GOOGLE_DRIVE -> googleDriveApi.downloadThumbnail(account, nodeId)
+            CloudProvider.TERABOX -> teraBoxApi.downloadThumbnail(account, nodeId)
             CloudProvider.DROPBOX -> Result.failure(Exception("Thumbnail endpoint not supported for ${account.provider}"))
         }
     }
@@ -467,7 +475,7 @@ class CloudManager @Inject constructor(
         withContext(Dispatchers.IO) {
             when (account.provider) {
                 CloudProvider.MEGA -> megaApi.downloadFilePartial(account, nodeId, localTargetFile, maxBytes)
-                CloudProvider.DROPBOX, CloudProvider.GOOGLE_DRIVE ->
+                CloudProvider.DROPBOX, CloudProvider.GOOGLE_DRIVE, CloudProvider.TERABOX ->
                     Result.failure(Exception("Partial download not supported for ${account.provider}"))
             }
         }
@@ -482,7 +490,7 @@ class CloudManager @Inject constructor(
         withContext(Dispatchers.IO) {
             when (account.provider) {
                 CloudProvider.MEGA -> megaApi.openThumbnailDataSource(account, nodeId)
-                CloudProvider.DROPBOX, CloudProvider.GOOGLE_DRIVE ->
+                CloudProvider.DROPBOX, CloudProvider.GOOGLE_DRIVE, CloudProvider.TERABOX ->
                     Result.failure(Exception("On-demand thumbnail data source not supported for ${account.provider}"))
             }
         }
@@ -497,15 +505,15 @@ class CloudManager @Inject constructor(
     suspend fun getStreamableLink(account: CloudAccount, remotePath: String): Result<String> = withContext(Dispatchers.IO) {
         when (account.provider) {
             CloudProvider.DROPBOX -> dropboxApi.getTemporaryLink(account, remotePath)
-            CloudProvider.MEGA, CloudProvider.GOOGLE_DRIVE ->
+            CloudProvider.MEGA, CloudProvider.GOOGLE_DRIVE, CloudProvider.TERABOX ->
                 Result.failure(Exception("Streamable link not supported for ${account.provider}"))
         }
     }
 
     /**
      * Like [getStreamableLink], but for the media viewers (image/video playback) rather than
-     * the video-thumbnail frame grab — also covers Google Drive, whose media endpoint needs a
-     * bearer token attached to the request rather than a bare pre-signed URL. Still unsupported
+     * the video-thumbnail frame grab — also covers Google Drive (media endpoint needs a bearer
+     * token attached to the request) and TeraBox (needs its session cookie). Still unsupported
      * for MEGA (client-side encrypted; a raw range fetch would return ciphertext).
      */
     suspend fun getStreamSource(account: CloudAccount, remotePath: String): Result<com.antigravity.filemanager.domain.model.CloudStreamSource> =
@@ -525,6 +533,8 @@ class CloudManager @Inject constructor(
                         ?: remotePath
                     googleDriveApi.getAuthenticatedMediaUrl(account, fileId)
                 }
+                // Like Drive, the URL only works with the session cookie sent as a header.
+                CloudProvider.TERABOX -> teraBoxApi.getStreamSource(account, remotePath)
                 CloudProvider.MEGA -> Result.failure(Exception("Streaming not supported for ${account.provider}"))
             }
         }
@@ -632,6 +642,10 @@ class CloudManager @Inject constructor(
                         ?: nodeKeyCache[nodeHandle]
                         ?: ""
                     megaApi.downloadFile(effectiveAccount, nodeHandle, localTargetDir, fileName, nodeKey, onProgress)
+                }
+                CloudProvider.TERABOX -> {
+                    val path = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
+                    teraBoxApi.downloadFile(account, path, destFile, onProgress)
                 }
             }
 
@@ -781,6 +795,14 @@ class CloudManager @Inject constructor(
                             uploadFailure = megaRes.exceptionOrNull() as? Exception ?: Exception("MEGA upload failed")
                         }
                     }
+                    CloudProvider.TERABOX -> {
+                        val tbRes = teraBoxApi.uploadFile(account, srcFile, remoteTargetDir, onProgress)
+                        if (tbRes.isSuccess) {
+                            remoteFileId = tbRes.getOrNull()?.id ?: ""
+                        } else {
+                            uploadFailure = tbRes.exceptionOrNull() as? Exception ?: Exception("TeraBox upload failed")
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 // Cancellation is not a failure — the caller (or its ViewModel scope) intentionally
@@ -889,6 +911,15 @@ class CloudManager @Inject constructor(
                             folderIdCache[item.id] = item.id
                         }.onFailure {
                             remoteFailure = it as? Exception ?: Exception(it.message ?: "MEGA create folder failed")
+                        }
+                    }
+                    CloudProvider.TERABOX -> {
+                        teraBoxApi.createFolder(account, folderName, parentPath).onSuccess { item ->
+                            remoteId = item.id
+                            folderIdCache[itemPath] = item.id
+                            folderIdCache[item.id] = item.id
+                        }.onFailure {
+                            remoteFailure = it as? Exception ?: Exception(it.message ?: "TeraBox create folder failed")
                         }
                     }
                 }
@@ -1161,6 +1192,10 @@ class CloudManager @Inject constructor(
                         (if (moveToTrash) megaApi.moveToRubbishBin(account, resolvedTargetId) else megaApi.deleteNode(account, resolvedTargetId))
                             .also { megaApi.invalidateNodeTreeCache(account.id) }
                     }
+                    CloudProvider.TERABOX -> {
+                        val path = if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId"
+                        teraBoxApi.deleteFile(account, path)
+                    }
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
@@ -1221,6 +1256,7 @@ class CloudManager @Inject constructor(
                 val dropboxPath = if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId"
                 dropboxApi.restoreFile(account, dropboxPath).map { }.also { dropboxApi.invalidateTree(account.id) }
             }
+            CloudProvider.TERABOX -> Result.success(Unit)
         }
     }
 
@@ -1239,6 +1275,13 @@ class CloudManager @Inject constructor(
                 megaApi.renameNode(account, targetId, newName)
                     .also { megaApi.invalidateNodeTreeCache(account.id) }
                     .map { FileItem(id = targetId, name = newName, path = remotePath) }
+            }
+            CloudProvider.TERABOX -> {
+                val cleanPath = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
+                val newPath = (if (cleanPath.contains("/")) cleanPath.substringBeforeLast("/") else "") + "/" + newName
+                teraBoxApi.renameFile(account, cleanPath, newName).map {
+                    FileItem(id = newPath, name = newName, path = newPath)
+                }
             }
         }
     }
@@ -1285,6 +1328,9 @@ class CloudManager @Inject constructor(
                         folderIdCache[targetDir] ?: googleDriveApi.resolveIdForDisplayPath(account, targetDir) ?: targetDir
                     }
                     googleDriveApi.moveFile(account, fileId, oldParentId, newParentId)
+                }
+                CloudProvider.TERABOX -> {
+                    teraBoxApi.moveFile(account, sourcePath, targetDir)
                 }
             }
         } catch (e: Exception) {

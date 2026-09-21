@@ -77,6 +77,7 @@ data class CategoryUiState(
     // it were a local one and did nothing.
     val clipboardSourceCloudAccountId: String? = null,
     val clipboardItemSizes: Map<String, Long> = emptyMap(),
+    val clipboardItemIsDirectory: Map<String, Boolean> = emptyMap(),
     val sortOption: FileSortOption = FileSortOption.BY_NAME_ASC,
     val showHiddenFiles: Boolean = false,
     val viewMode: com.antigravity.filemanager.presentation.components.ViewMode = com.antigravity.filemanager.presentation.components.ViewMode.LIST,
@@ -176,7 +177,8 @@ class CategoriesViewModel @Inject constructor(
                     clipboardPaths = clip.paths,
                     isCutOperation = clip.isCut,
                     clipboardSourceCloudAccountId = clip.sourceCloudAccountId,
-                    clipboardItemSizes = clip.itemSizes
+                    clipboardItemSizes = clip.itemSizes,
+                    clipboardItemIsDirectory = clip.itemIsDirectory
                 )
             }
         }
@@ -615,7 +617,8 @@ class CategoriesViewModel @Inject constructor(
                 itemSizes = itemSizes,
                 isMove = isMove,
                 overwriteNames = overwriteNames,
-                skipNames = skipNames
+                skipNames = skipNames,
+                itemIsDirectory = _uiState.value.clipboardItemIsDirectory
             ) { progress -> _uiState.value = _uiState.value.copy(downloadProgress = progress) }
 
             globalClipboardManager.clear()

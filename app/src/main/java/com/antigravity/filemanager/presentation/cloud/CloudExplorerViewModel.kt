@@ -276,7 +276,8 @@ class CloudExplorerViewModel @Inject constructor(
             val cached = folderCacheManager.getCloudFolder(accountId, path)
             var skipRevalidate = false
             if (cached != null && cached.files.isNotEmpty()) {
-                val sortedCached = sortCloudFiles(cached.files, _uiState.value.sortOption)
+                val cachedWithThumbs = applyLocalThumbnailCache(cached.files, accountId)
+                val sortedCached = sortCloudFiles(cachedWithThumbs, _uiState.value.sortOption)
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
                     account = cachedAccount,
@@ -573,13 +574,18 @@ class CloudExplorerViewModel @Inject constructor(
     // made every search result's thumbnail noticeably slower to appear than a plain folder's.
     private fun applyLocalThumbnailCache(files: List<FileItem>, accountId: String): List<FileItem> {
         val targetDir = File(context.cacheDir, "cloud_downloads/$accountId")
+        val thumbDir = File(context.cacheDir, "cloud_thumbs/$accountId")
         return files.map { file ->
-            if (!file.isDirectory && file.thumbnailUri == null &&
-                file.extension.lowercase() in thumbnailImageExtensions
-            ) {
+            if (!file.isDirectory && file.thumbnailUri == null) {
+                val safeId = file.id.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                val safePath = file.path.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                val cachedThumb = File(thumbDir, "$safeId.jpg").takeIf { it.exists() && it.length() > 0 }
+                    ?: File(thumbDir, "${file.id}.jpg").takeIf { it.exists() && it.length() > 0 }
+                    ?: File(thumbDir, "$safePath.jpg").takeIf { it.exists() && it.length() > 0 }
                 val local = File(targetDir, file.name)
                 val cachedLink = streamableLinkCache[file.id]
                 when {
+                    cachedThumb != null -> file.copy(thumbnailUri = cachedThumb.absolutePath)
                     local.exists() && local.length() > 0 -> file.copy(thumbnailUri = local.absolutePath)
                     cachedLink != null && System.currentTimeMillis() - cachedLink.second <= streamableLinkTtlMillis ->
                         file.copy(thumbnailUri = cachedLink.first)
@@ -611,16 +617,15 @@ class CloudExplorerViewModel @Inject constructor(
         // on-demand decrypting data source (openThumbnailDataSource) instead of a flat download,
         // same as the size-uncapped Dropbox/streamable path above.
         val supportsOnDemandVideo = provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA
-        // Dropbox has no lightweight thumbnail endpoint for images either, but the same
-        // pre-signed streamable link works for them too — Coil can decode straight off that
-        // URL (including .gif) without us downloading the full file first, so images aren't
-        // size-capped on Dropbox any more than videos are.
+        val hasFastThumbnailEndpoint = provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA ||
+            provider == com.antigravity.filemanager.domain.model.CloudProvider.GOOGLE_DRIVE ||
+            provider == com.antigravity.filemanager.domain.model.CloudProvider.TERABOX
         val hasCheapImagePath = provider == com.antigravity.filemanager.domain.model.CloudProvider.DROPBOX ||
-            provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA ||
-            provider == com.antigravity.filemanager.domain.model.CloudProvider.GOOGLE_DRIVE
+            hasFastThumbnailEndpoint
         val isVideo = ext in thumbnailVideoExtensions
         val isImage = ext in thumbnailImageExtensions
         val eligible = when {
+            (isImage || isVideo) && hasFastThumbnailEndpoint -> true
             isVideo && (supportsStreamableVideo || supportsOnDemandVideo) -> true
             isImage && hasCheapImagePath -> true
             isVideo || isImage -> file.size in 1..maxImageThumbnailPrefetchBytes
@@ -650,7 +655,8 @@ class CloudExplorerViewModel @Inject constructor(
             val targetDir = File(context.cacheDir, "cloud_downloads/$accountId").apply { mkdirs() }
             val thumbDir = File(context.cacheDir, "cloud_thumbs/$accountId").apply { mkdirs() }
             val hasFastThumbnailEndpoint = provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA ||
-                provider == com.antigravity.filemanager.domain.model.CloudProvider.GOOGLE_DRIVE
+                provider == com.antigravity.filemanager.domain.model.CloudProvider.GOOGLE_DRIVE ||
+                provider == com.antigravity.filemanager.domain.model.CloudProvider.TERABOX
 
             if (isVideo && supportsStreamableVideo) {
                 // Dropbox ids look like "id:sE5JG9qJOxw..." — the colon breaks Uri.parse() in
@@ -714,12 +720,22 @@ class CloudExplorerViewModel @Inject constructor(
             // full-file download below when it's not available (or the provider has no such
             // endpoint at all).
             if (hasFastThumbnailEndpoint) {
-                val cachedThumb = File(thumbDir, "${item.id}.jpg")
+                val safeId = item.id.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                val safePath = item.path.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                val cachedThumb = File(thumbDir, "$safeId.jpg").takeIf { it.exists() && it.length() > 0 }
+                    ?: File(thumbDir, "${item.id}.jpg").takeIf { it.exists() && it.length() > 0 }
+                    ?: File(thumbDir, "$safePath.jpg").takeIf { it.exists() && it.length() > 0 }
+                    ?: File(thumbDir, "$safeId.jpg")
                 if (cachedThumb.exists() && cachedThumb.length() > 0) {
                     withContext(Dispatchers.Main) { updateThumbnailUriInState(item.id, cachedThumb.absolutePath) }
                     return
                 }
-                val thumbResult = cloudUseCase.downloadThumbnail(accountId, item.id)
+                val thumbTarget = if (provider == com.antigravity.filemanager.domain.model.CloudProvider.TERABOX && item.path.isNotBlank()) {
+                    item.path
+                } else {
+                    item.id
+                }
+                val thumbResult = cloudUseCase.downloadThumbnail(accountId, thumbTarget)
                 val thumbBytes = thumbResult.getOrNull()
                 if (thumbBytes != null && thumbBytes.isNotEmpty()) {
                     cachedThumb.writeBytes(thumbBytes)
