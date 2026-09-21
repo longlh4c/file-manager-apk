@@ -131,4 +131,39 @@ class TeraBoxApiClientTest {
         assertEquals("My TeraBox", account.accountName)
         assertEquals("ndus_sample_token", account.accessToken)
     }
+
+    @Test
+    fun testThumbnailJsonParsing() {
+        val sampleListJson = """
+            {
+                "errno": 0,
+                "list": [
+                    {
+                        "fs_id": 1003,
+                        "server_filename": "photo.jpg",
+                        "path": "/photo.jpg",
+                        "size": 204800,
+                        "isdir": 0,
+                        "server_mtime": 1700006000,
+                        "thumbs": {
+                            "url1": "https://data.terabox.com/thumb/1003_140x90.jpg",
+                            "url2": "https://data.terabox.com/thumb/1003_360x270.jpg",
+                            "url3": "https://data.terabox.com/thumb/1003_850x580.jpg",
+                            "icon": "https://data.terabox.com/thumb/1003_icon.jpg"
+                        }
+                    }
+                ]
+            }
+        """.trimIndent()
+
+        val root = JSONObject(sampleListJson)
+        val arr = root.getJSONArray("list")
+        val item = arr.getJSONObject(0)
+        val thumbsObj = item.optJSONObject("thumbs")
+        val thumbUrl = thumbsObj?.optString("url3")?.takeIf { it.isNotBlank() }
+            ?: thumbsObj?.optString("url2")?.takeIf { it.isNotBlank() }
+            ?: thumbsObj?.optString("url1")?.takeIf { it.isNotBlank() }
+
+        assertEquals("https://data.terabox.com/thumb/1003_850x580.jpg", thumbUrl)
+    }
 }

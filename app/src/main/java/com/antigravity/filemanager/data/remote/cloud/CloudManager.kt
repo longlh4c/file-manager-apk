@@ -461,7 +461,8 @@ class CloudManager @Inject constructor(
         when (account.provider) {
             CloudProvider.MEGA -> megaApi.downloadThumbnail(account, nodeId)
             CloudProvider.GOOGLE_DRIVE -> googleDriveApi.downloadThumbnail(account, nodeId)
-            CloudProvider.DROPBOX, CloudProvider.TERABOX -> Result.failure(Exception("Thumbnail endpoint not supported for ${account.provider}"))
+            CloudProvider.TERABOX -> teraBoxApi.downloadThumbnail(account, nodeId)
+            CloudProvider.DROPBOX -> Result.failure(Exception("Thumbnail endpoint not supported for ${account.provider}"))
         }
     }
 
@@ -1327,7 +1328,7 @@ class CloudManager @Inject constructor(
                     googleDriveApi.moveFile(account, fileId, oldParentId, newParentId)
                 }
                 CloudProvider.TERABOX -> {
-                    Result.success(Unit)
+                    teraBoxApi.moveFile(account, sourcePath, targetDir)
                 }
             }
         } catch (e: Exception) {

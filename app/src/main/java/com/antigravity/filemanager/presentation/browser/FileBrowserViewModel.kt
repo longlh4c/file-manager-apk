@@ -50,6 +50,7 @@ data class FileBrowserUiState(
     val isCutOperation: Boolean = false,
     val clipboardSourceCloudAccountId: String? = null,
     val clipboardItemSizes: Map<String, Long> = emptyMap(),
+    val clipboardItemIsDirectory: Map<String, Boolean> = emptyMap(),
     val showHiddenFiles: Boolean = false,
     val sortOption: FileSortOption = FileSortOption.BY_NAME_ASC,
     val showNewFolderDialog: Boolean = false,
@@ -199,7 +200,8 @@ class FileBrowserViewModel @Inject constructor(
                     clipboardPaths = clip.paths,
                     isCutOperation = clip.isCut,
                     clipboardSourceCloudAccountId = clip.sourceCloudAccountId,
-                    clipboardItemSizes = clip.itemSizes
+                    clipboardItemSizes = clip.itemSizes,
+                    clipboardItemIsDirectory = clip.itemIsDirectory
                 )
             }
         }
@@ -687,7 +689,8 @@ class FileBrowserViewModel @Inject constructor(
                 itemSizes = itemSizes,
                 isMove = isMove,
                 overwriteNames = overwriteNames,
-                skipNames = skipNames
+                skipNames = skipNames,
+                itemIsDirectory = _uiState.value.clipboardItemIsDirectory
             ) { progress -> _uiState.value = _uiState.value.copy(downloadProgress = progress) }
 
             // result.scannedPaths.size is how many actually got written — was always "Pasted

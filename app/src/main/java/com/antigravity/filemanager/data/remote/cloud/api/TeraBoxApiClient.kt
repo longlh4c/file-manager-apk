@@ -58,6 +58,8 @@ class TeraBoxApiClient @Inject constructor(
         currentDomainPrefix = prefix?.takeIf { it.isNotBlank() }
     }
 
+    private val thumbnailUrls = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     fun extractCleanNdus(rawToken: String?): String {
         if (rawToken.isNullOrBlank()) return ""
         val trimmed = rawToken.trim()
@@ -263,6 +265,18 @@ class TeraBoxApiClient @Inject constructor(
                 val mtimeSec = item.optLong("server_mtime", 0L)
                 val lastModified = if (mtimeSec > 0) mtimeSec * 1000L else System.currentTimeMillis()
                 val fsId = item.opt("fs_id")?.toString() ?: filePath
+                val thumbsObj = item.optJSONObject("thumbs")
+                val thumbUrl = thumbsObj?.optString("url3")?.takeIf { it.isNotBlank() }
+                    ?: thumbsObj?.optString("url2")?.takeIf { it.isNotBlank() }
+                    ?: thumbsObj?.optString("url1")?.takeIf { it.isNotBlank() }
+                    ?: thumbsObj?.optString("icon")?.takeIf { it.isNotBlank() }
+
+                if (!thumbUrl.isNullOrBlank()) {
+                    thumbnailUrls["${account.id}:$fsId"] = thumbUrl
+                    thumbnailUrls["${account.id}:$filePath"] = thumbUrl
+                    thumbnailUrls[fsId] = thumbUrl
+                    thumbnailUrls[filePath] = thumbUrl
+                }
 
                 val ext = if (fileName.contains('.')) fileName.substringAfterLast('.').lowercase(Locale.ROOT) else ""
                 val mimeType = if (isDir) {
@@ -391,6 +405,41 @@ class TeraBoxApiClient @Inject constructor(
         }
     }
 
+    suspend fun moveFile(account: CloudAccount, sourcePath: String, targetDir: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val cookie = getCookieString(account)
+            val fileName = File(sourcePath).name
+            val cleanDest = when {
+                targetDir.isBlank() || targetDir == "/" -> "/"
+                targetDir.startsWith("/") -> targetDir
+                else -> "/$targetDir"
+            }
+            val moveEntry = JSONObject().apply {
+                put("path", sourcePath)
+                put("dest", cleanDest)
+                put("newname", fileName)
+            }
+            val fileListJson = JSONArray().put(moveEntry).toString()
+            val formBody = FormBody.Builder()
+                .add("filelist", fileListJson)
+                .build()
+
+            val (response, body) = executeWithRetry("/api/filemanager?opera=move", cookie, method = "POST", body = formBody)
+            if (!response.isSuccessful) {
+                return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
+            }
+
+            val json = JSONObject(body)
+            val errno = json.optInt("errno", -1)
+            if (errno != 0) {
+                return@withContext Result.failure(IOException("TeraBox move failed (errno: $errno)"))
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     suspend fun downloadFile(
         account: CloudAccount,
         remotePath: String,
@@ -448,6 +497,80 @@ class TeraBoxApiClient @Inject constructor(
             Result.success(destFile)
         } catch (e: Exception) {
             if (destFile.exists()) destFile.delete()
+            Result.failure(e)
+        }
+    }
+
+    suspend fun downloadThumbnail(account: CloudAccount, nodeIdOrPath: String): Result<ByteArray> = withContext(Dispatchers.IO) {
+        try {
+            val cookie = getCookieString(account)
+            if (cookie.isBlank()) {
+                return@withContext Result.failure(IOException("TeraBox session expired or missing token"))
+            }
+
+            var thumbUrl = thumbnailUrls["${account.id}:$nodeIdOrPath"]
+                ?: thumbnailUrls[nodeIdOrPath]
+                ?: if (nodeIdOrPath.startsWith("http://") || nodeIdOrPath.startsWith("https://")) nodeIdOrPath else null
+
+            // Fallback: If not cached, try querying metadata via /api/filemetas
+            if (thumbUrl.isNullOrBlank()) {
+                val queryParam = if (nodeIdOrPath.startsWith("/")) {
+                    val encoded = URLEncoder.encode("[\"$nodeIdOrPath\"]", "UTF-8")
+                    "target=$encoded&dlink=0"
+                } else {
+                    "fsids=[$nodeIdOrPath]&dlink=0"
+                }
+                val (resp, body) = executeWithRetry("/api/filemetas?$queryParam", cookie)
+                if (resp.isSuccessful) {
+                    val json = JSONObject(body)
+                    val info = json.optJSONArray("info")
+                    if (info != null && info.length() > 0) {
+                        val meta = info.getJSONObject(0)
+                        val thumbsObj = meta.optJSONObject("thumbs")
+                        thumbUrl = thumbsObj?.optString("url3")?.takeIf { it.isNotBlank() }
+                            ?: thumbsObj?.optString("url2")?.takeIf { it.isNotBlank() }
+                            ?: thumbsObj?.optString("url1")?.takeIf { it.isNotBlank() }
+                            ?: thumbsObj?.optString("icon")?.takeIf { it.isNotBlank() }
+                        if (!thumbUrl.isNullOrBlank()) {
+                            thumbnailUrls["${account.id}:$nodeIdOrPath"] = thumbUrl
+                        }
+                    }
+                }
+            }
+
+            if (thumbUrl.isNullOrBlank()) {
+                return@withContext Result.failure(IOException("No thumbnail found for $nodeIdOrPath"))
+            }
+
+            val finalUrl = if (thumbUrl.startsWith("http://") || thumbUrl.startsWith("https://")) {
+                thumbUrl
+            } else {
+                "${getBaseUrl()}$thumbUrl"
+            }
+
+            val finalCookie = buildCookieHeader(cookie)
+            val builder = Request.Builder()
+                .url(finalUrl)
+                .addHeader("User-Agent", USER_AGENT)
+                .addHeader("Referer", REFERER)
+                .addHeader("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+
+            if (finalCookie.isNotBlank()) {
+                builder.addHeader("Cookie", finalCookie)
+            }
+
+            val response = okHttpClient.newCall(builder.get().build()).execute()
+            if (!response.isSuccessful) {
+                return@withContext Result.failure(IOException("Thumbnail download failed: HTTP ${response.code}"))
+            }
+
+            val bytes = response.body?.bytes()
+            if (bytes == null || bytes.isEmpty()) {
+                return@withContext Result.failure(IOException("Empty thumbnail body"))
+            }
+
+            Result.success(bytes)
+        } catch (e: Exception) {
             Result.failure(e)
         }
     }
