@@ -595,6 +595,22 @@ fun CloudProviderIcon(
                     )
                 }
             }
+            CloudProvider.TERABOX -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape)
+                        .background(Color(0xFF0084FF)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "T",
+                        color = Color.White,
+                        fontSize = (size.value * 0.5f).sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
             else -> {
                 Icon(
                     imageVector = Icons.Default.Cloud,

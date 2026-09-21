@@ -15,6 +15,7 @@ import javax.inject.Inject
 
 import com.antigravity.filemanager.data.remote.cloud.CloudManager
 import com.antigravity.filemanager.data.remote.cloud.api.MegaApiClient
+import com.antigravity.filemanager.data.remote.cloud.api.TeraBoxApiClient
 
 data class CloudUiState(
     val isLoading: Boolean = false,
@@ -29,6 +30,7 @@ data class CloudUiState(
 class CloudViewModel @Inject constructor(
     private val cloudUseCase: CloudStorageUseCase,
     private val megaApiClient: MegaApiClient,
+    private val teraBoxApiClient: TeraBoxApiClient,
     private val cloudManager: CloudManager
 ) : ViewModel() {
 
@@ -56,6 +58,18 @@ class CloudViewModel @Inject constructor(
                             val realEmail = realEmailRes.getOrNull()
                             if (!realEmail.isNullOrBlank() && realEmail != account.email) {
                                 cloudUseCase.addAccount(account.copy(email = realEmail))
+                            }
+                        }
+                    } else if (account.provider == CloudProvider.TERABOX && (account.email.startsWith("user@") || account.email.startsWith("account@") || account.email.isBlank() || account.email == "terabox_user")) {
+                        launch(kotlinx.coroutines.Dispatchers.IO) {
+                            val ndus = account.accessToken ?: account.sessionHandle ?: ""
+                            val userInfoRes = teraBoxApiClient.getUserInfo(ndus)
+                            val uInfo = userInfoRes.getOrNull()
+                            if (uInfo != null) {
+                                val displayEmail = if (!uInfo.email.isNullOrBlank()) uInfo.email else uInfo.uname
+                                if (!displayEmail.isNullOrBlank() && displayEmail != account.email) {
+                                    cloudUseCase.addAccount(account.copy(email = displayEmail))
+                                }
                             }
                         }
                     }
@@ -139,6 +153,7 @@ class CloudViewModel @Inject constructor(
                 CloudProvider.MEGA -> 20L * 1024 * 1024 * 1024
                 CloudProvider.GOOGLE_DRIVE -> 15L * 1024 * 1024 * 1024
                 CloudProvider.DROPBOX -> 2L * 1024 * 1024 * 1024
+                CloudProvider.TERABOX -> 1024L * 1024 * 1024 * 1024 // 1 TB
             }
 
             var resolvedToken = token
@@ -146,6 +161,57 @@ class CloudViewModel @Inject constructor(
             var dbSessionHandle: String? = null
 
             val accountId = UUID.randomUUID().toString()
+
+            if (provider == CloudProvider.TERABOX) {
+                val rawToken = token ?: session ?: ""
+                val cleanNdus = teraBoxApiClient.extractCleanNdus(rawToken)
+                if (cleanNdus.isBlank()) {
+                    _uiState.value = _uiState.value.copy(
+                        isAddingAccount = false,
+                        addAccountError = "Invalid TeraBox session token (ndus is required)"
+                    )
+                    return@launch
+                }
+                val quotaRes = teraBoxApiClient.getQuota(cleanNdus)
+                if (quotaRes.isFailure) {
+                    _uiState.value = _uiState.value.copy(
+                        isAddingAccount = false,
+                        addAccountError = quotaRes.exceptionOrNull()?.message ?: "Failed to connect to TeraBox. Please verify your token."
+                    )
+                    return@launch
+                }
+                val quota = quotaRes.getOrNull()
+                val actualTotal = if (quota != null && quota.totalBytes > 0) quota.totalBytes else totalBytes
+                val actualUsed = quota?.usedBytes ?: 0L
+                val userInfoRes = teraBoxApiClient.getUserInfo(cleanNdus)
+                val uInfo = userInfoRes.getOrNull()
+                val resolvedEmail = if (!uInfo?.email.isNullOrBlank()) {
+                    uInfo!!.email!!
+                } else if (!uInfo?.uname.isNullOrBlank()) {
+                    uInfo!!.uname
+                } else if (email.isNotBlank() && !email.startsWith("account@") && email != "terabox_user") {
+                    email
+                } else {
+                    "terabox_user"
+                }
+
+                val newAccount = CloudAccount(
+                    id = accountId,
+                    provider = CloudProvider.TERABOX,
+                    accountName = name.ifBlank { "TeraBox" },
+                    email = resolvedEmail,
+                    displayOrder = _uiState.value.accounts.size,
+                    totalSpaceBytes = actualTotal,
+                    usedSpaceBytes = actualUsed,
+                    accessToken = cleanNdus,
+                    sessionHandle = cleanNdus,
+                    refreshToken = null
+                )
+                cloudUseCase.addAccount(newAccount)
+                _uiState.value = _uiState.value.copy(showAddDialog = false, isAddingAccount = false)
+                onSuccess(accountId, newAccount.accountName)
+                return@launch
+            }
 
             // A short, non-JSON, non-"mega_session_" string is a raw MEGA password: perform a
             // real email+password login (the only way this app can obtain a genuine master

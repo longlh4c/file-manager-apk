@@ -608,7 +608,21 @@ fun AddCloudDialog(
     var megaEmail by remember { mutableStateOf("") }
     var megaPassword by remember { mutableStateOf("") }
     var megaPasswordVisible by remember { mutableStateOf(false) }
+    var teraboxToken by remember { mutableStateOf("") }
+    var showTeraBoxWebView by remember { mutableStateOf(false) }
     val context = androidx.compose.ui.platform.LocalContext.current
+
+    if (showTeraBoxWebView) {
+        CloudLoginWebViewDialog(
+            provider = CloudProvider.TERABOX,
+            customAccountName = accountName.ifBlank { "TeraBox" },
+            onAuthSuccess = { provider, accName, email, token, session ->
+                showTeraBoxWebView = false
+                onSelectProvider(provider, accName, email, token, session)
+            },
+            onDismiss = { showTeraBoxWebView = false }
+        )
+    }
 
     val googleSignInLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -633,12 +647,6 @@ fun AddCloudDialog(
             .requestScopes(com.google.android.gms.common.api.Scope(com.google.api.services.drive.DriveScopes.DRIVE))
             .build()
         val client = GoogleSignIn.getClient(context, gso)
-        // Google Play Services silently reuses the last-signed-in account for this app and skips
-        // the account picker unless the client's cached session is cleared first — without this,
-        // adding a second Google account is impossible; every sign-in silently returns the same
-        // one already connected. signOut() only clears the local cached session (not the user's
-        // Google login elsewhere), so it's safe to call every time regardless of whether an
-        // account was already connected.
         client.signOut().addOnCompleteListener {
             googleSignInLauncher.launch(client.signInIntent)
         }
@@ -649,6 +657,7 @@ fun AddCloudDialog(
             CloudProvider.GOOGLE_DRIVE -> "Google Drive"
             CloudProvider.DROPBOX -> "Dropbox"
             CloudProvider.MEGA -> "MEGA"
+            CloudProvider.TERABOX -> "TeraBox"
         }
     }
 
@@ -671,7 +680,7 @@ fun AddCloudDialog(
                 Text(text = "Select Cloud Service:", color = TextSecondary, fontSize = 13.sp)
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // 3 Supported Cloud Providers: Google Drive, Dropbox, Mega
+                // 4 Supported Cloud Providers: Google Drive, Dropbox, Mega, TeraBox
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -700,6 +709,12 @@ fun AddCloudDialog(
                         },
                         modifier = Modifier.weight(1f)
                     )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     CloudProviderButton(
                         provider = CloudProvider.MEGA,
                         name = "MEGA",
@@ -708,6 +723,18 @@ fun AddCloudDialog(
                         onClick = {
                             selectedProvider = CloudProvider.MEGA
                             accountName = "MEGA"
+                            errorMessage = null
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    CloudProviderButton(
+                        provider = CloudProvider.TERABOX,
+                        name = "TeraBox (1TB)",
+                        pastelColor = Color(0xFF0084FF),
+                        isSelected = selectedProvider == CloudProvider.TERABOX,
+                        onClick = {
+                            selectedProvider = CloudProvider.TERABOX
+                            accountName = "TeraBox"
                             errorMessage = null
                         },
                         modifier = Modifier.weight(1f)
@@ -798,6 +825,51 @@ fun AddCloudDialog(
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(text = megaError, color = Color(0xFFFF6B6B), fontSize = 11.sp)
                     }
+                } else if (selectedProvider == CloudProvider.TERABOX) {
+                    Text(
+                        text = "Sign in via in-app browser or enter your TeraBox 'ndus' cookie/token below:",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        lineHeight = 16.sp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = teraboxToken,
+                        onValueChange = { teraboxToken = it; errorMessage = null; onClearAddAccountError() },
+                        label = { Text("TeraBox token (ndus)") },
+                        placeholder = { Text("ndus=... or token value", color = TextSecondary.copy(alpha = 0.5f)) },
+                        singleLine = true,
+                        enabled = !isAddingAccount,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            focusedBorderColor = TealPrimary,
+                            unfocusedBorderColor = TextSecondary,
+                            cursorColor = TealPrimary
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { showTeraBoxWebView = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = TealPrimary),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, TealPrimary.copy(alpha = 0.7f)),
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Icon(Icons.Default.Language, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("SIGN IN VIA IN-APP BROWSER", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    if (isAddingAccount) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = TealPrimary)
+                    }
+                    val tbError = errorMessage ?: addAccountError
+                    if (tbError != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(text = tbError, color = Color(0xFFFF6B6B), fontSize = 11.sp)
+                    }
                 } else {
                     Text(
                         text = "Tap 'SIGN IN & CONNECT' below to sign in securely to $providerDisplayName via the in-app browser.",
@@ -830,6 +902,15 @@ fun AddCloudDialog(
                                 onSelectProvider(CloudProvider.MEGA, accountName.ifBlank { "MEGA" }, trimmedEmail, null, megaPassword)
                             }
                         }
+                        CloudProvider.TERABOX -> {
+                            val trimmedToken = teraboxToken.trim()
+                            if (trimmedToken.isBlank()) {
+                                showTeraBoxWebView = true
+                            } else {
+                                errorMessage = null
+                                onSelectProvider(CloudProvider.TERABOX, accountName.ifBlank { "TeraBox" }, "", trimmedToken, trimmedToken)
+                            }
+                        }
                     }
                 },
                 enabled = !isAddingAccount,
@@ -849,10 +930,10 @@ fun AddCloudDialog(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (selectedProvider == CloudProvider.MEGA) {
-                        if (isAddingAccount) "SIGNING IN..." else "SIGN IN"
-                    } else {
-                        "SIGN IN & CONNECT"
+                    text = when (selectedProvider) {
+                        CloudProvider.MEGA -> if (isAddingAccount) "SIGNING IN..." else "SIGN IN"
+                        CloudProvider.TERABOX -> if (isAddingAccount) "CONNECTING..." else if (teraboxToken.isNotBlank()) "CONNECT" else "SIGN IN VIA BROWSER"
+                        else -> "SIGN IN & CONNECT"
                     },
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp,
@@ -891,6 +972,7 @@ fun CloudLoginWebViewDialog(
             CloudProvider.GOOGLE_DRIVE -> "https://accounts.google.com/signin/v2/identifier?service=wise&passive=1209600&continue=https%3A%2F%2Fdrive.google.com%2Fdrive%2Fmy-drive&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
             CloudProvider.DROPBOX -> "https://www.dropbox.com/login"
             CloudProvider.MEGA -> "https://mega.nz/login"
+            CloudProvider.TERABOX -> "https://www.terabox.com/wap/login"
         }
     }
 
@@ -939,6 +1021,7 @@ fun CloudLoginWebViewDialog(
                                         CloudProvider.GOOGLE_DRIVE -> "https://drive.google.com"
                                         CloudProvider.DROPBOX -> "https://www.dropbox.com"
                                         CloudProvider.MEGA -> "https://mega.nz"
+                                        CloudProvider.TERABOX -> "https://www.terabox.com"
                                     }
                                     val cookies = cookieManager.getCookie(cookieUrl) ?: cookieManager.getCookie("https://accounts.google.com") ?: ""
 
@@ -962,6 +1045,18 @@ fun CloudLoginWebViewDialog(
                                             }
                                         }
                                         CloudProvider.MEGA -> {}
+                                        CloudProvider.TERABOX -> {
+                                            cookieManager.flush()
+                                            val tbCookies = cookieManager.getCookie("https://www.terabox.com") ?: ""
+                                            if (!tbCookies.contains("ndus=")) {
+                                                Toast.makeText(context, "Please complete TeraBox login before tapping DONE.", Toast.LENGTH_SHORT).show()
+                                                return@Button
+                                            }
+                                            val ndus = tbCookies.substringAfter("ndus=").substringBefore(";")
+                                            hasRedirected = true
+                                            onAuthSuccess(CloudProvider.TERABOX, finalAccountName, detectedEmail.ifBlank { "terabox_user" }, ndus, tbCookies)
+                                            return@Button
+                                        }
                                     }
 
                                     // Trigger unified extraction logic
@@ -1505,10 +1600,19 @@ fun CloudLoginWebViewDialog(
                                             CloudProvider.GOOGLE_DRIVE -> "https://drive.google.com"
                                             CloudProvider.DROPBOX -> "https://www.dropbox.com"
                                             CloudProvider.MEGA -> "https://mega.nz"
+                                            CloudProvider.TERABOX -> "https://www.terabox.com"
                                         }
                                         var cookies = cookieManager.getCookie(cookieUrl) 
                                             ?: cookieManager.getCookie("https://accounts.google.com")
                                             ?: sid
+
+                                        if (provider == CloudProvider.TERABOX) {
+                                            val tbCookies = cookieManager.getCookie("https://www.terabox.com") ?: ""
+                                            val ndus = if (tbCookies.contains("ndus=")) tbCookies.substringAfter("ndus=").substringBefore(";") else ""
+                                            hasRedirected = true
+                                            onAuthSuccess(CloudProvider.TERABOX, finalAccountName, detectedEmail.ifBlank { "terabox_user" }, ndus, tbCookies)
+                                            return@evaluateJavascript
+                                        }
 
                                         if (uidVal.isNotBlank() && !cookies.contains("uid=")) {
                                             cookies = "$cookies; uid=$uidVal"
@@ -1691,8 +1795,9 @@ fun CloudLoginWebViewDialog(
                                     val parsedPath = try { java.net.URI(url ?: "").path?.lowercase(Locale.getDefault()) ?: "" } catch (e: Exception) { "" }
                                     val isDropboxHome = (parsedPath.startsWith("/home") || parsedPath.startsWith("/personal") || parsedPath.startsWith("/work") || parsedPath.startsWith("/browse")) && !parsedPath.contains("login") && !parsedPath.contains("verify") && !parsedPath.contains("twofactor")
                                     val isGoogleDriveHome = (parsedPath.contains("/drive/my-drive") || parsedPath.contains("/drive/u/")) && !parsedPath.contains("signin") && !parsedPath.contains("identifier")
+                                    val isTeraBoxAuthed = provider == CloudProvider.TERABOX && (cookieManager.getCookie("https://www.terabox.com") ?: "").contains("ndus=")
 
-                                    if ((isDropboxHome || isGoogleDriveHome) && !hasRedirected) {
+                                    if ((isDropboxHome || isGoogleDriveHome || isTeraBoxAuthed) && !hasRedirected) {
                                         cookieManager.flush()
                                         postDelayed({
                                             if (!hasRedirected) {
