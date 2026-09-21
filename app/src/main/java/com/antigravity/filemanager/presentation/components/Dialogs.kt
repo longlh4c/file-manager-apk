@@ -972,7 +972,7 @@ fun CloudLoginWebViewDialog(
             CloudProvider.GOOGLE_DRIVE -> "https://accounts.google.com/signin/v2/identifier?service=wise&passive=1209600&continue=https%3A%2F%2Fdrive.google.com%2Fdrive%2Fmy-drive&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
             CloudProvider.DROPBOX -> "https://www.dropbox.com/login"
             CloudProvider.MEGA -> "https://mega.nz/login"
-            CloudProvider.TERABOX -> "https://www.terabox.com/wap/login"
+            CloudProvider.TERABOX -> "https://www.terabox.com/login"
         }
     }
 
@@ -1268,6 +1268,8 @@ fun CloudLoginWebViewDialog(
                                 // a blank page — so only spoof for Google Drive.
                                 if (provider == CloudProvider.GOOGLE_DRIVE) {
                                     userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0"
+                                } else if (provider == CloudProvider.TERABOX) {
+                                    userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
                                 }
                             }
 
@@ -1680,6 +1682,8 @@ fun CloudLoginWebViewDialog(
                                         settings.javaScriptCanOpenWindowsAutomatically = true
                                         if (provider == CloudProvider.GOOGLE_DRIVE) {
                                             settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0"
+                                        } else if (provider == CloudProvider.TERABOX) {
+                                            settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
                                         }
                                         CookieManager.getInstance().setAcceptCookie(true)
                                         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
