@@ -80,7 +80,9 @@ fun StorageFolderBreakdownScreen(
                     // Fetch each directory's children once and reuse it for both the size
                     // computation and the item count, instead of calling listFiles() twice.
                     val childList = if (f.isDirectory) f.listFiles() else null
-                    val size = if (f.isDirectory) calculateDirSize(childList) else f.length()
+                    // Full depth: a 2-level cap reported deep trees (DCIM/Camera, Android/media...)
+                    // at a fraction of their real size on a screen sorted by size.
+                    val size = com.antigravity.filemanager.data.local.storage.directorySize(f)
                     val itemCount = childList?.size ?: 0
                     FileItem(
                         id = f.absolutePath,
@@ -650,29 +652,6 @@ private fun StorageFolderRow(
             )
         }
     }
-}
-
-private fun calculateDirSize(files: Array<File>?): Long {
-    if (files == null) return 0L
-    var size = 0L
-    try {
-        for (f in files) {
-            size += if (f.isDirectory) {
-                // Limit recursion depth to 2 levels for speed
-                var subSize = 0L
-                val subFiles = f.listFiles() ?: emptyArray()
-                for (sf in subFiles) {
-                    subSize += if (sf.isFile) sf.length() else 0L
-                }
-                subSize
-            } else {
-                f.length()
-            }
-        }
-    } catch (e: Exception) {
-        return 0L
-    }
-    return size
 }
 
 private fun getFolderBadgeForName(name: String): com.antigravity.filemanager.domain.model.FolderBadgeType {
