@@ -73,27 +73,23 @@ class MegaApiClient @Inject constructor(
     private fun nodeTreeMutexFor(accountId: String): Mutex =
         nodeTreeMutexes.getOrPut(accountId) { Mutex() }
 
-    /** Call after any mutation (create/delete/rename/move) so the next listFiles() re-fetches. */
-    fun invalidateNodeCache(accountId: String) {
-        nodeTreeCache.remove(accountId)
-    }
-
     /** Adds a freshly created folder node into the cached tree in place, instead of the full
-     * [invalidateNodeCache] wipe createFolder used to always do. A recursive cloud-to-cloud
+     * [invalidateNodeTreeCache] wipe createFolder used to always do. A recursive cloud-to-cloud
      * folder copy/move calls createFolder once per subfolder — on an account with tens of
      * thousands of nodes, invalidating on every single one meant every subfolder paid for a full
      * re-fetch + re-decrypt of the WHOLE account tree (each took several seconds here), which is
      * exactly what made "move a folder with nested subfolders" feel like it hung. No-ops if
      * nothing is cached yet; the next listFiles() fetches fresh anyway. */
-    private fun patchNodeCacheAfterFolderCreate(accountId: String, handle: String, parentHandle: String, name: String) {
+    private fun patchNodeCacheAfterFolderCreate(accountId: String, handle: String, parentHandle: String, name: String, encodedKey: String) {
         val cached = nodeTreeCache[accountId] ?: return
         val newNode = MegaNode(
             handle = handle,
             parentHandle = parentHandle,
             type = 1,
             size = 0L,
-            timestamp = System.currentTimeMillis() / 1000,
-            name = name
+            timestamp = System.currentTimeMillis(), // fetched nodes carry milliseconds too
+            name = name,
+            keyStr = encodedKey
         )
         val updated = cached.allNodes.filterNot { it.handle == handle } + newNode
         nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, System.currentTimeMillis())
@@ -101,7 +97,7 @@ class MegaApiClient @Inject constructor(
 
     /** Same idea for a freshly uploaded file — this one matters even more than the folder-create
      * patch above, since a folder copy/move usually contains far more files than subfolders, and
-     * this used to be an invalidateNodeCache() on every single file: uploading N files into a
+     * this used to be an invalidateNodeTreeCache() on every single file: uploading N files into a
      * large MEGA account paid for N full account-tree re-fetches, which is what made "move a
      * folder" feel like it hung on an account with tens of thousands of nodes. keyStr is kept
      * functional (not left blank) — it's the encoded per-file key needed to decrypt this node's
@@ -121,7 +117,7 @@ class MegaApiClient @Inject constructor(
             parentHandle = parentHandle,
             type = 0,
             size = size,
-            timestamp = System.currentTimeMillis() / 1000,
+            timestamp = System.currentTimeMillis(), // fetched nodes carry milliseconds too
             name = name,
             keyStr = encodedKey,
             fileAttrStr = fileAttrStr
@@ -145,6 +141,19 @@ class MegaApiClient @Inject constructor(
         } catch (e: Exception) {}
         return if (session != "session_active" && !session.startsWith("{")) session else ""
     }
+
+    /** Command endpoint for this account's session. Every command goes through [resolveSid] —
+     * several used the raw sessionHandle, which for an imported session is the placeholder
+     * "session_active", so those commands all failed for such accounts. */
+    private fun apiUrl(account: CloudAccount): String {
+        val sid = resolveSid(account)
+        return if (sid.isNotBlank() && !sid.contains("@")) "$megaApiUrl?sid=$sid" else megaApiUrl
+    }
+
+    private fun masterKey(account: CloudAccount): ByteArray? =
+        account.refreshToken?.takeIf { it.isNotBlank() }?.let {
+            try { base64UrlDecode(it) } catch (e: Exception) { null }
+        }
 
     // Authenticates with MEGA CS API using Email & Password. Returns Pair(sid, masterKeyBase64).
     suspend fun login(email: String, password: String): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
@@ -244,13 +253,14 @@ class MegaApiClient @Inject constructor(
                     val rawSid = rsaDecryptRaw(csidMpi, p, q, d)
                     resolvedSid = base64UrlEncode(rawSid.copyOfRange(0, minOf(43, rawSid.size)))
                 } catch (e: Exception) {
-                    // Fallback to direct csid
-                    resolvedSid = csidStr
+                    android.util.Log.e("MegaApiClient", "login: could not decrypt the session id", e)
                 }
             }
 
+            // A made-up sid used to be returned here as a "successful" login — every later call
+            // then failed with confusing session errors instead of the login reporting it.
             if (resolvedSid.isEmpty()) {
-                resolvedSid = "mega_session_${System.currentTimeMillis()}"
+                return@withContext Result.failure(Exception("MEGA login failed: no session id could be established"))
             }
 
             val masterKeyBase64 = base64UrlEncode(a32ToBytes(masterKeyA32))
@@ -343,8 +353,12 @@ class MegaApiClient @Inject constructor(
         if (segments.isEmpty()) return null
         val (allNodes, rootHandle) = getOrFetchNodeTree(account).getOrNull() ?: return null
         val childrenByParent = allNodes.groupBy { it.parentHandle }
-        var currentHandle = rootHandle
-        for (segment in segments) {
+        // "/Rubbish Bin/..." is the virtual entry listFiles() pins at the root, backed by the
+        // type-4 node rather than a real child of the root folder.
+        val rubbish = allNodes.firstOrNull { it.type == 4 }
+        val startsInRubbish = segments.first() == "Rubbish Bin" && rubbish != null
+        var currentHandle = if (startsInRubbish) rubbish!!.handle else rootHandle
+        for (segment in if (startsInRubbish) segments.drop(1) else segments) {
             val match = childrenByParent[currentHandle]?.firstOrNull { it.type == 1 && it.name == segment } ?: return null
             currentHandle = match.handle
         }
@@ -377,9 +391,7 @@ class MegaApiClient @Inject constructor(
 
     private fun fetchNodeTreeFromNetwork(account: CloudAccount): Result<Pair<List<MegaNode>, String>> {
         try {
-            val session = account.sessionHandle ?: account.accessToken ?: ""
-            val sidParam = if (session.isNotBlank() && !session.contains("@")) "?sid=$session" else ""
-            val url = "$megaApiUrl$sidParam"
+            val url = apiUrl(account)
 
             // Request node tree from Mega CS API
             val commandJson = JSONArray().apply {
@@ -410,9 +422,7 @@ class MegaApiClient @Inject constructor(
             val allNodes = mutableListOf<MegaNode>()
 
             // Master key for decrypting file/folder names
-            val masterKeyBytes = try {
-                if (!account.refreshToken.isNullOrBlank()) base64UrlDecode(account.refreshToken) else null
-            } catch (e: Exception) { null }
+            val masterKeyBytes = masterKey(account)
 
             for (i in 0 until nodes.length()) {
                 val nodeObj = nodes.getJSONObject(i)
@@ -458,9 +468,7 @@ class MegaApiClient @Inject constructor(
 
     suspend fun getStorageQuota(account: CloudAccount): Result<Pair<Long, Long>> = withContext(Dispatchers.IO) {
         try {
-            val sid = resolveSid(account)
-            val sidParam = if (sid.isNotBlank()) "?sid=$sid" else ""
-            val url = "$megaApiUrl$sidParam"
+            val url = apiUrl(account)
 
             val commandJson = JSONArray().apply {
                 put(JSONObject().apply {
@@ -469,23 +477,21 @@ class MegaApiClient @Inject constructor(
                 })
             }.toString()
 
-            val response = sendMegaPost(url, commandJson)
-            val bodyStr = response.getOrNull() ?: "[]"
-            val jsonArray = JSONArray(bodyStr)
-            val obj = jsonArray.optJSONObject(0) ?: JSONObject()
-            val total = obj.optLong("mstrg", 20L * 1024 * 1024 * 1024)
-            val used = obj.optLong("cstrg", 0L)
-            Result.success(Pair(total, used))
+            val bodyStr = sendMegaPost(url, commandJson).getOrElse { return@withContext Result.failure(it) }
+            // Errors (expired session etc.) used to come back as a made-up 20 GB / 0 used success.
+            val obj = JSONArray(bodyStr).optJSONObject(0)
+                ?: return@withContext Result.failure(Exception("MEGA quota request failed: $bodyStr"))
+            val total = obj.optLong("mstrg", 0L)
+            if (total <= 0L) return@withContext Result.failure(Exception("MEGA quota missing: $bodyStr"))
+            Result.success(Pair(total, obj.optLong("cstrg", 0L)))
         } catch (e: Exception) {
-            Result.success(Pair(20L * 1024 * 1024 * 1024, 0L))
+            Result.failure(e)
         }
     }
 
     suspend fun getUserEmail(account: CloudAccount): Result<String> = withContext(Dispatchers.IO) {
         try {
-            val sid = resolveSid(account)
-            val sidParam = if (sid.isNotBlank()) "?sid=$sid" else ""
-            val url = "$megaApiUrl$sidParam"
+            val url = apiUrl(account)
 
             val commandJson = JSONArray().apply {
                 put(JSONObject().apply {
@@ -548,9 +554,7 @@ class MegaApiClient @Inject constructor(
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
-            val sid = resolveSid(account)
-            val sidParam = if (sid.isNotBlank()) "?sid=$sid" else ""
-            val url = "$megaApiUrl$sidParam"
+            val url = apiUrl(account)
 
             val commandJson = JSONArray().apply {
                 put(JSONObject().apply {
@@ -576,6 +580,7 @@ class MegaApiClient @Inject constructor(
             val dlResponse = okHttpClient.newCall(dlRequest).execute()
             if (!dlResponse.isSuccessful) {
                 android.util.Log.e("MegaApiClient", "downloadFile: HTTP ${dlResponse.code} streaming node=$nodeHandle file='$fileName'")
+                dlResponse.close()
                 return@withContext Result.failure(Exception("Failed to stream Mega file: ${dlResponse.code}"))
             }
 
@@ -587,9 +592,7 @@ class MegaApiClient @Inject constructor(
 
             val totalBytes = if (reportedSize > 0) reportedSize else (dlResponse.body?.contentLength() ?: 0L)
 
-            val masterKey = if (!account.refreshToken.isNullOrBlank()) {
-                try { base64UrlDecode(account.refreshToken) } catch (e: Exception) { null }
-            } else null
+            val masterKey = masterKey(account)
 
             val candidateKey = explicitNodeKey.ifBlank { obj.optString("k", "") }
 
@@ -716,6 +719,8 @@ class MegaApiClient @Inject constructor(
             android.util.Log.e("MegaApiClient", "downloadFile: could not resolve a decryption key for node $nodeHandle (file='$fileName')")
             Result.failure(Exception("Could not resolve a decryption key for node $nodeHandle"))
         } catch (e: Exception) {
+            // Never leave a truncated file behind that looks like a finished download.
+            File(localTargetDir, fileName).delete()
             if (e is kotlinx.coroutines.CancellationException) throw e
             android.util.Log.e("MegaApiClient", "downloadFile: FAILED for node=$nodeHandle file='$fileName'", e)
             Result.failure(e)
@@ -736,9 +741,7 @@ class MegaApiClient @Inject constructor(
         maxBytes: Long
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
-            val sid = resolveSid(account)
-            val sidParam = if (sid.isNotBlank()) "?sid=$sid" else ""
-            val url = "$megaApiUrl$sidParam"
+            val url = apiUrl(account)
 
             val commandJson = JSONArray().apply {
                 put(JSONObject().apply {
@@ -757,9 +760,7 @@ class MegaApiClient @Inject constructor(
                 return@withContext Result.failure(Exception("Download URL not found in Mega response: $bodyStr"))
             }
 
-            val masterKeyOrNull = if (!account.refreshToken.isNullOrBlank()) {
-                try { base64UrlDecode(account.refreshToken) } catch (e: Exception) { null }
-            } else null
+            val masterKeyOrNull = masterKey(account)
             val masterKey = masterKeyOrNull
                 ?: return@withContext Result.failure(Exception("No master key available"))
 
@@ -830,9 +831,7 @@ class MegaApiClient @Inject constructor(
     ): Result<android.media.MediaDataSource> =
         withContext(Dispatchers.IO) {
             try {
-                val sid = resolveSid(account)
-                val sidParam = if (sid.isNotBlank()) "?sid=$sid" else ""
-                val url = "$megaApiUrl$sidParam"
+                val url = apiUrl(account)
 
                 val commandJson = JSONArray().apply {
                     put(JSONObject().apply {
@@ -852,9 +851,7 @@ class MegaApiClient @Inject constructor(
                     return@withContext Result.failure(Exception("Download URL/size not found in Mega response: $bodyStr"))
                 }
 
-                val masterKeyOrNull = if (!account.refreshToken.isNullOrBlank()) {
-                    try { base64UrlDecode(account.refreshToken) } catch (e: Exception) { null }
-                } else null
+                val masterKeyOrNull = masterKey(account)
                 val masterKey = masterKeyOrNull
                     ?: return@withContext Result.failure(Exception("No master key available"))
 
@@ -873,9 +870,7 @@ class MegaApiClient @Inject constructor(
 
     suspend fun createFolder(account: CloudAccount, name: String, parentHandle: String?): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
-            val session = account.sessionHandle ?: account.accessToken ?: ""
-            val sidParam = if (session.isNotBlank()) "?sid=$session" else ""
-            val url = "$megaApiUrl$sidParam"
+            val url = apiUrl(account)
 
             // Same root-fallback as uploadFile(): a blank/"/" parentHandle means "account root",
             // which is a real handle from the node tree, never the literal string "/" — sending
@@ -894,15 +889,25 @@ class MegaApiClient @Inject constructor(
                 return@withContext Result.failure(Exception("Could not resolve MEGA parent folder"))
             }
 
+            // Like any MEGA node, a folder needs its own random key, its attributes encrypted with
+            // that key, and the key itself sent wrapped with the master key. The name used to go
+            // out as plaintext JSON with no key at all: official MEGA clients showed such folders
+            // as undecryptable, and a name containing a quote produced invalid attribute JSON.
+            val masterKey = masterKey(account) ?: return@withContext Result.failure(Exception("No master key available"))
+            val folderKey = ByteArray(16).also { SecureRandom().nextBytes(it) }
+            val attrJson = JSONObject().apply { put("n", name) }.toString()
+            val encodedAttr = base64UrlEncode(aesCbcEncrypt(padTo16("MEGA$attrJson".toByteArray(StandardCharsets.UTF_8)), folderKey, ByteArray(16)))
+            val encodedKey = base64UrlEncode(aesEcbEncrypt(folderKey, masterKey))
             val commandJson = JSONArray().apply {
                 put(JSONObject().apply {
                     put("a", "p")
                     put("t", resolvedParentHandle)
                     put("n", JSONArray().apply {
                         put(JSONObject().apply {
-                            put("h", "NEW_${System.currentTimeMillis()}")
+                            put("h", "xxxxxxxx")
                             put("t", 1)
-                            put("a", base64UrlEncode("{\"n\":\"$name\"}".toByteArray(StandardCharsets.UTF_8)))
+                            put("a", encodedAttr)
+                            put("k", encodedKey)
                         })
                     })
                 })
@@ -921,7 +926,7 @@ class MegaApiClient @Inject constructor(
                 val fArr = respArr.optJSONObject(0)?.optJSONArray("f")
                 val handle = fArr?.optJSONObject(0)?.optString("h") ?: ""
                 if (handle.isNotBlank()) {
-                    patchNodeCacheAfterFolderCreate(account.id, handle, resolvedParentHandle, name)
+                    patchNodeCacheAfterFolderCreate(account.id, handle, resolvedParentHandle, name, encodedKey)
                 }
                 handle
             }
@@ -951,9 +956,7 @@ class MegaApiClient @Inject constructor(
      */
     suspend fun renameNode(account: CloudAccount, nodeHandle: String, newName: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val masterKeyOrNull = if (!account.refreshToken.isNullOrBlank()) {
-                try { base64UrlDecode(account.refreshToken) } catch (e: Exception) { null }
-            } else null
+            val masterKeyOrNull = masterKey(account)
             val masterKey = masterKeyOrNull ?: return@withContext Result.failure(Exception("No master key available"))
 
             val treeResult = getOrFetchNodeTree(account)
@@ -967,9 +970,7 @@ class MegaApiClient @Inject constructor(
             val attrBytes = padTo16("MEGA$attrJson".toByteArray(StandardCharsets.UTF_8))
             val encodedAttr = base64UrlEncode(aesCbcEncrypt(attrBytes, nodeKeyBytes, ByteArray(16)))
 
-            val session = account.sessionHandle ?: account.accessToken ?: ""
-            val sidParam = if (session.isNotBlank()) "?sid=$session" else ""
-            val url = "$megaApiUrl$sidParam"
+            val url = apiUrl(account)
 
             val commandJson = JSONArray().apply {
                 put(JSONObject().apply {
@@ -984,7 +985,7 @@ class MegaApiClient @Inject constructor(
             if (bodyStr.startsWith("-")) {
                 return@withContext Result.failure(Exception("MEGA rename failed: $bodyStr"))
             }
-            invalidateNodeCache(account.id)
+            invalidateNodeTreeCache(account.id)
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
@@ -1000,9 +1001,7 @@ class MegaApiClient @Inject constructor(
             if (nodeHandle.startsWith("/")) {
                 return@withContext Result.failure(Exception("Could not resolve a MEGA handle for '$nodeHandle'"))
             }
-            val session = account.sessionHandle ?: account.accessToken ?: ""
-            val sidParam = if (session.isNotBlank()) "?sid=$session" else ""
-            val url = "$megaApiUrl$sidParam"
+            val url = apiUrl(account)
 
             val commandJson = JSONArray().apply {
                 put(JSONObject().apply {
@@ -1016,7 +1015,7 @@ class MegaApiClient @Inject constructor(
             if (bodyStr.startsWith("-")) {
                 return@withContext Result.failure(Exception("MEGA delete failed: $bodyStr"))
             }
-            invalidateNodeCache(account.id)
+            invalidateNodeTreeCache(account.id)
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
@@ -1038,9 +1037,7 @@ class MegaApiClient @Inject constructor(
         invalidHandles.forEach { results[it] = Result.failure(Exception("Could not resolve a MEGA handle for '$it'")) }
         if (validHandles.isEmpty()) return@withContext results
 
-        val session = account.sessionHandle ?: account.accessToken ?: ""
-        val sidParam = if (session.isNotBlank()) "?sid=$session" else ""
-        val url = "$megaApiUrl$sidParam"
+        val url = apiUrl(account)
 
         validHandles.chunked(25).forEach { batch ->
             val commandJson = JSONArray().apply {
@@ -1075,7 +1072,7 @@ class MegaApiClient @Inject constructor(
                 batch.forEach { results[it] = Result.failure(e) }
             }
         }
-        invalidateNodeCache(account.id)
+        invalidateNodeTreeCache(account.id)
         results
     }
 
@@ -1095,9 +1092,7 @@ class MegaApiClient @Inject constructor(
             if (nodeHandle.startsWith("/")) {
                 return@withContext Result.failure(Exception("Could not resolve a MEGA handle for '$nodeHandle'"))
             }
-            val session = account.sessionHandle ?: account.accessToken ?: ""
-            val sidParam = if (session.isNotBlank()) "?sid=$session" else ""
-            val url = "$megaApiUrl$sidParam"
+            val url = apiUrl(account)
 
             val commandJson = JSONArray().apply {
                 put(JSONObject().apply {
@@ -1112,7 +1107,7 @@ class MegaApiClient @Inject constructor(
             if (bodyStr.startsWith("-")) {
                 return@withContext Result.failure(Exception("MEGA move failed: $bodyStr"))
             }
-            invalidateNodeCache(account.id)
+            invalidateNodeTreeCache(account.id)
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
@@ -1278,15 +1273,11 @@ class MegaApiClient @Inject constructor(
                 return@withContext Result.failure(Exception("Malformed fa entry: $thumbEntry"))
             }
 
-            val masterKeyBytes = try {
-                if (!account.refreshToken.isNullOrBlank()) base64UrlDecode(account.refreshToken) else null
-            } catch (e: Exception) { null } ?: return@withContext Result.failure(Exception("No master key available"))
+            val masterKeyBytes = masterKey(account) ?: return@withContext Result.failure(Exception("No master key available"))
             val nodeKeyBytes = deriveNodeKeyBytes(node.keyStr, masterKeyBytes)
                 ?: return@withContext Result.failure(Exception("Cannot derive node key for $nodeHandle"))
 
-            val session = account.sessionHandle ?: account.accessToken ?: ""
-            val sidParam = if (session.isNotBlank() && !session.contains("@")) "?sid=$session" else ""
-            val url = "$megaApiUrl$sidParam"
+            val url = apiUrl(account)
             val commandJson = JSONArray().apply {
                 put(JSONObject().apply {
                     put("a", "ufa")
@@ -1313,11 +1304,12 @@ class MegaApiClient @Inject constructor(
                 .url("$baseUrl/0")
                 .post(fahBytes.toRequestBody("application/octet-stream".toMediaTypeOrNull()))
                 .build()
-            val httpResponse = okHttpClient.newCall(request).execute()
-            if (!httpResponse.isSuccessful) {
-                return@withContext Result.failure(Exception("Thumbnail download failed: ${httpResponse.code}"))
+            val raw = okHttpClient.newCall(request).execute().use { httpResponse ->
+                if (!httpResponse.isSuccessful) {
+                    return@withContext Result.failure(Exception("Thumbnail download failed: ${httpResponse.code}"))
+                }
+                httpResponse.body?.bytes()
             }
-            val raw = httpResponse.body?.bytes()
             if (raw == null || raw.size <= 12) {
                 return@withContext Result.failure(Exception("Empty/short thumbnail response"))
             }
@@ -1356,13 +1348,9 @@ class MegaApiClient @Inject constructor(
         onProgress: ((bytesUploaded: Long, totalBytes: Long) -> Unit)? = null
     ): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
-            val masterKeyBytes = try {
-                if (!account.refreshToken.isNullOrBlank()) base64UrlDecode(account.refreshToken) else null
-            } catch (e: Exception) { null } ?: return@withContext Result.failure(Exception("No master key available"))
+            val masterKeyBytes = masterKey(account) ?: return@withContext Result.failure(Exception("No master key available"))
 
-            val session = account.sessionHandle ?: account.accessToken ?: ""
-            val sidParam = if (session.isNotBlank() && !session.contains("@")) "?sid=$session" else ""
-            val url = "$megaApiUrl$sidParam"
+            val url = apiUrl(account)
 
             val resolvedParentHandle = if (parentHandle.isNullOrBlank() || parentHandle == "root" || parentHandle == "/") {
                 val treeResult = getOrFetchNodeTree(account)
@@ -1379,19 +1367,12 @@ class MegaApiClient @Inject constructor(
                 return@withContext Result.failure(Exception("Could not resolve MEGA parent folder"))
             }
 
-            val fileBytes = localFile.readBytes()
-            val totalBytes = fileBytes.size.toLong()
+            val totalBytes = localFile.length()
 
             // Fresh per-upload key: 16-byte AES key + 8-byte CTR nonce (MEGA's "192-bit" upload key).
             val random = SecureRandom()
             val aesKey = ByteArray(16).also { random.nextBytes(it) }
             val nonce = ByteArray(8).also { random.nextBytes(it) }
-
-            // MAC is computed over the PLAINTEXT (before CTR), matching MEGA's protocol exactly.
-            val chunkedMac = MegaChunkedMac(aesKey, nonce)
-            chunkedMac.update(fileBytes)
-            val encryptedFile = ctrTransform(fileBytes, aesKey, nonce, Cipher.ENCRYPT_MODE)
-            val macBytes = chunkedMac.condense()
 
             currentCoroutineContext().ensureActive()
 
@@ -1417,7 +1398,10 @@ class MegaApiClient @Inject constructor(
                 return@withContext Result.failure(Exception("No upload URL returned"))
             }
 
-            val completionHandleBytes = postChunk(uploadUrl, 0, encryptedFile) { uploaded ->
+            // Encrypted and MAC-ed while streaming: holding the plaintext and ciphertext of the
+            // whole file in memory at once ran a large video straight into OutOfMemoryError.
+            val job = currentCoroutineContext()[kotlinx.coroutines.Job]
+            val (completionHandleBytes, macBytes) = postEncryptedFile(uploadUrl, localFile, aesKey, nonce, job) { uploaded ->
                 onProgress?.invoke(uploaded, totalBytes)
             }
             if (completionHandleBytes.isEmpty()) {
@@ -1471,7 +1455,7 @@ class MegaApiClient @Inject constructor(
             nonce.copyInto(mergedKey, 16)
             macBytes.copyInto(mergedKey, 24)
 
-            val fingerprint = computeMegaFingerprint(fileBytes, localFile.lastModified() / 1000)
+            val fingerprint = computeMegaFingerprint(localFile, localFile.lastModified() / 1000)
             val attrJson = JSONObject().apply {
                 put("n", localFile.name)
                 put("c", fingerprint)
@@ -1536,6 +1520,66 @@ class MegaApiClient @Inject constructor(
         }
     }
 
+    /** Streams [file] to `<baseUrl>/0`, AES-CTR encrypting and computing MEGA's chunked MAC over
+     * the plaintext on the fly. Returns the completion handle and the 8-byte condensed MAC. The
+     * MAC/cipher state is created inside writeTo(), so an OkHttp retry that replays the body
+     * starts from a clean state instead of MAC-ing the file twice. */
+    private fun postEncryptedFile(
+        baseUrl: String,
+        file: File,
+        aesKey: ByteArray,
+        nonce: ByteArray,
+        job: kotlinx.coroutines.Job?,
+        onProgress: ((Long) -> Unit)?
+    ): Pair<ByteArray, ByteArray> {
+        var macResult: ByteArray? = null
+        val requestBody = object : RequestBody() {
+            override fun contentType() = "application/octet-stream".toMediaTypeOrNull()
+            override fun contentLength() = file.length()
+            override fun writeTo(sink: BufferedSink) {
+                val mac = MegaChunkedMac(aesKey, nonce)
+                val iv = ByteArray(16).also { nonce.copyInto(it, 0) }
+                val cipher = Cipher.getInstance("AES/CTR/NoPadding").apply {
+                    init(Cipher.ENCRYPT_MODE, SecretKeySpec(aesKey, "AES"), IvParameterSpec(iv))
+                }
+                // A multiple of 16, and only the final read may come up short, so feeding the MAC
+                // chunk by chunk is identical to feeding it the whole file at once.
+                val buffer = ByteArray(64 * 1024)
+                var written = 0L
+                file.inputStream().use { input ->
+                    while (true) {
+                        if (job?.isActive == false) throw java.io.IOException("Upload cancelled")
+                        val read = readFully(input, buffer)
+                        if (read <= 0) break
+                        val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
+                        mac.update(chunk)
+                        sink.write(cipher.update(chunk, 0, read))
+                        written += read
+                        onProgress?.invoke(written)
+                    }
+                }
+                cipher.doFinal().takeIf { it.isNotEmpty() }?.let { sink.write(it) }
+                macResult = mac.condense()
+            }
+        }
+        val request = Request.Builder().url("$baseUrl/0").post(requestBody).build()
+        val handle = okHttpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw Exception("MEGA upload failed: HTTP ${response.code}")
+            response.body?.bytes() ?: ByteArray(0)
+        }
+        return handle to (macResult ?: throw Exception("MEGA upload body was never written"))
+    }
+
+    private fun readFully(input: java.io.InputStream, buffer: ByteArray): Int {
+        var total = 0
+        while (total < buffer.size) {
+            val n = input.read(buffer, total, buffer.size - total)
+            if (n < 0) break
+            total += n
+        }
+        return total
+    }
+
     /** POSTs one contiguous chunk to `<baseUrl>/<offset>` and returns the raw response bytes. */
     private fun postChunk(baseUrl: String, offset: Long, data: ByteArray, onProgress: ((Long) -> Unit)?): ByteArray {
         val requestBody = object : RequestBody() {
@@ -1553,11 +1597,10 @@ class MegaApiClient @Inject constructor(
             }
         }
         val request = Request.Builder().url("$baseUrl/$offset").post(requestBody).build()
-        val response = okHttpClient.newCall(request).execute()
-        if (!response.isSuccessful) {
-            throw Exception("MEGA chunk upload failed: HTTP ${response.code}")
+        return okHttpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw Exception("MEGA chunk upload failed: HTTP ${response.code}")
+            response.body?.bytes() ?: ByteArray(0)
         }
-        return response.body?.bytes() ?: ByteArray(0)
     }
 
     /** Generates MEGA's standard 120x120 JPEG thumbnail for an image file, or null if not an image / decode fails. */
@@ -1612,15 +1655,6 @@ class MegaApiClient @Inject constructor(
     private fun aesCbcEncrypt(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
         val cipher = Cipher.getInstance("AES/CBC/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key.copyOf(16), "AES"), IvParameterSpec(iv))
-        return cipher.doFinal(data)
-    }
-
-    /** AES-CTR with MEGA's IV convention: 8-byte nonce + 8 zero bytes, counter starting at 0. */
-    private fun ctrTransform(data: ByteArray, aesKey: ByteArray, nonce8: ByteArray, mode: Int): ByteArray {
-        val iv = ByteArray(16)
-        nonce8.copyInto(iv, 0)
-        val cipher = Cipher.getInstance("AES/CTR/NoPadding")
-        cipher.init(mode, SecretKeySpec(aesKey, "AES"), IvParameterSpec(iv))
         return cipher.doFinal(data)
     }
 
@@ -1740,10 +1774,16 @@ class MegaApiClient @Inject constructor(
     // base64url-encoded. Official clients (MEGAsync) use this for sync/dedup and flag a
     // node as "File fingerprint missing" if it's absent, ported from MEGA SDK's
     // FileFingerprint::genfingerprint / serializefingerprint (filefingerprint.cpp).
-    private fun computeMegaFingerprint(fileBytes: ByteArray, mtimeSeconds: Long): String {
-        val size = fileBytes.size
+    private fun computeMegaFingerprint(file: File, mtimeSeconds: Long): String {
         val crc = ByteArray(16)
         val maxFull = 8192
+        val sizeL = file.length()
+        // Small files are read whole; a large one only needs its 128 sampled 64-byte blocks.
+        val fileBytes = if (sizeL <= maxFull) file.readBytes() else ByteArray(0)
+        val size = if (sizeL <= maxFull) fileBytes.size else Int.MAX_VALUE
+        val raf = if (sizeL > maxFull) java.io.RandomAccessFile(file, "r") else null
+        val block = ByteArray(64)
+        try {
 
         when {
             size <= crc.size -> {
@@ -1764,7 +1804,6 @@ class MegaApiClient @Inject constructor(
                 // Large file: sparse coverage, four sparse CRC32s over 32 x 64-byte blocks each.
                 val blockBytes = 4 * crc.size // 64
                 val blocks = maxFull / (blockBytes * 4) // 32
-                val sizeL = size.toLong()
                 for (i in 0 until 4) {
                     val crc32 = java.util.zip.CRC32()
                     for (j in 0 until blocks) {
@@ -1774,11 +1813,16 @@ class MegaApiClient @Inject constructor(
                         var offset = if (denom != 0L) numer / denom else 0L
                         val clampMax = sizeL - blockBytes
                         if (offset > clampMax) offset = clampMax
-                        crc32.update(fileBytes, offset.toInt(), blockBytes)
+                        raf!!.seek(offset)
+                        raf.readFully(block)
+                        crc32.update(block, 0, blockBytes)
                     }
                     writeCrcBigEndian(crc, i * 4, crc32.value.toInt())
                 }
             }
+        }
+        } finally {
+            raf?.close()
         }
 
         return base64UrlEncode(crc + serialize64Mtime(mtimeSeconds))
