@@ -972,7 +972,7 @@ fun CloudLoginWebViewDialog(
             CloudProvider.GOOGLE_DRIVE -> "https://accounts.google.com/signin/v2/identifier?service=wise&passive=1209600&continue=https%3A%2F%2Fdrive.google.com%2Fdrive%2Fmy-drive&flowName=GlifWebSignIn&flowEntry=ServiceLogin"
             CloudProvider.DROPBOX -> "https://www.dropbox.com/login"
             CloudProvider.MEGA -> "https://mega.nz/login"
-            CloudProvider.TERABOX -> "https://www.terabox.com/login"
+            CloudProvider.TERABOX -> "https://www.terabox.com/vietnamese"
         }
     }
 
@@ -1047,12 +1047,12 @@ fun CloudLoginWebViewDialog(
                                         CloudProvider.MEGA -> {}
                                         CloudProvider.TERABOX -> {
                                             cookieManager.flush()
-                                            val tbCookies = cookieManager.getCookie("https://www.terabox.com") ?: ""
+                                            val tbCookies = (cookieManager.getCookie("https://www.terabox.com") ?: "") + "; " + (cookieManager.getCookie("https://terabox.com") ?: "")
                                             if (!tbCookies.contains("ndus=")) {
                                                 Toast.makeText(context, "Please complete TeraBox login before tapping DONE.", Toast.LENGTH_SHORT).show()
                                                 return@Button
                                             }
-                                            val ndus = tbCookies.substringAfter("ndus=").substringBefore(";")
+                                            val ndus = tbCookies.substringAfter("ndus=").substringBefore(";").trim()
                                             hasRedirected = true
                                             onAuthSuccess(CloudProvider.TERABOX, finalAccountName, detectedEmail.ifBlank { "terabox_user" }, ndus, tbCookies)
                                             return@Button
@@ -1799,7 +1799,7 @@ fun CloudLoginWebViewDialog(
                                     val parsedPath = try { java.net.URI(url ?: "").path?.lowercase(Locale.getDefault()) ?: "" } catch (e: Exception) { "" }
                                     val isDropboxHome = (parsedPath.startsWith("/home") || parsedPath.startsWith("/personal") || parsedPath.startsWith("/work") || parsedPath.startsWith("/browse")) && !parsedPath.contains("login") && !parsedPath.contains("verify") && !parsedPath.contains("twofactor")
                                     val isGoogleDriveHome = (parsedPath.contains("/drive/my-drive") || parsedPath.contains("/drive/u/")) && !parsedPath.contains("signin") && !parsedPath.contains("identifier")
-                                    val isTeraBoxAuthed = provider == CloudProvider.TERABOX && (cookieManager.getCookie("https://www.terabox.com") ?: "").contains("ndus=")
+                                    val isTeraBoxAuthed = provider == CloudProvider.TERABOX && ((cookieManager.getCookie("https://www.terabox.com") ?: "") + "; " + (cookieManager.getCookie("https://terabox.com") ?: "")).contains("ndus=")
 
                                     if ((isDropboxHome || isGoogleDriveHome || isTeraBoxAuthed) && !hasRedirected) {
                                         cookieManager.flush()
