@@ -247,7 +247,14 @@ class FileBrowserViewModel @Inject constructor(
         loadDirectory(_uiState.value.currentPath)
     }
 
+    /** Per-folder scroll positions, so going back lands where the parent was left (see FolderScrollMemory). */
+    val scrollMemory = com.antigravity.filemanager.presentation.components.FolderScrollMemory()
+
     fun loadDirectory(path: String) {
+        // Going into a subfolder starts at its top; going up (or reloading) keeps remembered positions.
+        val here = _uiState.value.currentPath.trimEnd('/')
+        if (here.isNotEmpty() && path.startsWith("$here/")) scrollMemory.forget(path)
+
         // Set synchronously (before the coroutine below even starts) rather than inside it —
         // the coroutine's first line is a suspend call (folderPreferencesRepository.getSortOption),
         // so there's a real gap between this function returning and isLoading actually flipping

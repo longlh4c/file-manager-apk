@@ -616,9 +616,26 @@ fun FileBrowserScreen(
             if (!uiState.isLoading && !uiState.isSearching && filteredFiles.isEmpty()) {
                 EmptyFolderState()
             } else {
+            // Own list state per folder (see FolderScrollMemory): one shared state made the parent
+            // list inherit however far the subfolder had been scrolled.
+            key(uiState.currentPath) {
+            val recordScroll = uiState.searchQuery.isBlank()
+            val listState = com.antigravity.filemanager.presentation.components.rememberFolderListState(
+                memory = viewModel.scrollMemory,
+                path = uiState.currentPath,
+                isLoading = uiState.isLoading,
+                record = recordScroll && viewMode != ViewMode.GRID
+            )
+            val gridState = com.antigravity.filemanager.presentation.components.rememberFolderGridState(
+                memory = viewModel.scrollMemory,
+                path = uiState.currentPath,
+                isLoading = uiState.isLoading,
+                record = recordScroll && viewMode == ViewMode.GRID
+            )
             when (viewMode) {
                 ViewMode.GRID -> {
                     LazyVerticalGrid(
+                        state = gridState,
                         // Adaptive instead of a hardcoded column count: the number of columns
                         // now comes from how many 100dp-min cells actually fit the screen width,
                         // so a tablet gets more columns (smaller relative thumbnails) and a
@@ -655,7 +672,7 @@ fun FileBrowserScreen(
                     }
                 }
                 ViewMode.DETAILED_LIST -> {
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         items(filteredFiles, key = { it.path }) { file ->
                             FileDetailedListItem(
                                 file = file,
@@ -683,7 +700,7 @@ fun FileBrowserScreen(
                 }
                 else -> {
                     // Standard List
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                         items(filteredFiles, key = { it.path }) { file ->
                             FileListItem(
                                 file = file,
@@ -709,6 +726,7 @@ fun FileBrowserScreen(
                         }
                     }
                 }
+            }
             }
             }
             }

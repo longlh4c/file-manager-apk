@@ -976,7 +976,12 @@ class CloudExplorerViewModel @Inject constructor(
         }
     }
 
+    /** Per-folder scroll positions, so going back lands where the parent was left (see FolderScrollMemory). */
+    val scrollMemory = com.antigravity.filemanager.presentation.components.FolderScrollMemory()
+
     fun openFolder(folder: FileItem) {
+        // Entering a folder always starts at its top, not wherever it was last left.
+        scrollMemory.forget(folder.path)
         // Tapping a folder found via recursive search must actually leave search mode — otherwise
         // loadAccountAndFiles below correctly loads the tapped folder's real contents into `files`,
         // but the screen keeps rendering the stale `searchResults` list on top of it (filteredFiles

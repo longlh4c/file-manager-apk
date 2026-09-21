@@ -620,7 +620,16 @@ fun CloudExplorerScreen(
                                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                             )
                         }
-                        LazyColumn(modifier = Modifier.fillMaxSize().weight(1f)) {
+                        // Own list state per folder (see FolderScrollMemory): one shared state made
+                        // the parent list inherit however far the subfolder had been scrolled.
+                        key(uiState.currentPath) {
+                        val listState = com.antigravity.filemanager.presentation.components.rememberFolderListState(
+                            memory = viewModel.scrollMemory,
+                            path = uiState.currentPath,
+                            isLoading = uiState.isLoading,
+                            record = uiState.searchQuery.isBlank()
+                        )
+                        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().weight(1f)) {
                         items(filteredFiles, key = { it.id }) { file ->
                             FileListItem(
                                 file = file,
@@ -665,6 +674,7 @@ fun CloudExplorerScreen(
                                 onVisible = { viewModel.requestThumbnail(it) },
                                 showPath = uiState.searchQuery.isNotBlank()
                             )
+                        }
                         }
                         }
                     }
