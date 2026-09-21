@@ -129,7 +129,7 @@ class CloudManager @Inject constructor(
         try {
             val file = File(context.filesDir, "cloud_sessions/$accountId.json")
             if (file.exists()) file.delete()
-            File(context.cacheDir, "cloud_downloads/$accountId").deleteRecursively()
+            com.antigravity.filemanager.utils.CloudDownloadCache.accountDir(context, accountId).deleteRecursively()
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -593,7 +593,7 @@ class CloudManager @Inject constructor(
                 return@withContext Result.failure(remoteResult.exceptionOrNull() ?: Exception("Remote delete failed"))
             }
             forgetId(account.id, remotePathOrId, targetId)
-            File(context.cacheDir, "cloud_downloads/${account.id}/${remotePathOrId.substringAfterLast('/')}").delete()
+            com.antigravity.filemanager.utils.CloudDownloadCache.dirFor(context, account.id, remotePathOrId).deleteRecursively()
             Result.success(Unit)
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e

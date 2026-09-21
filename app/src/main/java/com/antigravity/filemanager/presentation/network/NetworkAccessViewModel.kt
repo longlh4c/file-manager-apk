@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.presentation.network
 
 import android.content.ClipData
+import kotlinx.coroutines.flow.update
 import android.content.ClipboardManager
 import android.content.Context
 import androidx.lifecycle.ViewModel
@@ -48,32 +49,32 @@ class NetworkAccessViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             preferenceManager.ftpPortFlow.collectLatest { port ->
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     port = port,
                     portInput = port.toString()
-                )
+                ) }
             }
         }
         viewModelScope.launch {
             preferenceManager.httpPortFlow.collectLatest { httpPort ->
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     httpPort = httpPort,
                     httpPortInput = httpPort.toString()
-                )
+                ) }
             }
         }
         viewModelScope.launch {
             preferenceManager.ftpPasswordFlow.collectLatest { pass ->
                 val trimmedPass = pass.take(8)
-                _uiState.value = _uiState.value.copy(password = trimmedPass)
+                _uiState.update { old -> old.copy(password = trimmedPass) }
             }
         }
         viewModelScope.launch {
             ftpServerUseCase.observeState().collectLatest { state ->
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     isRunning = state.isRunning,
                     ipAddress = state.ipAddress
-                )
+                ) }
             }
         }
     }
@@ -81,10 +82,10 @@ class NetworkAccessViewModel @Inject constructor(
     fun onPortChanged(portStr: String) {
         val filtered = portStr.filter { it.isDigit() }.take(5)
         val portInt = filtered.toIntOrNull()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             portInput = filtered,
             port = portInt ?: _uiState.value.port
-        )
+        ) }
         if (portInt != null && portInt in 1024..65535) {
             viewModelScope.launch {
                 saveConfig()
@@ -95,10 +96,10 @@ class NetworkAccessViewModel @Inject constructor(
     fun onHttpPortChanged(httpPortStr: String) {
         val filtered = httpPortStr.filter { it.isDigit() }.take(5)
         val portInt = filtered.toIntOrNull()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             httpPortInput = filtered,
             httpPort = portInt ?: _uiState.value.httpPort
-        )
+        ) }
         if (portInt != null && portInt in 1024..65535) {
             viewModelScope.launch {
                 saveConfig()
@@ -108,7 +109,7 @@ class NetworkAccessViewModel @Inject constructor(
 
     fun onPasswordChanged(password: String) {
         val filtered = password.filter { it.isLetterOrDigit() }.take(8)
-        _uiState.value = _uiState.value.copy(password = filtered)
+        _uiState.update { old -> old.copy(password = filtered) }
         viewModelScope.launch {
             saveConfig()
         }
@@ -118,11 +119,11 @@ class NetworkAccessViewModel @Inject constructor(
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val clip = ClipData.newPlainText(label, text)
         clipboard.setPrimaryClip(clip)
-        _uiState.value = _uiState.value.copy(copiedMessage = "Copied $label to clipboard!")
+        _uiState.update { old -> old.copy(copiedMessage = "Copied $label to clipboard!") }
         viewModelScope.launch {
             delay(2500)
             if (_uiState.value.copiedMessage != null) {
-                _uiState.value = _uiState.value.copy(copiedMessage = null)
+                _uiState.update { old -> old.copy(copiedMessage = null) }
             }
         }
     }
@@ -146,12 +147,14 @@ class NetworkAccessViewModel @Inject constructor(
                 if (effectiveHttpPort == effectiveFtpPort) {
                     effectiveHttpPort = if (effectiveFtpPort == 8080) 8081 else 8080
                 }
-                _uiState.value = state.copy(
-                    port = effectiveFtpPort,
-                    portInput = effectiveFtpPort.toString(),
-                    httpPort = effectiveHttpPort,
-                    httpPortInput = effectiveHttpPort.toString()
-                )
+                _uiState.update { old ->
+                    old.copy(
+                        port = effectiveFtpPort,
+                        portInput = effectiveFtpPort.toString(),
+                        httpPort = effectiveHttpPort,
+                        httpPortInput = effectiveHttpPort.toString()
+                    )
+                }
                 preferenceManager.saveNetworkConfig(
                     ftpPort = effectiveFtpPort,
                     httpPort = effectiveHttpPort,

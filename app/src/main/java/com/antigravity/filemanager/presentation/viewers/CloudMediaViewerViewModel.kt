@@ -56,7 +56,7 @@ class CloudMediaViewerViewModel @Inject constructor(
     suspend fun deleteCloudFile(accountId: String, remotePath: String): Result<Unit> = cloudUseCase.deleteItem(accountId, remotePath)
 
     suspend fun resolveMedia(accountId: String, file: FileItem, allowStreaming: Boolean = true): Result<ResolvedMedia> = withContext(Dispatchers.IO) {
-        val targetDir = File(context.cacheDir, "cloud_downloads/$accountId").apply { mkdirs() }
+        val targetDir = com.antigravity.filemanager.utils.CloudDownloadCache.dirFor(context, accountId, file.path).apply { mkdirs() }
         val localFile = File(targetDir, file.name)
         // A file left truncated by an interrupted prior download (non-empty but incomplete)
         // must not be mistaken for the real thing — delete it so the real download/stream can

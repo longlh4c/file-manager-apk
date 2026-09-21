@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.presentation.trash
 
 import androidx.lifecycle.ViewModel
+import kotlinx.coroutines.flow.update
 import androidx.lifecycle.viewModelScope
 import com.antigravity.filemanager.domain.model.CloudTransferProgress
 import com.antigravity.filemanager.domain.model.TrashItem
@@ -44,7 +45,7 @@ class RecycleBinViewModel @Inject constructor(
         viewModelScope.launch {
             recycleBinUseCase.observeTrash().collectLatest { list ->
                 val total = recycleBinUseCase.getTotalSize()
-                _uiState.value = _uiState.value.copy(items = list, totalSizeBytes = total, isLoading = false)
+                _uiState.update { old -> old.copy(items = list, totalSizeBytes = total, isLoading = false) }
             }
         }
     }
@@ -52,7 +53,7 @@ class RecycleBinViewModel @Inject constructor(
     fun toggleItemSelection(id: Long) {
         val current = _uiState.value.selectedIds.toMutableSet()
         if (current.contains(id)) current.remove(id) else current.add(id)
-        _uiState.value = _uiState.value.copy(selectedIds = current)
+        _uiState.update { old -> old.copy(selectedIds = current) }
     }
 
     fun restoreSelected() {
@@ -64,15 +65,15 @@ class RecycleBinViewModel @Inject constructor(
             // it did nothing until the list suddenly updated, which for a bigger selection (or one
             // that hits the slow copy fallback below) read as the app hanging. This spinner is
             // replaced by real per-file progress the moment (if ever) onProgress actually fires.
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 restoreProgress = CloudTransferProgress(isUpload = false, operationLabel = "Restoring", isIndeterminate = true)
-            )
+            ) }
             recycleBinUseCase.restore(_uiState.value.selectedIds.toList()) { currentName, currentIndex, total ->
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     restoreProgress = CloudTransferProgress.forItemCount(currentName, currentIndex, total, isUpload = false, operationLabel = "Restoring")
-                )
+                ) }
             }
-            _uiState.value = _uiState.value.copy(selectedIds = emptySet(), restoreProgress = null)
+            _uiState.update { old -> old.copy(selectedIds = emptySet(), restoreProgress = null) }
         }
     }
 
@@ -85,11 +86,11 @@ class RecycleBinViewModel @Inject constructor(
             // Same fix as emptyTrash() below — permanently deleting many trashed items is a
             // synchronous recursive delete with no feedback otherwise, which reads as a hang.
             recycleBinUseCase.deletePermanently(ids) { currentName, currentIndex, total ->
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     deleteProgress = CloudTransferProgress.forItemCount(currentName, currentIndex, total, isUpload = false, operationLabel = "Deleting permanently")
-                )
+                ) }
             }
-            _uiState.value = _uiState.value.copy(selectedIds = emptySet(), deleteProgress = null)
+            _uiState.update { old -> old.copy(selectedIds = emptySet(), deleteProgress = null) }
         }
     }
 
@@ -100,15 +101,15 @@ class RecycleBinViewModel @Inject constructor(
             // item — for a large bin that looked exactly like the app hanging. Report progress
             // the same way compress/extract/upload already do elsewhere in the app.
             recycleBinUseCase.empty { currentName, currentIndex, total ->
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     deleteProgress = CloudTransferProgress.forItemCount(currentName, currentIndex, total, isUpload = false, operationLabel = "Emptying Trash")
-                )
+                ) }
             }
-            _uiState.value = _uiState.value.copy(showEmptyConfirm = false, selectedIds = emptySet(), deleteProgress = null)
+            _uiState.update { old -> old.copy(showEmptyConfirm = false, selectedIds = emptySet(), deleteProgress = null) }
         }
     }
 
     fun setShowEmptyConfirm(show: Boolean) {
-        _uiState.value = _uiState.value.copy(showEmptyConfirm = show)
+        _uiState.update { old -> old.copy(showEmptyConfirm = show) }
     }
 }

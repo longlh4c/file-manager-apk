@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.presentation.analyzer
 
 import androidx.lifecycle.ViewModel
+import kotlinx.coroutines.flow.update
 import androidx.lifecycle.viewModelScope
 import com.antigravity.filemanager.domain.model.CloudTransferProgress
 import com.antigravity.filemanager.domain.model.StorageAnalysisData
@@ -69,16 +70,16 @@ class StorageAnalysisViewModel @Inject constructor(
     private var activeTransferJob: kotlinx.coroutines.Job? = null
 
     init {
-        _uiState.value = _uiState.value.copy(isLoading = true)
+        _uiState.update { old -> old.copy(isLoading = true) }
         loadData(isInitial = true)
         observeBookmarks()
     }
 
     fun cancelTransfer() {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             transferProgress = null,
             transferCancelledByUser = true
-        )
+        ) }
         activeTransferJob?.cancel()
         activeTransferJob = null
     }
@@ -86,7 +87,7 @@ class StorageAnalysisViewModel @Inject constructor(
     private fun observeBookmarks() {
         viewModelScope.launch {
             bookmarkUseCase.observeBookmarks().collectLatest { list ->
-                _uiState.value = _uiState.value.copy(bookmarks = list)
+                _uiState.update { old -> old.copy(bookmarks = list) }
             }
         }
     }
@@ -98,13 +99,13 @@ class StorageAnalysisViewModel @Inject constructor(
     /** Suspending body of [loadData], so mutation handlers can await a full rescan before continuing. */
     private suspend fun loadDataInternal(isInitial: Boolean = false) {
         if (isInitial) {
-            _uiState.value = _uiState.value.copy(isLoading = true)
+            _uiState.update { old -> old.copy(isLoading = true) }
         }
         val result = storageAnalysisUseCase.getAnalysisData()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             isLoading = false,
             data = result
-        )
+        ) }
     }
 
     fun refresh() {
@@ -129,21 +130,21 @@ class StorageAnalysisViewModel @Inject constructor(
 
             if (isDirectory) {
                 loadDataInternal()
-                _uiState.value = _uiState.value.copy(mutationTick = _uiState.value.mutationTick + 1)
+                _uiState.update { old -> old.copy(mutationTick = _uiState.value.mutationTick + 1) }
             } else {
                 // Renaming a file doesn't change any byte totals — patch the affected entry
                 // in place instead of re-walking the entire device just to reflect a name change.
                 val parentDir = File(path).parent
                 val newPath = if (parentDir != null) File(parentDir, newName).absolutePath else newName
                 val currentData = _uiState.value.data
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     data = currentData.copy(
                         largeFiles = currentData.largeFiles.map {
                             if (it.path == path) it.copy(path = newPath, name = newName) else it
                         }
                     ),
                     mutationTick = _uiState.value.mutationTick + 1
-                )
+                ) }
             }
             onComplete()
         }
@@ -160,7 +161,7 @@ class StorageAnalysisViewModel @Inject constructor(
         val targetArchive = "$targetDir/$name"
         if (File(targetArchive).exists()) {
             pendingCompress = Triple(paths, targetArchive, onComplete)
-            _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = targetArchive)
+            _uiState.update { old -> old.copy(pendingOverwriteZipPath = targetArchive) }
             return
         }
         runCompress(paths, targetArchive, onComplete)
@@ -169,14 +170,14 @@ class StorageAnalysisViewModel @Inject constructor(
     fun confirmCompressOverwrite() {
         val (paths, targetArchive, onComplete) = pendingCompress ?: return
         pendingCompress = null
-        _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = null)
+        _uiState.update { old -> old.copy(pendingOverwriteZipPath = null) }
         File(targetArchive).delete()
         runCompress(paths, targetArchive, onComplete)
     }
 
     fun cancelCompressOverwrite() {
         pendingCompress = null
-        _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = null)
+        _uiState.update { old -> old.copy(pendingOverwriteZipPath = null) }
     }
 
     private fun runCompress(paths: List<String>, targetArchive: String, onComplete: () -> Unit) {
@@ -190,7 +191,7 @@ class StorageAnalysisViewModel @Inject constructor(
                     } else if (totalFiles > 0) {
                         ((currentIndex.toFloat() / totalFiles.toFloat()) * 100).toInt().coerceIn(0, 100)
                     } else 0
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         transferProgress = CloudTransferProgress(
                             currentFileName = currentFile.ifEmpty { File(targetArchive).name },
                             currentIndex = currentIndex,
@@ -202,13 +203,13 @@ class StorageAnalysisViewModel @Inject constructor(
                             operationLabel = "Compressing",
                             percent = p
                         )
-                    )
+                    ) }
                 }
                 val archiveFile = File(targetArchive)
                 if (archiveFile.exists()) {
                     val currentData = _uiState.value.data
                     val archiveSize = archiveFile.length()
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         data = currentData.copy(
                             volumeInfo = currentData.volumeInfo.copy(
                                 usedBytes = currentData.volumeInfo.usedBytes + archiveSize,
@@ -216,15 +217,15 @@ class StorageAnalysisViewModel @Inject constructor(
                             )
                         ),
                         mutationTick = _uiState.value.mutationTick + 1
-                    )
+                    ) }
                 }
                 onComplete()
             } finally {
                 withContext(NonCancellable) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         transferProgress = null,
                         transferCancelledByUser = false
-                    )
+                    ) }
                 }
             }
         }
@@ -237,7 +238,7 @@ class StorageAnalysisViewModel @Inject constructor(
     fun resolveOverwriteConflict(overwriteNames: Set<String>, skipNames: Set<String>) {
         val action = pendingOverwriteAction
         pendingOverwriteAction = null
-        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+        _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
         if (action != null) {
             activeTransferJob?.cancel()
             activeTransferJob = viewModelScope.launch { action(overwriteNames, skipNames) }
@@ -246,7 +247,7 @@ class StorageAnalysisViewModel @Inject constructor(
 
     fun cancelOverwriteConflict() {
         pendingOverwriteAction = null
-        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+        _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
     }
 
     fun extract(paths: List<String>, targetDir: String, onComplete: () -> Unit = {}) {
@@ -254,10 +255,10 @@ class StorageAnalysisViewModel @Inject constructor(
         pendingExtractDir = targetDir
         pendingExtractOnComplete = onComplete
         if (paths.size == 1 && fileOperationsUseCase.isArchiveEncrypted(paths[0])) {
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 pendingPasswordArchive = paths[0],
                 passwordError = null
-            )
+            ) }
             return
         }
         checkExtractConflictsAndRun(paths, targetDir, null, onComplete)
@@ -279,20 +280,20 @@ class StorageAnalysisViewModel @Inject constructor(
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
                     pendingExtractDir = targetDir
                     pendingExtractOnComplete = onComplete
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         transferProgress = null,
                         pendingPasswordArchive = path,
                         passwordError = null
-                    )
+                    ) }
                     return@launch
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
                     pendingExtractDir = targetDir
                     pendingExtractOnComplete = onComplete
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         transferProgress = null,
                         pendingPasswordArchive = path,
                         passwordError = "Incorrect password. Please try again."
-                    )
+                    ) }
                     return@launch
                 } catch (e: Exception) {
                     return@launch
@@ -303,7 +304,7 @@ class StorageAnalysisViewModel @Inject constructor(
                 pendingOverwriteAction = { overwriteNames, skipNames ->
                     runExtract(paths, targetDir, password, overwriteNames, skipNames, onComplete)
                 }
-                _uiState.value = _uiState.value.copy(overwriteConflicts = allConflicts)
+                _uiState.update { old -> old.copy(overwriteConflicts = allConflicts) }
             } else {
                 runExtract(paths, targetDir, password, emptySet(), emptySet(), onComplete)
             }
@@ -325,7 +326,7 @@ class StorageAnalysisViewModel @Inject constructor(
                 for ((index, p) in paths.withIndex()) {
                     if (!isActive || _uiState.value.transferCancelledByUser) break
                     val archiveName = File(p).name
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         transferProgress = CloudTransferProgress(
                             currentFileName = archiveName,
                             currentIndex = index + 1,
@@ -335,7 +336,7 @@ class StorageAnalysisViewModel @Inject constructor(
                             operationLabel = if (paths.size > 1) "Extracting (${index + 1}/${paths.size})" else "Extracting",
                             percent = 0
                         )
-                    )
+                    ) }
                     val res = fileOperationsUseCase.extract(
                         archivePath = p,
                         targetDir = targetDir,
@@ -349,7 +350,7 @@ class StorageAnalysisViewModel @Inject constructor(
                         } else if (totalEntries > 0) {
                             ((currentIndex.toFloat() / totalEntries.toFloat()) * 100).toInt().coerceIn(0, 100)
                         } else 0
-                        _uiState.value = _uiState.value.copy(
+                        _uiState.update { old -> old.copy(
                             transferProgress = CloudTransferProgress(
                                 currentFileName = currentEntry.ifEmpty { File(p).name },
                                 currentIndex = currentIndex,
@@ -361,7 +362,7 @@ class StorageAnalysisViewModel @Inject constructor(
                                 operationLabel = if (paths.size > 1) "Extracting (${index + 1}/${paths.size})" else "Extracting",
                                 percent = pPercent
                             )
-                        )
+                        ) }
                     }
                     if (res.isSuccess) {
                         val extractResult = res.getOrNull()
@@ -376,40 +377,40 @@ class StorageAnalysisViewModel @Inject constructor(
                         if (ex is com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
                             pendingExtractDir = targetDir
                             pendingExtractOnComplete = onComplete
-                            _uiState.value = _uiState.value.copy(
+                            _uiState.update { old -> old.copy(
                                 transferProgress = null,
                                 pendingPasswordArchive = p,
                                 passwordError = null
-                            )
+                            ) }
                             return@launch
                         } else if (ex is com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
                             pendingExtractDir = targetDir
                             pendingExtractOnComplete = onComplete
-                            _uiState.value = _uiState.value.copy(
+                            _uiState.update { old -> old.copy(
                                 transferProgress = null,
                                 pendingPasswordArchive = p,
                                 passwordError = "Incorrect password. Please try again."
-                            )
+                            ) }
                             return@launch
                         }
                     }
                 }
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     transferProgress = null,
                     pendingPasswordArchive = null,
                     passwordError = null
-                )
+                ) }
                 if (anySucceeded && !_uiState.value.transferCancelledByUser) {
                     loadDataInternal()
-                    _uiState.value = _uiState.value.copy(mutationTick = _uiState.value.mutationTick + 1)
+                    _uiState.update { old -> old.copy(mutationTick = _uiState.value.mutationTick + 1) }
                 }
                 onComplete()
             } finally {
                 withContext(NonCancellable) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         transferProgress = null,
                         transferCancelledByUser = false
-                    )
+                    ) }
                 }
             }
         }
@@ -420,12 +421,12 @@ class StorageAnalysisViewModel @Inject constructor(
         val targetDir = pendingExtractDir ?: return
         val onComplete = pendingExtractOnComplete ?: {}
         // Dismiss password dialog immediately
-        _uiState.value = _uiState.value.copy(pendingPasswordArchive = null, passwordError = null)
+        _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
         checkExtractConflictsAndRun(listOf(archivePath), targetDir, password, onComplete)
     }
 
     fun dismissPasswordDialog() {
-        _uiState.value = _uiState.value.copy(pendingPasswordArchive = null, passwordError = null)
+        _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
         pendingExtractDir = null
         pendingExtractOnComplete = null
     }
@@ -445,13 +446,13 @@ class StorageAnalysisViewModel @Inject constructor(
 
             fileOperationsUseCase.delete(paths, moveToRecycleBin = true)
 
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 data = currentData.copy(
                     largeFiles = currentData.largeFiles.filterNot { isRemoved(it.path) },
                     largeFilesTotalBytes = (currentData.largeFilesTotalBytes - matchedLargeBytes).coerceAtLeast(0L)
                 ),
                 mutationTick = _uiState.value.mutationTick + 1
-            )
+            ) }
             onComplete()
         }
     }
@@ -463,7 +464,7 @@ class StorageAnalysisViewModel @Inject constructor(
             // group, and affects both the Downloads-scoped and full-storage totals — cheapest
             // correct option is the same full rescan the other mutations above already pay for.
             loadDataInternal()
-            _uiState.value = _uiState.value.copy(mutationTick = _uiState.value.mutationTick + 1)
+            _uiState.update { old -> old.copy(mutationTick = _uiState.value.mutationTick + 1) }
             onComplete()
         }
     }

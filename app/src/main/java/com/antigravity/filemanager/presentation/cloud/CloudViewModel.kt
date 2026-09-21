@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.presentation.cloud
 
 import androidx.lifecycle.ViewModel
+import kotlinx.coroutines.flow.update
 import androidx.lifecycle.viewModelScope
 import com.antigravity.filemanager.domain.model.CloudAccount
 import com.antigravity.filemanager.domain.model.CloudProvider
@@ -49,10 +50,10 @@ class CloudViewModel @Inject constructor(
         viewModelScope.launch {
             cloudUseCase.observeAccounts().collect { list ->
                 if (!_uiState.value.isReorderMode) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         isLoading = false,
                         accounts = list
-                    )
+                    ) }
                 }
                 // Auto-resolve missing or placeholder emails (e.g. user@mega.com)
                 list.forEach { account ->
@@ -99,22 +100,22 @@ class CloudViewModel @Inject constructor(
 
     fun enterReorderMode() {
         originalAccountsBeforeEdit = _uiState.value.accounts
-        _uiState.value = _uiState.value.copy(isReorderMode = true)
+        _uiState.update { old -> old.copy(isReorderMode = true) }
     }
 
     fun confirmReorder() {
         val accountsToSave = _uiState.value.accounts
-        _uiState.value = _uiState.value.copy(isReorderMode = false)
+        _uiState.update { old -> old.copy(isReorderMode = false) }
         viewModelScope.launch {
             cloudUseCase.reorderAccounts(accountsToSave)
         }
     }
 
     fun cancelReorder() {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             isReorderMode = false,
             accounts = originalAccountsBeforeEdit
-        )
+        ) }
     }
 
     fun toggleReorderMode() {
@@ -129,14 +130,14 @@ class CloudViewModel @Inject constructor(
         if (index <= 0) return
         val list = _uiState.value.accounts.toMutableList()
         Collections.swap(list, index, index - 1)
-        _uiState.value = _uiState.value.copy(accounts = list)
+        _uiState.update { old -> old.copy(accounts = list) }
     }
 
     fun moveAccountDown(index: Int) {
         if (index >= _uiState.value.accounts.size - 1) return
         val list = _uiState.value.accounts.toMutableList()
         Collections.swap(list, index, index + 1)
-        _uiState.value = _uiState.value.copy(accounts = list)
+        _uiState.update { old -> old.copy(accounts = list) }
     }
 
     fun moveAccountToTop(index: Int) {
@@ -144,7 +145,7 @@ class CloudViewModel @Inject constructor(
         val list = _uiState.value.accounts.toMutableList()
         val item = list.removeAt(index)
         list.add(0, item)
-        _uiState.value = _uiState.value.copy(accounts = list)
+        _uiState.update { old -> old.copy(accounts = list) }
     }
 
     fun moveAccountToBottom(index: Int) {
@@ -152,7 +153,7 @@ class CloudViewModel @Inject constructor(
         val list = _uiState.value.accounts.toMutableList()
         val item = list.removeAt(index)
         list.add(item)
-        _uiState.value = _uiState.value.copy(accounts = list)
+        _uiState.update { old -> old.copy(accounts = list) }
     }
 
     fun addAccount(
@@ -164,7 +165,7 @@ class CloudViewModel @Inject constructor(
         onSuccess: (String, String) -> Unit = { _, _ -> }
     ) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isAddingAccount = true, addAccountError = null)
+            _uiState.update { old -> old.copy(isAddingAccount = true, addAccountError = null) }
 
             val totalBytes = when (provider) {
                 CloudProvider.MEGA -> 20L * 1024 * 1024 * 1024
@@ -183,20 +184,20 @@ class CloudViewModel @Inject constructor(
                 val rawCookie = if (!session.isNullOrBlank() && session.contains("ndus=")) session!! else (token ?: session ?: "")
                 val cleanNdus = teraBoxApiClient.extractCleanNdus(rawCookie)
                 if (cleanNdus.isBlank()) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         isAddingAccount = false,
                         addAccountError = "Invalid TeraBox session token (ndus is required)"
-                    )
+                    ) }
                     return@launch
                 }
                 // Use full rawCookie (or fallback to ndus) to authenticate
                 val effectiveCookie = if (rawCookie.contains("ndus=")) rawCookie else "ndus=$cleanNdus"
                 val quotaRes = teraBoxApiClient.getQuota(effectiveCookie)
                 if (quotaRes.isFailure) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         isAddingAccount = false,
                         addAccountError = quotaRes.exceptionOrNull()?.message ?: "Failed to connect to TeraBox. Please verify your token."
-                    )
+                    ) }
                     return@launch
                 }
                 val quota = quotaRes.getOrNull()
@@ -227,7 +228,7 @@ class CloudViewModel @Inject constructor(
                     refreshToken = null
                 )
                 cloudUseCase.addAccount(newAccount)
-                _uiState.value = _uiState.value.copy(showAddDialog = false, isAddingAccount = false)
+                _uiState.update { old -> old.copy(showAddDialog = false, isAddingAccount = false) }
                 onSuccess(accountId, newAccount.accountName)
                 return@launch
             }
@@ -241,10 +242,10 @@ class CloudViewModel @Inject constructor(
             if (isMegaPasswordLogin) {
                 val loginRes = megaApiClient.login(email, session!!)
                 if (loginRes.isFailure) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         isAddingAccount = false,
                         addAccountError = loginRes.exceptionOrNull()?.message ?: "MEGA login failed"
-                    )
+                    ) }
                     return@launch
                 }
                 val pair = loginRes.getOrNull()
@@ -277,7 +278,7 @@ class CloudViewModel @Inject constructor(
                 refreshToken = masterKey
             )
             cloudUseCase.addAccount(newAccount)
-            _uiState.value = _uiState.value.copy(showAddDialog = false, isAddingAccount = false)
+            _uiState.update { old -> old.copy(showAddDialog = false, isAddingAccount = false) }
             onSuccess(accountId, newAccount.accountName)
         }
     }
@@ -289,7 +290,7 @@ class CloudViewModel @Inject constructor(
     }
 
     fun clearAddAccountError() {
-        _uiState.value = _uiState.value.copy(addAccountError = null)
+        _uiState.update { old -> old.copy(addAccountError = null) }
     }
 
     fun removeAccount(id: String) {
@@ -300,7 +301,7 @@ class CloudViewModel @Inject constructor(
             // stays visible and confirmReorder() would re-insert it from the stale list.
             removedAccountIds.add(id)
             originalAccountsBeforeEdit = originalAccountsBeforeEdit.filterNot { it.id == id }
-            _uiState.value = _uiState.value.copy(accounts = _uiState.value.accounts.filterNot { it.id == id })
+            _uiState.update { old -> old.copy(accounts = _uiState.value.accounts.filterNot { it.id == id }) }
             cloudManager.deleteSessionPayload(id)
             cloudUseCase.removeAccount(id)
             if (account != null) {
@@ -310,6 +311,6 @@ class CloudViewModel @Inject constructor(
     }
 
     fun setShowAddDialog(show: Boolean) {
-        _uiState.value = _uiState.value.copy(showAddDialog = show, addAccountError = null)
+        _uiState.update { old -> old.copy(showAddDialog = show, addAccountError = null) }
     }
 }

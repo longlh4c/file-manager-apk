@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.presentation.cloud
 
 import android.content.Context
+import kotlinx.coroutines.flow.update
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -192,10 +193,10 @@ class CloudExplorerViewModel @Inject constructor(
                     is com.antigravity.filemanager.data.local.cache.FolderCacheManager.CloudFolderEvent.FilesAdded -> {
                         val existingNames = _uiState.value.files.map { it.name }.toSet()
                         val merged = _uiState.value.files + event.files.filter { it.name !in existingNames }
-                        _uiState.value = _uiState.value.copy(files = sortCloudFiles(merged, _uiState.value.sortOption))
+                        _uiState.update { old -> old.copy(files = sortCloudFiles(merged, _uiState.value.sortOption)) }
                     }
                     is com.antigravity.filemanager.data.local.cache.FolderCacheManager.CloudFolderEvent.FilesRemoved -> {
-                        _uiState.value = _uiState.value.copy(files = _uiState.value.files.filterNot { it.path in event.removedPaths })
+                        _uiState.update { old -> old.copy(files = _uiState.value.files.filterNot { it.path in event.removedPaths }) }
                     }
                     is com.antigravity.filemanager.data.local.cache.FolderCacheManager.CloudFolderEvent.Invalidated -> refresh()
                 }
@@ -203,13 +204,13 @@ class CloudExplorerViewModel @Inject constructor(
         }
         viewModelScope.launch {
             globalClipboardManager.state.collect { clip ->
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     clipboardPaths = clip.paths,
                     isCutOperation = clip.isCut,
                     clipboardSourceCloudAccountId = clip.sourceCloudAccountId,
                     clipboardItemSizes = clip.itemSizes,
                     clipboardItemIsDirectory = clip.itemIsDirectory
-                )
+                ) }
             }
         }
         // TransferGuard.progress is the same source feeding the persistent notification, and it
@@ -225,7 +226,7 @@ class CloudExplorerViewModel @Inject constructor(
                     // already dismissed by the user, don't resurrect the dialog for it.
                     return@collect
                 }
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     downloadProgress = info?.let {
                         CloudTransferProgress(
                             currentFileName = it.currentFileName,
@@ -241,7 +242,7 @@ class CloudExplorerViewModel @Inject constructor(
                     // A fresh info==null means the whole operation truly ended (TransferGuard.end()
                     // reached zero) — safe to arm the mirror again for the next transfer.
                     transferCancelledByUser = if (info == null) false else _uiState.value.transferCancelledByUser
-                )
+                ) }
             }
         }
     }
@@ -263,7 +264,7 @@ class CloudExplorerViewModel @Inject constructor(
             val segments = stack.map { it.first }
             // Sort is remembered per folder (keyed by account + path), same as local file browsing.
             val folderSort = folderPreferencesRepository.getSortOption(sortKey(path))
-            _uiState.value = _uiState.value.copy(sortOption = folderSort)
+            _uiState.update { old -> old.copy(sortOption = folderSort) }
             val accounts = cloudUseCase.getAccounts()
             val baseAccount = accounts.find { it.id == accountId }
 
@@ -278,7 +279,7 @@ class CloudExplorerViewModel @Inject constructor(
             if (cached != null && cached.files.isNotEmpty()) {
                 val cachedWithThumbs = applyLocalThumbnailCache(cached.files, accountId)
                 val sortedCached = sortCloudFiles(cachedWithThumbs, _uiState.value.sortOption)
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     isLoading = false,
                     account = cachedAccount,
                     title = cachedAccount?.accountName ?: title,
@@ -288,7 +289,7 @@ class CloudExplorerViewModel @Inject constructor(
                     pathSegments = segments,
                     selectedPaths = emptySet(),
                     isSelectionMode = false
-                )
+                ) }
                 if (cached.isFresh) {
                     // Already reconciled once this process (see FolderCacheManager.
                     // reconciledOnceKeys) — every mutation invalidates the cache explicitly, so
@@ -300,7 +301,7 @@ class CloudExplorerViewModel @Inject constructor(
                 }
             } else {
                 // No cache available — show loading spinner
-                _uiState.value = _uiState.value.copy(isLoading = true, currentPath = path, pathStack = stack)
+                _uiState.update { old -> old.copy(isLoading = true, currentPath = path, pathStack = stack) }
             }
 
             // 3. Revalidate: fetch fresh data from API in background
@@ -318,12 +319,12 @@ class CloudExplorerViewModel @Inject constructor(
                         // looked pixel-for-pixel identical to "this folder really is empty", with
                         // no way to tell the difference short of reading logcat.
                         if (_uiState.value.files.isEmpty()) {
-                            _uiState.value = _uiState.value.copy(
+                            _uiState.update { old -> old.copy(
                                 isLoading = false,
                                 toastMessage = "Couldn't load: ${result.exceptionOrNull()?.message ?: "unknown error"}"
-                            )
+                            ) }
                         } else {
-                            _uiState.value = _uiState.value.copy(isLoading = false)
+                            _uiState.update { old -> old.copy(isLoading = false) }
                         }
                         return@launch
                     }
@@ -336,13 +337,13 @@ class CloudExplorerViewModel @Inject constructor(
                     // Save to cache for next time
                     folderCacheManager.putCloudFolder(accountId, path, sortedFiles)
 
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         isLoading = false,
                         files = sortedFiles,
                         pathSegments = segments,
                         selectedPaths = emptySet(),
                         isSelectionMode = false
-                    )
+                    ) }
 
                     // Trigger background asynchronous folder item counts; thumbnails are fetched
                     // lazily per-row as they're scrolled into view (see requestThumbnail).
@@ -357,10 +358,10 @@ class CloudExplorerViewModel @Inject constructor(
                     val (total, used) = quotaResult.getOrDefault(Pair(cachedTotal, cachedUsed))
                     quotaPrefs.edit().putLong("${accountId}_total", total).putLong("${accountId}_used", used).apply()
                     val updatedAccount = baseAccount?.copy(totalSpaceBytes = total, usedSpaceBytes = used)
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         account = updatedAccount,
                         title = updatedAccount?.accountName ?: title
-                    )
+                    ) }
                 } catch (_: Exception) {
                     // Keep cached quota values on failure
                 }
@@ -406,7 +407,7 @@ class CloudExplorerViewModel @Inject constructor(
                                             it.copy(itemCount = count, subfolderCount = subfolders, fileChildCount = childFiles)
                                         } else it
                                     }
-                                    _uiState.value = _uiState.value.copy(files = updated)
+                                    _uiState.update { old -> old.copy(files = updated) }
                                 }
                             }
                         }
@@ -573,7 +574,7 @@ class CloudExplorerViewModel @Inject constructor(
     // file whose thumbnail was already sitting in this exact cache from browsing earlier — which
     // made every search result's thumbnail noticeably slower to appear than a plain folder's.
     private fun applyLocalThumbnailCache(files: List<FileItem>, accountId: String): List<FileItem> {
-        val targetDir = File(context.cacheDir, "cloud_downloads/$accountId")
+        // Full local copies live per remote path — see CloudDownloadCache.
         val thumbDir = File(context.cacheDir, "cloud_thumbs/$accountId")
         return files.map { file ->
             if (!file.isDirectory && file.thumbnailUri == null) {
@@ -582,7 +583,7 @@ class CloudExplorerViewModel @Inject constructor(
                 val cachedThumb = File(thumbDir, "$safeId.jpg").takeIf { it.exists() && it.length() > 0 }
                     ?: File(thumbDir, "${file.id}.jpg").takeIf { it.exists() && it.length() > 0 }
                     ?: File(thumbDir, "$safePath.jpg").takeIf { it.exists() && it.length() > 0 }
-                val local = File(targetDir, file.name)
+                val local = com.antigravity.filemanager.utils.CloudDownloadCache.fileFor(context, accountId, file.path, file.name)
                 val cachedLink = streamableLinkCache[file.id]
                 when {
                     cachedThumb != null -> file.copy(thumbnailUri = cachedThumb.absolutePath)
@@ -652,7 +653,8 @@ class CloudExplorerViewModel @Inject constructor(
         isVideo: Boolean
     ) {
         try {
-            val targetDir = File(context.cacheDir, "cloud_downloads/$accountId").apply { mkdirs() }
+            val targetDir = com.antigravity.filemanager.utils.CloudDownloadCache.accountDir(context, accountId).apply { mkdirs() }
+            val itemCacheDir = com.antigravity.filemanager.utils.CloudDownloadCache.dirFor(context, accountId, item.path)
             val thumbDir = File(context.cacheDir, "cloud_thumbs/$accountId").apply { mkdirs() }
             val hasFastThumbnailEndpoint = provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA ||
                 provider == com.antigravity.filemanager.domain.model.CloudProvider.GOOGLE_DRIVE ||
@@ -689,7 +691,7 @@ class CloudExplorerViewModel @Inject constructor(
                 return
             }
 
-            val localFile = File(targetDir, item.name)
+            val localFile = File(itemCacheDir, item.name)
             if (localFile.exists() && localFile.length() > 0) {
                 if (isVideo) {
                     // Handing Coil the raw video file (its generic VideoThumbnailFetcher) is
@@ -801,7 +803,7 @@ class CloudExplorerViewModel @Inject constructor(
             // the user asked to see a "File transfer in progress" notification (or the in-app
             // download modal) for.
             if (item.size !in 1..maxImageThumbnailPrefetchBytes) return
-            val dlResult = cloudUseCase.downloadFile(accountId, item.path, targetDir.absolutePath, notifyTransfer = false)
+            val dlResult = cloudUseCase.downloadFile(accountId, item.path, itemCacheDir.apply { mkdirs() }.absolutePath, notifyTransfer = false)
             if (dlResult.isSuccess) {
                 val downloaded = dlResult.getOrNull()
                 if (downloaded != null && downloaded.exists() && downloaded.length() > 0) {
@@ -819,10 +821,10 @@ class CloudExplorerViewModel @Inject constructor(
         // scrolling through search results landed in a list nothing was actually showing,
         // leaving every search-result row stuck on its fallback icon forever.
         fun patch(list: List<FileItem>) = list.map { if (it.id == fileId) it.copy(thumbnailUri = thumbPath) else it }
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             files = patch(_uiState.value.files),
             searchResults = patch(_uiState.value.searchResults)
-        )
+        ) }
     }
 
     private var activeTransferJob: kotlinx.coroutines.Job? = null
@@ -845,7 +847,7 @@ class CloudExplorerViewModel @Inject constructor(
         totalBytes: Long = 0L,
         operationLabel: String? = null
     ) {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             downloadProgress = CloudTransferProgress(
                 currentFileName = currentFileName,
                 currentIndex = currentIndex,
@@ -856,7 +858,7 @@ class CloudExplorerViewModel @Inject constructor(
                 isUpload = isUpload,
                 operationLabel = operationLabel
             )
-        )
+        ) }
         // Mirrors into the same TransferGuard the persistent notification (TransferService) reads
         // from — every operation that shows the in-app progress dialog now also keeps that
         // notification current, instead of only paste()'s upload/download legs doing so (delete/
@@ -878,12 +880,12 @@ class CloudExplorerViewModel @Inject constructor(
     fun cancelTransfer() {
         activeTransferJob?.cancel()
         activeTransferJob = null
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             downloadProgress = null,
             isLoading = false,
             toastMessage = "Cancelled",
             transferCancelledByUser = true
-        )
+        ) }
     }
 
     /**
@@ -910,7 +912,7 @@ class CloudExplorerViewModel @Inject constructor(
      * streaming (MEGA — client-side encrypted), or the link request fails.
      */
     fun openMediaStream(file: FileItem, onReadyToOpen: (FileItem) -> Unit) {
-        val targetDir = File(context.cacheDir, "cloud_downloads/$accountId")
+        val targetDir = com.antigravity.filemanager.utils.CloudDownloadCache.dirFor(context, accountId, file.path)
         val localFile = File(targetDir, file.name)
         if (isCompleteLocalCopy(localFile, file.size)) {
             onReadyToOpen(file.copy(path = localFile.absolutePath))
@@ -943,7 +945,7 @@ class CloudExplorerViewModel @Inject constructor(
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
             try {
-                val targetDir = File(context.cacheDir, "cloud_downloads/$accountId").apply { mkdirs() }
+                val targetDir = com.antigravity.filemanager.utils.CloudDownloadCache.dirFor(context, accountId, file.path).apply { mkdirs() }
                 val localFile = File(targetDir, file.name)
                 if (isCompleteLocalCopy(localFile, file.size)) {
                     onReadyToOpen(file.copy(path = localFile.absolutePath))
@@ -960,7 +962,7 @@ class CloudExplorerViewModel @Inject constructor(
                     }
                 }
 
-                _uiState.value = _uiState.value.copy(downloadProgress = null)
+                _uiState.update { old -> old.copy(downloadProgress = null) }
 
                 if (result.isSuccess) {
                     val downloaded = result.getOrNull() ?: localFile
@@ -968,10 +970,10 @@ class CloudExplorerViewModel @Inject constructor(
                     onReadyToOpen(file.copy(path = downloaded.absolutePath))
                 } else {
                     val err = result.exceptionOrNull()?.message ?: "Failed to download file"
-                    _uiState.value = _uiState.value.copy(toastMessage = err)
+                    _uiState.update { old -> old.copy(toastMessage = err) }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
-                _uiState.value = _uiState.value.copy(downloadProgress = null, toastMessage = "Download cancelled")
+                _uiState.update { old -> old.copy(downloadProgress = null, toastMessage = "Download cancelled") }
             }
         }
     }
@@ -990,12 +992,12 @@ class CloudExplorerViewModel @Inject constructor(
         searchJob?.cancel()
         val newStack = _uiState.value.pathStack + (folder.name to folder.path)
         persistPathStack(newStack)
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             isSearchActive = false,
             searchQuery = "",
             searchResults = emptyList(),
             isSearching = false
-        )
+        ) }
         loadAccountAndFiles(folder.path, newStack)
     }
 
@@ -1096,10 +1098,10 @@ class CloudExplorerViewModel @Inject constructor(
 
     fun onSortChanged(sort: FileSortOption) {
         val resorted = sortCloudFiles(_uiState.value.files, sort)
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             sortOption = sort,
             files = resorted
-        )
+        ) }
         val path = _uiState.value.currentPath
         viewModelScope.launch {
             folderPreferencesRepository.saveSortOption(sortKey(path), sort)
@@ -1111,10 +1113,10 @@ class CloudExplorerViewModel @Inject constructor(
     private var searchJob: Job? = null
 
     fun onSearchQueryChanged(query: String) {
-        _uiState.value = _uiState.value.copy(searchQuery = query)
+        _uiState.update { old -> old.copy(searchQuery = query) }
         searchJob?.cancel()
         if (query.isBlank()) {
-            _uiState.value = _uiState.value.copy(searchResults = emptyList(), isSearching = false)
+            _uiState.update { old -> old.copy(searchResults = emptyList(), isSearching = false) }
             return
         }
         val basePath = _uiState.value.currentPath
@@ -1122,7 +1124,7 @@ class CloudExplorerViewModel @Inject constructor(
             // Debounce so fast typing doesn't kick off a new tree walk per keystroke — only the
             // settled query actually searches.
             delay(350)
-            _uiState.value = _uiState.value.copy(searchResults = emptyList(), isSearching = true)
+            _uiState.update { old -> old.copy(searchResults = emptyList(), isSearching = true) }
             val found = mutableListOf<FileItem>()
             val resultsMutex = Mutex()
             // Bounded fan-out same as the paste()/delete() parallel phases above — walking every
@@ -1163,7 +1165,7 @@ class CloudExplorerViewModel @Inject constructor(
                         // Default sort: newest first, so results stay meaningful as they stream in
                         // from many folders concurrently rather than in whatever order those folder
                         // listings happened to return.
-                        _uiState.value = _uiState.value.copy(searchResults = found.sortedByDescending { it.lastModified })
+                        _uiState.update { old -> old.copy(searchResults = found.sortedByDescending { it.lastModified }) }
                     }
                 }
                 // The Trash/Rubbish Bin virtual folder is a flat, whole-account view of deleted
@@ -1185,7 +1187,7 @@ class CloudExplorerViewModel @Inject constructor(
                 // one unwinds (from cancellation) — only clear isSearching if this is still the
                 // active search, so its finally block doesn't stomp on the newer one's state.
                 if (searchJob === currentCoroutineContext().job) {
-                    _uiState.value = _uiState.value.copy(isSearching = false)
+                    _uiState.update { old -> old.copy(isSearching = false) }
                 }
             }
         }
@@ -1194,25 +1196,25 @@ class CloudExplorerViewModel @Inject constructor(
 
     fun setSearchActive(active: Boolean) {
         searchJob?.cancel()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             isSearchActive = active,
             searchQuery = if (!active) "" else _uiState.value.searchQuery,
             searchResults = emptyList(),
             isSearching = false
-        )
+        ) }
     }
 
     fun toggleSelection(path: String) {
         val current = _uiState.value.selectedPaths.toMutableSet()
         if (current.contains(path)) current.remove(path) else current.add(path)
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = current,
             isSelectionMode = current.isNotEmpty()
-        )
+        ) }
     }
 
     fun clearSelection() {
-        _uiState.value = _uiState.value.copy(selectedPaths = emptySet(), isSelectionMode = false)
+        _uiState.update { old -> old.copy(selectedPaths = emptySet(), isSelectionMode = false) }
     }
 
     // Mirrors CloudExplorerScreen's own `filteredFiles` derivation — Select All / Invert must
@@ -1231,24 +1233,24 @@ class CloudExplorerViewModel @Inject constructor(
 
     fun selectAll() {
         val allIds = visibleFiles().map { it.id }.toSet()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = allIds,
             isSelectionMode = true
-        )
+        ) }
     }
 
     fun invertSelection() {
         val all = visibleFiles().map { it.id }.toSet()
         val current = _uiState.value.selectedPaths
         val inverted = all - current
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = inverted,
             isSelectionMode = inverted.isNotEmpty()
-        )
+        ) }
     }
 
     fun showProperties(item: FileItem?) {
-        _uiState.value = _uiState.value.copy(showPropertiesDialog = item != null, itemForProperties = item)
+        _uiState.update { old -> old.copy(showPropertiesDialog = item != null, itemForProperties = item) }
     }
 
     private var propertiesJob: kotlinx.coroutines.Job? = null
@@ -1262,31 +1264,31 @@ class CloudExplorerViewModel @Inject constructor(
         propertiesJob?.cancel()
         val knownSize = items.filterNot { it.isDirectory }.sumOf { it.size }
         val hasFolders = items.any { it.isDirectory }
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showPropertiesDialog = true,
             propertiesItems = items,
             propertiesTotalSize = knownSize,
             propertiesIsComputing = hasFolders
-        )
+        ) }
         if (!hasFolders) return
         propertiesJob = viewModelScope.launch {
             var total = knownSize
             for (item in items.filter { it.isDirectory }) {
                 total += computeCloudFolderSize(item.path)
-                _uiState.value = _uiState.value.copy(propertiesTotalSize = total)
+                _uiState.update { old -> old.copy(propertiesTotalSize = total) }
             }
-            _uiState.value = _uiState.value.copy(propertiesIsComputing = false)
+            _uiState.update { old -> old.copy(propertiesIsComputing = false) }
         }
     }
 
     fun dismissPropertiesDialog() {
         propertiesJob?.cancel()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showPropertiesDialog = false,
             propertiesItems = emptyList(),
             propertiesTotalSize = 0L,
             propertiesIsComputing = false
-        )
+        ) }
     }
 
     // Cloud listings carry no folder-level size field (Dropbox/Drive/MEGA all report 0 for a
@@ -1316,17 +1318,17 @@ class CloudExplorerViewModel @Inject constructor(
     fun emptyTrash() {
         selectAll()
         deleteSelected(moveToTrash = false)
-        _uiState.value = _uiState.value.copy(showEmptyTrashDialog = false)
+        _uiState.update { old -> old.copy(showEmptyTrashDialog = false) }
     }
 
     fun setShowEmptyTrashDialog(show: Boolean) {
-        _uiState.value = _uiState.value.copy(showEmptyTrashDialog = show)
+        _uiState.update { old -> old.copy(showEmptyTrashDialog = show) }
     }
 
     fun createFolder(folderName: String) {
         if (folderName.isBlank()) return
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true)
+            _uiState.update { old -> old.copy(isLoading = true) }
             cloudUseCase.createFolder(accountId, folderName.trim(), _uiState.value.currentPath)
             refresh()
         }
@@ -1355,11 +1357,11 @@ class CloudExplorerViewModel @Inject constructor(
             // Resolved against visibleFiles(), not just `files` — a selection can come from
             // recursive search results that were never part of the current folder's own listing.
             val toDelete = visibleFiles().filter { it.path in selectedIds || it.id in selectedIds }
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 showDeleteDialog = false,
                 selectedPaths = emptySet(),
                 isSelectionMode = false
-            )
+            ) }
             // One request at a time here used to mean deleting a large selection (an emptied
             // Rubbish Bin with hundreds of items, easily an hour+ sequentially) looked exactly
             // like the app had hung — nothing to show for minutes on end. Bounded parallel fan-out
@@ -1451,7 +1453,7 @@ class CloudExplorerViewModel @Inject constructor(
             // and then reappearing once refresh() below finds it's still really there.
             val remainingFiles = _uiState.value.files.filterNot { (it.path in selectedIds || it.id in selectedIds) && it.path !in failedPaths }
             val remainingSearchResults = _uiState.value.searchResults.filterNot { (it.path in selectedIds || it.id in selectedIds) && it.path !in failedPaths }
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 isLoading = true,
                 downloadProgress = null,
                 files = remainingFiles,
@@ -1461,10 +1463,10 @@ class CloudExplorerViewModel @Inject constructor(
                     anyFailed -> "${failuresCounter.get()} item(s) could not be deleted"
                     else -> _uiState.value.toastMessage
                 }
-            )
+            ) }
             refresh()
             } catch (e: kotlinx.coroutines.CancellationException) {
-                _uiState.value = _uiState.value.copy(downloadProgress = null, isLoading = false, toastMessage = "Cancelled")
+                _uiState.update { old -> old.copy(downloadProgress = null, isLoading = false, toastMessage = "Cancelled") }
             } finally {
                 transferGuard.end()
             }
@@ -1472,7 +1474,7 @@ class CloudExplorerViewModel @Inject constructor(
     }
 
     fun setShowDeleteDialog(show: Boolean) {
-        _uiState.value = _uiState.value.copy(showDeleteDialog = show)
+        _uiState.update { old -> old.copy(showDeleteDialog = show) }
     }
 
     /** Restores the current selection out of the trash/rubbish bin view back to the account root. */
@@ -1487,12 +1489,12 @@ class CloudExplorerViewModel @Inject constructor(
             val toRestore = visibleFiles().filter { it.path in selectedIds || it.id in selectedIds }
             val remainingFiles = _uiState.value.files.filterNot { it.path in selectedIds || it.id in selectedIds }
             val remainingSearchResults = _uiState.value.searchResults.filterNot { it.path in selectedIds || it.id in selectedIds }
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 files = remainingFiles,
                 searchResults = remainingSearchResults,
                 selectedPaths = emptySet(),
                 isSelectionMode = false
-            )
+            ) }
             setTransferProgress(currentFileName = "", currentIndex = 0, totalFiles = toRestore.size, isUpload = true, operationLabel = "Restoring")
             // Same sequential-is-too-slow-for-a-big-selection fix as deleteSelected above.
             val restoreCompleted = java.util.concurrent.atomic.AtomicInteger(0)
@@ -1509,10 +1511,10 @@ class CloudExplorerViewModel @Inject constructor(
                     }
                 }
             }
-            _uiState.value = _uiState.value.copy(isLoading = true, downloadProgress = null)
+            _uiState.update { old -> old.copy(isLoading = true, downloadProgress = null) }
             refresh()
             } catch (e: kotlinx.coroutines.CancellationException) {
-                _uiState.value = _uiState.value.copy(downloadProgress = null, isLoading = false, toastMessage = "Cancelled")
+                _uiState.update { old -> old.copy(downloadProgress = null, isLoading = false, toastMessage = "Cancelled") }
             } finally {
                 transferGuard.end()
             }
@@ -1530,7 +1532,7 @@ class CloudExplorerViewModel @Inject constructor(
 
         suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>) {
             try {
-                _uiState.value = _uiState.value.copy(isLoading = true)
+                _uiState.update { old -> old.copy(isLoading = true) }
                 var failures = 0
                 var lastErrorMessage: String? = null
                 // Set true by the local-files-upload fast path once it has already patched the
@@ -1555,7 +1557,7 @@ class CloudExplorerViewModel @Inject constructor(
                             setTransferProgress(currentFileName = currentFile, currentIndex = currentIndex, totalFiles = totalFiles, isUpload = true, bytesTransferred = bytesSent, totalBytes = totalBytes)
                         }
                     }
-                    _uiState.value = _uiState.value.copy(downloadProgress = null)
+                    _uiState.update { old -> old.copy(downloadProgress = null) }
                     if (result.isFailure) {
                         failures++
                         lastErrorMessage = result.exceptionOrNull()?.message
@@ -1620,7 +1622,7 @@ class CloudExplorerViewModel @Inject constructor(
                         folderCacheManager.notifyCloudFilesRemoved(accountId, parentPath, removedPaths)
                     }
                     transferredCount = moved
-                    _uiState.value = _uiState.value.copy(downloadProgress = null)
+                    _uiState.update { old -> old.copy(downloadProgress = null) }
                 } else {
                     // Cloud file(s)/folder(s) (possibly a different account/provider) -> this
                     // cloud folder, via a local temp round-trip since there is no cross-provider
@@ -1809,26 +1811,26 @@ class CloudExplorerViewModel @Inject constructor(
                             }
                         }
                     }
-                    _uiState.value = _uiState.value.copy(downloadProgress = null)
+                    _uiState.update { old -> old.copy(downloadProgress = null) }
                     tempDir.deleteRecursively()
                 }
                 globalClipboardManager.clear()
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     isLoading = false,
                     toastMessage = if (failures == 0) {
                         "Pasted $transferredCount item(s)"
                     } else {
                         "Pasted with $failures failure(s)" + (lastErrorMessage?.let { ": $it" } ?: "")
                     }
-                )
+                ) }
                 if (!skipRefresh) refresh()
             } catch (e: kotlinx.coroutines.CancellationException) {
-                _uiState.value = _uiState.value.copy(downloadProgress = null, isLoading = false, toastMessage = "Transfer cancelled")
+                _uiState.update { old -> old.copy(downloadProgress = null, isLoading = false, toastMessage = "Transfer cancelled") }
             } catch (e: Exception) {
                 // Anything unexpected used to escape to viewModelScope (crashing the app) with
                 // isLoading left stuck on.
                 android.util.Log.e("CloudExplorerViewModel", "paste failed", e)
-                _uiState.value = _uiState.value.copy(downloadProgress = null, isLoading = false, toastMessage = "Paste failed: ${e.message}")
+                _uiState.update { old -> old.copy(downloadProgress = null, isLoading = false, toastMessage = "Paste failed: ${e.message}") }
             }
         }
 
@@ -1838,7 +1840,7 @@ class CloudExplorerViewModel @Inject constructor(
         // this, tapping "Paste Here" looked like it did nothing for however long that call took —
         // and because every tap here cancels+restarts the job, impatient re-tapping just kept
         // resetting the same network call instead of ever letting it finish.
-        _uiState.value = _uiState.value.copy(isLoading = true)
+        _uiState.update { old -> old.copy(isLoading = true) }
         activeTransferJob = viewModelScope.launch {
             val itemSizes = _uiState.value.clipboardItemSizes
             val items = sources.map { path ->
@@ -1849,7 +1851,7 @@ class CloudExplorerViewModel @Inject constructor(
             val conflicts = cloudUseCase.findConflicts(accountId, targetPath, items)
             if (conflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames -> doPaste(overwriteNames, skipNames) }
-                _uiState.value = _uiState.value.copy(isLoading = false, overwriteConflicts = conflicts)
+                _uiState.update { old -> old.copy(isLoading = false, overwriteConflicts = conflicts) }
             } else {
                 doPaste(emptySet(), emptySet())
             }
@@ -1859,7 +1861,7 @@ class CloudExplorerViewModel @Inject constructor(
     fun resolveOverwriteConflict(overwriteNames: Set<String>, skipNames: Set<String>) {
         val action = pendingOverwriteAction
         pendingOverwriteAction = null
-        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+        _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
         if (action != null) {
             activeTransferJob?.cancel()
             activeTransferJob = viewModelScope.launch { action(overwriteNames, skipNames) }
@@ -1868,7 +1870,7 @@ class CloudExplorerViewModel @Inject constructor(
 
     fun cancelOverwriteConflict() {
         pendingOverwriteAction = null
-        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+        _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
     }
 
     fun clearClipboard() {
@@ -1901,23 +1903,23 @@ class CloudExplorerViewModel @Inject constructor(
     }
 
     fun setShowRenameDialog(item: FileItem?) {
-        _uiState.value = _uiState.value.copy(showRenameDialog = item != null, itemToRename = item)
+        _uiState.update { old -> old.copy(showRenameDialog = item != null, itemToRename = item) }
     }
 
     fun renameSelected(newName: String) {
         val item = _uiState.value.itemToRename ?: return
         if (newName.isBlank() || newName == item.name) {
-            _uiState.value = _uiState.value.copy(showRenameDialog = false, itemToRename = null)
+            _uiState.update { old -> old.copy(showRenameDialog = false, itemToRename = null) }
             return
         }
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true, showRenameDialog = false, itemToRename = null)
+            _uiState.update { old -> old.copy(isLoading = true, showRenameDialog = false, itemToRename = null) }
             val result = cloudUseCase.renameItem(accountId, item.path, newName.trim())
             if (result.isFailure) {
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     isLoading = false,
                     toastMessage = result.exceptionOrNull()?.message ?: "Rename failed"
-                )
+                ) }
             }
             clearSelection()
             refresh()
@@ -1925,7 +1927,7 @@ class CloudExplorerViewModel @Inject constructor(
     }
 
     fun clearToast() {
-        _uiState.value = _uiState.value.copy(toastMessage = null)
+        _uiState.update { old -> old.copy(toastMessage = null) }
     }
 }
 

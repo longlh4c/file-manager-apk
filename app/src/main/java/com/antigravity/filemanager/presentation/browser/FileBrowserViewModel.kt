@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.presentation.browser
 
 import android.content.Context
+import kotlinx.coroutines.flow.update
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -161,9 +162,9 @@ class FileBrowserViewModel @Inject constructor(
                 if (isUsbPath) {
                     val isDriveStillConnected = drives.any { current.startsWith(it.rootPath) }
                     if (!isDriveStillConnected) {
-                        _uiState.value = _uiState.value.copy(
+                        _uiState.update { old -> old.copy(
                             shouldNavigateBackOnUsbDisconnect = true
-                        )
+                        ) }
                     }
                 }
             }
@@ -171,38 +172,38 @@ class FileBrowserViewModel @Inject constructor(
     }
 
     fun onUsbDisconnectHandled() {
-        _uiState.value = _uiState.value.copy(shouldNavigateBackOnUsbDisconnect = false)
+        _uiState.update { old -> old.copy(shouldNavigateBackOnUsbDisconnect = false) }
     }
 
     private fun loadStorageUsage() {
         viewModelScope.launch {
             val volume = getDashboardDataUseCase.getStorageInfo()
-            _uiState.value = _uiState.value.copy(storageUsedPercent = volume.usedPercentageInt)
+            _uiState.update { old -> old.copy(storageUsedPercent = volume.usedPercentageInt) }
         }
     }
 
     private fun observeBookmarks() {
         viewModelScope.launch {
             bookmarkUseCase.observeBookmarks().collect { bookmarks ->
-                _uiState.value = _uiState.value.copy(bookmarks = bookmarks)
+                _uiState.update { old -> old.copy(bookmarks = bookmarks) }
             }
         }
     }
 
     fun dismissBookmarkConfirmation() {
-        _uiState.value = _uiState.value.copy(bookmarkConfirmationMessage = null)
+        _uiState.update { old -> old.copy(bookmarkConfirmationMessage = null) }
     }
 
     private fun observeGlobalClipboard() {
         viewModelScope.launch {
             globalClipboardManager.state.collect { clip ->
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     clipboardPaths = clip.paths,
                     isCutOperation = clip.isCut,
                     clipboardSourceCloudAccountId = clip.sourceCloudAccountId,
                     clipboardItemSizes = clip.itemSizes,
                     clipboardItemIsDirectory = clip.itemIsDirectory
-                )
+                ) }
             }
         }
         // See the matching comment in CloudExplorerViewModel: TransferGuard.progress survives
@@ -215,7 +216,7 @@ class FileBrowserViewModel @Inject constructor(
                 if (info != null && _uiState.value.transferCancelledByUser) {
                     return@collect
                 }
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     downloadProgress = info?.let {
                         CloudTransferProgress(
                             currentFileName = it.currentFileName,
@@ -229,7 +230,7 @@ class FileBrowserViewModel @Inject constructor(
                         )
                     },
                     transferCancelledByUser = if (info == null) false else _uiState.value.transferCancelledByUser
-                )
+                ) }
             }
         }
     }
@@ -237,7 +238,7 @@ class FileBrowserViewModel @Inject constructor(
     private fun loadCloudAccounts() {
         viewModelScope.launch {
             cloudStorageUseCase.observeAccounts().collect { accounts ->
-                _uiState.value = _uiState.value.copy(cloudAccounts = accounts)
+                _uiState.update { old -> old.copy(cloudAccounts = accounts) }
             }
         }
     }
@@ -262,7 +263,7 @@ class FileBrowserViewModel @Inject constructor(
         // isLoading=false + files=emptyList(), which briefly paints the "empty folder" icon right
         // before real content (or even cached content) replaces it. Most noticeable on a folder
         // like Downloads that's opened straight from the dashboard with nothing pre-rendered yet.
-        _uiState.value = _uiState.value.copy(isLoading = true)
+        _uiState.update { old -> old.copy(isLoading = true) }
 
         // Navigating anywhere (including tapping a folder found via recursive search) must leave
         // search mode — otherwise this correctly loads the target folder's real contents into
@@ -272,12 +273,12 @@ class FileBrowserViewModel @Inject constructor(
         // CloudExplorerViewModel.openFolder.
         searchJob?.cancel()
         if (_uiState.value.isSearchActive || _uiState.value.searchQuery.isNotEmpty()) {
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 isSearchActive = false,
                 searchQuery = "",
                 searchResults = emptyList(),
                 isSearching = false
-            )
+            ) }
         }
         viewModelScope.launch {
             val savedSort = folderPreferencesRepository.getSortOption(path)
@@ -287,7 +288,7 @@ class FileBrowserViewModel @Inject constructor(
             // 1. Try to show cached folder contents immediately (Stale phase)
             val cached = folderCacheManager.getLocalFolder(path, savedSort, savedHidden, LOCAL_CACHE_FRESH_TTL_MS)
             if (cached != null && cached.files.isNotEmpty()) {
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     isLoading = false,
                     currentPath = path,
                     files = cached.files,
@@ -296,9 +297,9 @@ class FileBrowserViewModel @Inject constructor(
                     sortOption = savedSort,
                     showHiddenFiles = savedHidden,
                     viewMode = savedViewMode
-                )
+                ) }
             } else {
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     isLoading = true,
                     currentPath = path,
                     selectedPaths = emptySet(),
@@ -306,7 +307,7 @@ class FileBrowserViewModel @Inject constructor(
                     sortOption = savedSort,
                     showHiddenFiles = savedHidden,
                     viewMode = savedViewMode
-                )
+                ) }
             }
 
             watchDirectory(path)
@@ -322,10 +323,10 @@ class FileBrowserViewModel @Inject constructor(
             folderCacheManager.putLocalFolder(path, savedSort, savedHidden, files)
 
             if (_uiState.value.currentPath == path) {
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     isLoading = false,
                     files = files
-                )
+                ) }
             }
         }
     }
@@ -360,7 +361,7 @@ class FileBrowserViewModel @Inject constructor(
                 val files = fileOperationsUseCase.getFiles(path, sort, showHidden = hidden)
                 folderCacheManager.putLocalFolder(path, sort, hidden, files)
                 if (_uiState.value.currentPath == path) {
-                    _uiState.value = _uiState.value.copy(files = files)
+                    _uiState.update { old -> old.copy(files = files) }
                 }
             }
         }
@@ -375,7 +376,7 @@ class FileBrowserViewModel @Inject constructor(
         val current = _uiState.value.currentPath
         viewModelScope.launch {
             folderPreferencesRepository.saveSortOption(current, sort, applyToAll)
-            _uiState.value = _uiState.value.copy(sortOption = sort)
+            _uiState.update { old -> old.copy(sortOption = sort) }
             loadDirectory(current)
         }
     }
@@ -384,14 +385,14 @@ class FileBrowserViewModel @Inject constructor(
         val current = _uiState.value.currentPath
         viewModelScope.launch {
             folderPreferencesRepository.saveShowHidden(current, show, applyToAll)
-            _uiState.value = _uiState.value.copy(showHiddenFiles = show)
+            _uiState.update { old -> old.copy(showHiddenFiles = show) }
             loadDirectory(current)
         }
     }
 
     fun onViewModeChanged(viewMode: com.antigravity.filemanager.presentation.components.ViewMode, applyToAll: Boolean = false) {
         val current = _uiState.value.currentPath
-        _uiState.value = _uiState.value.copy(viewMode = viewMode)
+        _uiState.update { old -> old.copy(viewMode = viewMode) }
         viewModelScope.launch {
             folderPreferencesRepository.saveViewMode(current, viewMode, applyToAll)
         }
@@ -400,10 +401,10 @@ class FileBrowserViewModel @Inject constructor(
     private var searchJob: Job? = null
 
     fun onSearchQueryChanged(query: String) {
-        _uiState.value = _uiState.value.copy(searchQuery = query)
+        _uiState.update { old -> old.copy(searchQuery = query) }
         searchJob?.cancel()
         if (query.isBlank()) {
-            _uiState.value = _uiState.value.copy(searchResults = emptyList(), isSearching = false)
+            _uiState.update { old -> old.copy(searchResults = emptyList(), isSearching = false) }
             return
         }
         val basePath = _uiState.value.currentPath
@@ -412,7 +413,7 @@ class FileBrowserViewModel @Inject constructor(
             // Debounce so fast typing doesn't kick off a new tree walk per keystroke — only the
             // settled query actually searches.
             delay(350)
-            _uiState.value = _uiState.value.copy(searchResults = emptyList(), isSearching = true)
+            _uiState.update { old -> old.copy(searchResults = emptyList(), isSearching = true) }
             val found = mutableListOf<FileItem>()
             val resultsMutex = Mutex()
             // Bounded fan-out, same shape as CloudExplorerViewModel's recursive search — reading
@@ -432,7 +433,7 @@ class FileBrowserViewModel @Inject constructor(
                     resultsMutex.withLock {
                         found.addAll(matches)
                         // Default sort: newest first, matching Cloud/Media category search.
-                        _uiState.value = _uiState.value.copy(searchResults = found.sortedByDescending { it.lastModified })
+                        _uiState.update { old -> old.copy(searchResults = found.sortedByDescending { it.lastModified }) }
                     }
                 }
                 val subfolders = children.filter { it.isDirectory }
@@ -450,7 +451,7 @@ class FileBrowserViewModel @Inject constructor(
                 // one unwinds (from cancellation) — only clear isSearching if this is still the
                 // active search, so its finally block doesn't stomp on the newer one's state.
                 if (searchJob === currentCoroutineContext().job) {
-                    _uiState.value = _uiState.value.copy(isSearching = false)
+                    _uiState.update { old -> old.copy(isSearching = false) }
                 }
             }
         }
@@ -459,12 +460,12 @@ class FileBrowserViewModel @Inject constructor(
 
     fun setSearchActive(active: Boolean) {
         searchJob?.cancel()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             isSearchActive = active,
             searchQuery = if (!active) "" else _uiState.value.searchQuery,
             searchResults = emptyList(),
             isSearching = false
-        )
+        ) }
     }
 
     fun toggleFileSelection(path: String) {
@@ -474,10 +475,10 @@ class FileBrowserViewModel @Inject constructor(
         } else {
             currentSelected.add(path)
         }
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = currentSelected,
             isSelectionMode = currentSelected.isNotEmpty()
-        )
+        ) }
     }
 
     // Select All / Invert must operate on what's actually visible — the recursive search results
@@ -487,27 +488,27 @@ class FileBrowserViewModel @Inject constructor(
 
     fun selectAll() {
         val allPaths = visibleFiles().map { it.path }.toSet()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = allPaths,
             isSelectionMode = true
-        )
+        ) }
     }
 
     fun invertSelection() {
         val all = visibleFiles().map { it.path }.toSet()
         val current = _uiState.value.selectedPaths
         val inverted = all - current
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = inverted,
             isSelectionMode = inverted.isNotEmpty()
-        )
+        ) }
     }
 
     fun clearSelection() {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = emptySet(),
             isSelectionMode = false
-        )
+        ) }
     }
 
     fun clearClipboard() {
@@ -517,39 +518,39 @@ class FileBrowserViewModel @Inject constructor(
     fun copySelected() {
         val selected = _uiState.value.selectedPaths.toList()
         globalClipboardManager.copy(selected, selected.associateWith { File(it).length() })
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             isSelectionMode = false,
             selectedPaths = emptySet()
-        )
+        ) }
     }
 
     fun cutSelected() {
         val selected = _uiState.value.selectedPaths.toList()
         globalClipboardManager.cut(selected, selected.associateWith { File(it).length() })
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             isSelectionMode = false,
             selectedPaths = emptySet()
-        )
+        ) }
     }
 
     fun addBookmark(path: String, name: String) {
         viewModelScope.launch {
             bookmarkUseCase.addBookmark(path, name)
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 isSelectionMode = false,
                 selectedPaths = emptySet(),
                 bookmarkConfirmationMessage = "\"$name\" has been added to Bookmarks"
-            )
+            ) }
         }
     }
 
     fun removeBookmark(path: String) {
         viewModelScope.launch {
             bookmarkUseCase.removeBookmark(path)
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 isSelectionMode = false,
                 selectedPaths = emptySet()
-            )
+            ) }
         }
     }
 
@@ -584,7 +585,7 @@ class FileBrowserViewModel @Inject constructor(
                         folderCacheManager.invalidateLocal(target)
                         loadDirectory(target)
                     }
-                    _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
+                    _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
                 } else {
                     pasteFromCloud(cloudAccountId, sources, target, isMove)
                     globalClipboardManager.clear()
@@ -603,7 +604,7 @@ class FileBrowserViewModel @Inject constructor(
                     invalidateLocalCacheForPaste(sources, target, isMove)
                     loadDirectory(target)
                 }
-                _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
+                _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
             } else {
                 runLocalCopyOrMove(sources, target, isMove)
                 globalClipboardManager.clear()
@@ -625,18 +626,18 @@ class FileBrowserViewModel @Inject constructor(
     ) {
         val operationLabel = if (isMove) "Moving" else "Copying"
         val onProgress: (String, Int, Int) -> Unit = { currentFile, currentIndex, totalFiles ->
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 downloadProgress = CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = operationLabel)
-            )
+            ) }
         }
         val result = if (isMove) {
             fileOperationsUseCase.move(sources, target, overwriteNames, skipNames, onProgress)
         } else {
             fileOperationsUseCase.copy(sources, target, overwriteNames, skipNames, onProgress)
         }
-        _uiState.value = _uiState.value.copy(downloadProgress = null)
+        _uiState.update { old -> old.copy(downloadProgress = null) }
         if (result.isFailure) {
-            _uiState.value = _uiState.value.copy(toastMessage = "Error during $operationLabel: ${result.exceptionOrNull()?.message}")
+            _uiState.update { old -> old.copy(toastMessage = "Error during $operationLabel: ${result.exceptionOrNull()?.message}") }
         }
     }
 
@@ -661,11 +662,11 @@ class FileBrowserViewModel @Inject constructor(
             "Extracting" -> "Extract cancelled"
             else -> "Transfer cancelled"
         }
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             downloadProgress = null,
             toastMessage = toastMessage,
             transferCancelledByUser = true
-        )
+        ) }
         activeTransferJob?.cancel()
         activeTransferJob = null
     }
@@ -673,7 +674,7 @@ class FileBrowserViewModel @Inject constructor(
     fun resolveOverwriteConflict(overwriteNames: Set<String>, skipNames: Set<String>) {
         val action = pendingOverwriteAction
         pendingOverwriteAction = null
-        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+        _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
         if (action != null) {
             activeTransferJob?.cancel()
             activeTransferJob = viewModelScope.launch { action(overwriteNames, skipNames) }
@@ -682,7 +683,7 @@ class FileBrowserViewModel @Inject constructor(
 
     fun cancelOverwriteConflict() {
         pendingOverwriteAction = null
-        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+        _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
     }
 
     private suspend fun pasteFromCloud(accountId: String, remotePaths: List<String>, targetDir: String, isMove: Boolean, overwriteNames: Set<String> = emptySet(), skipNames: Set<String> = emptySet()) {
@@ -698,55 +699,55 @@ class FileBrowserViewModel @Inject constructor(
                 overwriteNames = overwriteNames,
                 skipNames = skipNames,
                 itemIsDirectory = _uiState.value.clipboardItemIsDirectory
-            ) { progress -> _uiState.value = _uiState.value.copy(downloadProgress = progress) }
+            ) { progress -> _uiState.update { old -> old.copy(downloadProgress = progress) } }
 
             // result.scannedPaths.size is how many actually got written — was always "Pasted
             // ${remotePaths.size}" regardless of skipNames, so skipping every conflict still
             // reported success for files that never actually landed.
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 downloadProgress = null,
                 toastMessage = when {
                     result.failedNames.isNotEmpty() -> "Pasted with ${result.failedNames.size} failure(s)"
                     result.scannedPaths.isEmpty() -> "No files pasted (all skipped)"
                     else -> "Pasted ${result.scannedPaths.size} item(s)"
                 }
-            )
+            ) }
         } catch (e: kotlinx.coroutines.CancellationException) {
-            _uiState.value = _uiState.value.copy(downloadProgress = null, toastMessage = "Transfer cancelled")
+            _uiState.update { old -> old.copy(downloadProgress = null, toastMessage = "Transfer cancelled") }
         }
     }
 
     fun openCopyToCloudDialog(isMove: Boolean = false) {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showCloudDestinationDialog = true,
             isCloudMoveOperation = isMove
-        )
+        ) }
     }
 
     fun dismissCloudDestinationDialog() {
-        _uiState.value = _uiState.value.copy(showCloudDestinationDialog = false)
+        _uiState.update { old -> old.copy(showCloudDestinationDialog = false) }
     }
 
     /** User picked which cloud account; now let them pick a destination folder inside it. */
     fun onSelectCloudAccountForTransfer(account: CloudAccount) {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showCloudDestinationDialog = false,
             cloudFolderPickerAccount = account,
             cloudFolderPickerPath = "/",
             cloudFolderPickerSegments = listOf("Root"),
             cloudFolderPickerFolders = emptyList()
-        )
+        ) }
         loadCloudFolderPickerFolders("/")
     }
 
     fun dismissCloudFolderPicker() {
-        _uiState.value = _uiState.value.copy(cloudFolderPickerAccount = null)
+        _uiState.update { old -> old.copy(cloudFolderPickerAccount = null) }
     }
 
     private fun loadCloudFolderPickerFolders(path: String) {
         val account = _uiState.value.cloudFolderPickerAccount ?: return
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(cloudFolderPickerPath = path)
+            _uiState.update { old -> old.copy(cloudFolderPickerPath = path) }
             // Was always a live network round-trip (for MEGA in particular, a full account-tree
             // fetch+decrypt) on every folder tapped in this "pick a destination" picker, even
             // though the Cloud tab right next to it (CloudExplorerViewModel) already caches the
@@ -758,29 +759,29 @@ class FileBrowserViewModel @Inject constructor(
             // session stays instant on the other for the rest of it.
             val cached = folderCacheManager.getCloudFolder(account.id, path)
             if (cached != null) {
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     cloudFolderPickerLoading = false,
                     cloudFolderPickerFolders = cached.files.filter { it.isDirectory }.sortedBy { it.name.lowercase() }
-                )
+                ) }
                 if (cached.isFresh) return@launch
             } else {
-                _uiState.value = _uiState.value.copy(cloudFolderPickerLoading = true)
+                _uiState.update { old -> old.copy(cloudFolderPickerLoading = true) }
             }
             val result = cloudStorageUseCase.getFiles(account.id, path)
             val files = result.getOrDefault(emptyList())
             folderCacheManager.putCloudFolder(account.id, path, files)
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 cloudFolderPickerLoading = false,
                 cloudFolderPickerFolders = files.filter { it.isDirectory }.sortedBy { it.name.lowercase() }
-            )
+            ) }
         }
     }
 
     fun openCloudFolderPickerFolder(folder: FileItem) {
         val newPath = folder.path
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             cloudFolderPickerSegments = _uiState.value.cloudFolderPickerSegments + folder.name
-        )
+        ) }
         loadCloudFolderPickerFolders(newPath)
     }
 
@@ -789,47 +790,47 @@ class FileBrowserViewModel @Inject constructor(
         if (index >= segments.size - 1) return
         val newSegments = segments.subList(0, index + 1)
         val newPath = if (index == 0) "/" else "/" + segments.subList(1, index + 1).joinToString("/")
-        _uiState.value = _uiState.value.copy(cloudFolderPickerSegments = newSegments)
+        _uiState.update { old -> old.copy(cloudFolderPickerSegments = newSegments) }
         loadCloudFolderPickerFolders(newPath)
     }
 
     fun confirmCloudFolderPickerDestination() {
         val account = _uiState.value.cloudFolderPickerAccount ?: return
         val destPath = _uiState.value.cloudFolderPickerPath
-        _uiState.value = _uiState.value.copy(cloudFolderPickerAccount = null)
+        _uiState.update { old -> old.copy(cloudFolderPickerAccount = null) }
         transferToCloud(account, destPath)
     }
 
     /** User picked "This device"; now let them pick a destination folder in local storage. */
     fun onSelectLocalDestination() {
         val root = android.os.Environment.getExternalStorageDirectory().absolutePath
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showCloudDestinationDialog = false,
             showLocalFolderPicker = true,
             localFolderPickerPath = root,
             localFolderPickerSegments = listOf("Root"),
             localFolderPickerFolders = emptyList()
-        )
+        ) }
         loadLocalFolderPickerFolders(root)
     }
 
     fun dismissLocalFolderPicker() {
-        _uiState.value = _uiState.value.copy(showLocalFolderPicker = false)
+        _uiState.update { old -> old.copy(showLocalFolderPicker = false) }
     }
 
     private fun loadLocalFolderPickerFolders(path: String) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(localFolderPickerLoading = true, localFolderPickerPath = path)
+            _uiState.update { old -> old.copy(localFolderPickerLoading = true, localFolderPickerPath = path) }
             val folders = fileOperationsUseCase.getFiles(path, FileSortOption.BY_NAME_ASC, showHidden = false)
                 .filter { it.isDirectory }
-            _uiState.value = _uiState.value.copy(localFolderPickerLoading = false, localFolderPickerFolders = folders)
+            _uiState.update { old -> old.copy(localFolderPickerLoading = false, localFolderPickerFolders = folders) }
         }
     }
 
     fun openLocalFolderPickerFolder(folder: FileItem) {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             localFolderPickerSegments = _uiState.value.localFolderPickerSegments + folder.name
-        )
+        ) }
         loadLocalFolderPickerFolders(folder.path)
     }
 
@@ -839,13 +840,13 @@ class FileBrowserViewModel @Inject constructor(
         val root = android.os.Environment.getExternalStorageDirectory().absolutePath
         val newSegments = segments.subList(0, index + 1)
         val newPath = if (index == 0) root else "$root/" + segments.subList(1, index + 1).joinToString("/")
-        _uiState.value = _uiState.value.copy(localFolderPickerSegments = newSegments)
+        _uiState.update { old -> old.copy(localFolderPickerSegments = newSegments) }
         loadLocalFolderPickerFolders(newPath)
     }
 
     fun confirmLocalFolderPickerDestination() {
         val destPath = _uiState.value.localFolderPickerPath
-        _uiState.value = _uiState.value.copy(showLocalFolderPicker = false)
+        _uiState.update { old -> old.copy(showLocalFolderPicker = false) }
         transferToLocal(destPath)
     }
 
@@ -861,17 +862,17 @@ class FileBrowserViewModel @Inject constructor(
                     folderCacheManager.invalidateLocal(_uiState.value.currentPath)
                 }
                 loadDirectory(_uiState.value.currentPath)
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     selectedPaths = emptySet(),
                     isSelectionMode = false,
                     toastMessage = "Transferred $count file(s) successfully!"
-                )
+                ) }
             }
 
             val conflicts = fileOperationsUseCase.findConflicts(selected, destPath)
             if (conflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames -> doTransfer(overwriteNames, skipNames) }
-                _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
+                _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
             } else {
                 doTransfer(emptySet(), emptySet())
             }
@@ -884,7 +885,7 @@ class FileBrowserViewModel @Inject constructor(
         val count = selected.size
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(showCloudDestinationDialog = false)
+            _uiState.update { old -> old.copy(showCloudDestinationDialog = false) }
 
             val progressThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
             suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>) {
@@ -897,7 +898,7 @@ class FileBrowserViewModel @Inject constructor(
                         skipNames = skipNames
                     ) { currentFile, currentIndex, totalFiles, bytesSent, totalBytes ->
                       if (progressThrottler.shouldEmit(bytesSent, totalBytes)) {
-                        _uiState.value = _uiState.value.copy(
+                        _uiState.update { old -> old.copy(
                             downloadProgress = CloudTransferProgress(
                                 currentFileName = currentFile,
                                 currentIndex = currentIndex,
@@ -907,7 +908,7 @@ class FileBrowserViewModel @Inject constructor(
                                 isIndeterminate = totalBytes <= 0,
                                 isUpload = true
                             )
-                        )
+                        ) }
                         transferGuard.updateProgress(
                             com.antigravity.filemanager.data.service.TransferProgressInfo(
                                 currentFileName = currentFile,
@@ -920,13 +921,13 @@ class FileBrowserViewModel @Inject constructor(
                         )
                       }
                     }
-                    _uiState.value = _uiState.value.copy(downloadProgress = null)
+                    _uiState.update { old -> old.copy(downloadProgress = null) }
                     if (result.isFailure) {
-                        _uiState.value = _uiState.value.copy(
+                        _uiState.update { old -> old.copy(
                             selectedPaths = emptySet(),
                             isSelectionMode = false,
                             toastMessage = "Upload to ${account.accountName} failed: ${result.exceptionOrNull()?.message ?: "unknown error"}"
-                        )
+                        ) }
                         return
                     }
                     // uploadFiles() now returns how many files actually went out — was always
@@ -955,7 +956,7 @@ class FileBrowserViewModel @Inject constructor(
                         folderCacheManager.invalidateLocal(_uiState.value.currentPath)
                         loadDirectory(_uiState.value.currentPath)
                     }
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         selectedPaths = emptySet(),
                         isSelectionMode = false,
                         toastMessage = if (uploadedCount > 0) {
@@ -963,9 +964,9 @@ class FileBrowserViewModel @Inject constructor(
                         } else {
                             "No files transferred (all skipped)"
                         }
-                    )
+                    ) }
                 } catch (e: kotlinx.coroutines.CancellationException) {
-                    _uiState.value = _uiState.value.copy(downloadProgress = null, toastMessage = "Transfer cancelled")
+                    _uiState.update { old -> old.copy(downloadProgress = null, toastMessage = "Transfer cancelled") }
                 }
             }
 
@@ -973,7 +974,7 @@ class FileBrowserViewModel @Inject constructor(
             val conflicts = cloudStorageUseCase.findConflicts(account.id, destPath, items)
             if (conflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames -> doTransfer(overwriteNames, skipNames) }
-                _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
+                _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
             } else {
                 doTransfer(emptySet(), emptySet())
             }
@@ -981,13 +982,13 @@ class FileBrowserViewModel @Inject constructor(
     }
 
     fun clearToast() {
-        _uiState.value = _uiState.value.copy(toastMessage = null)
+        _uiState.update { old -> old.copy(toastMessage = null) }
     }
 
     fun createFolder(name: String) {
         viewModelScope.launch {
             fileOperationsUseCase.createFolder(_uiState.value.currentPath, name)
-            _uiState.value = _uiState.value.copy(showNewFolderDialog = false)
+            _uiState.update { old -> old.copy(showNewFolderDialog = false) }
             folderCacheManager.invalidateLocal(_uiState.value.currentPath)
             loadDirectory(_uiState.value.currentPath)
         }
@@ -997,7 +998,7 @@ class FileBrowserViewModel @Inject constructor(
         viewModelScope.launch {
             val item = _uiState.value.itemToRename ?: return@launch
             fileOperationsUseCase.rename(item.path, newName)
-            _uiState.value = _uiState.value.copy(showRenameDialog = false, itemToRename = null)
+            _uiState.update { old -> old.copy(showRenameDialog = false, itemToRename = null) }
             folderCacheManager.invalidateLocal(_uiState.value.currentPath)
             loadDirectory(_uiState.value.currentPath)
         }
@@ -1005,7 +1006,7 @@ class FileBrowserViewModel @Inject constructor(
 
     fun deleteSelected(moveToRecycleBin: Boolean) {
         val paths = _uiState.value.selectedPaths.toList()
-        _uiState.value = _uiState.value.copy(showDeleteDialog = false)
+        _uiState.update { old -> old.copy(showDeleteDialog = false) }
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
             // Shown immediately, before delete() even starts: moving to Recycle Bin is (usually)
@@ -1014,26 +1015,26 @@ class FileBrowserViewModel @Inject constructor(
             // take a moment with nothing on screen the whole time, which read as the app hanging
             // even though nothing was actually blocked. Replaced by real per-file progress the
             // moment (if ever) the slow copy fallback below actually kicks in.
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 downloadProgress = CloudTransferProgress(
                     isUpload = false,
                     isIndeterminate = true,
                     operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
                 )
-            )
+            ) }
             fileOperationsUseCase.delete(paths, moveToRecycleBin) { currentName, currentIndex, total ->
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     downloadProgress = CloudTransferProgress.forItemCount(
                         currentName, currentIndex, total, isUpload = false,
                         operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
                     )
-                )
+                ) }
             }
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 downloadProgress = null,
                 selectedPaths = emptySet(),
                 isSelectionMode = false
-            )
+            ) }
             folderCacheManager.invalidateLocal(_uiState.value.currentPath)
             loadDirectory(_uiState.value.currentPath)
         }
@@ -1049,10 +1050,10 @@ class FileBrowserViewModel @Inject constructor(
         }
         val targetArchive = File(_uiState.value.currentPath, name).absolutePath
         val sources = _uiState.value.selectedPaths.toList()
-        _uiState.value = _uiState.value.copy(showCompressDialog = false)
+        _uiState.update { old -> old.copy(showCompressDialog = false) }
         if (File(targetArchive).exists()) {
             pendingCompressSources = sources
-            _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = targetArchive)
+            _uiState.update { old -> old.copy(pendingOverwriteZipPath = targetArchive) }
             return
         }
         runCompress(sources, targetArchive)
@@ -1064,14 +1065,14 @@ class FileBrowserViewModel @Inject constructor(
         val targetArchive = _uiState.value.pendingOverwriteZipPath ?: return
         val sources = pendingCompressSources ?: return
         pendingCompressSources = null
-        _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = null)
+        _uiState.update { old -> old.copy(pendingOverwriteZipPath = null) }
         File(targetArchive).delete()
         runCompress(sources, targetArchive)
     }
 
     fun cancelCompressOverwrite() {
         pendingCompressSources = null
-        _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = null)
+        _uiState.update { old -> old.copy(pendingOverwriteZipPath = null) }
     }
 
     private fun runCompress(sources: List<String>, targetArchive: String) {
@@ -1085,7 +1086,7 @@ class FileBrowserViewModel @Inject constructor(
                     } else if (totalFiles > 0) {
                         ((currentIndex.toFloat() / totalFiles.toFloat()) * 100).toInt().coerceIn(0, 100)
                     } else 0
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         downloadProgress = CloudTransferProgress(
                             currentFileName = currentFile.ifEmpty { File(targetArchive).name },
                             currentIndex = currentIndex,
@@ -1097,14 +1098,14 @@ class FileBrowserViewModel @Inject constructor(
                             operationLabel = "Compressing",
                             percent = p
                         )
-                    )
+                    ) }
                 }
             } finally {
                 withContext(NonCancellable) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         downloadProgress = null,
                         transferCancelledByUser = false
-                    )
+                    ) }
                     clearSelection()
                     folderCacheManager.invalidateLocal(_uiState.value.currentPath)
                     loadDirectory(_uiState.value.currentPath)
@@ -1120,10 +1121,10 @@ class FileBrowserViewModel @Inject constructor(
 
         // If single archive selected and encrypted, prompt immediately for password
         if (selected.size == 1 && fileOperationsUseCase.isArchiveEncrypted(selected[0])) {
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 pendingPasswordArchive = selected[0],
                 passwordError = null
-            )
+            ) }
             return
         }
 
@@ -1143,29 +1144,29 @@ class FileBrowserViewModel @Inject constructor(
                     val conflicts = fileOperationsUseCase.getArchiveConflicts(path, targetDir, password)
                     allConflicts.addAll(conflicts)
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         isLoading = false,
                         downloadProgress = null,
                         pendingPasswordArchive = path,
                         passwordError = null
-                    )
+                    ) }
                     return@launch
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         isLoading = false,
                         downloadProgress = null,
                         pendingPasswordArchive = path,
                         passwordError = "Incorrect password. Please try again."
-                    )
+                    ) }
                     return@launch
                 } catch (e: Exception) {
                     val errorMsg = e.localizedMessage?.takeIf { it.isNotBlank() }
                         ?: e.message?.takeIf { it.isNotBlank() }
                         ?: e.javaClass.simpleName
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         isLoading = false,
                         toastMessage = "Failed to inspect archive: $errorMsg"
-                    )
+                    ) }
                     return@launch
                 }
             }
@@ -1174,7 +1175,7 @@ class FileBrowserViewModel @Inject constructor(
                 pendingOverwriteAction = { overwriteNames, skipNames ->
                     runExtract(selected, targetDir, password, overwriteNames, skipNames)
                 }
-                _uiState.value = _uiState.value.copy(overwriteConflicts = allConflicts)
+                _uiState.update { old -> old.copy(overwriteConflicts = allConflicts) }
             } else {
                 runExtract(selected, targetDir, password)
             }
@@ -1191,14 +1192,14 @@ class FileBrowserViewModel @Inject constructor(
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
             try {
-                _uiState.value = _uiState.value.copy(isLoading = true)
+                _uiState.update { old -> old.copy(isLoading = true) }
                 var totalExtracted = 0
                 var totalSkipped = 0
                 var successfulArchives = 0
                 for ((index, path) in selected.withIndex()) {
                     if (!isActive || _uiState.value.transferCancelledByUser) break
                     val archiveName = File(path).name
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         downloadProgress = CloudTransferProgress(
                             currentFileName = archiveName,
                             currentIndex = index + 1,
@@ -1208,7 +1209,7 @@ class FileBrowserViewModel @Inject constructor(
                             operationLabel = if (selected.size > 1) "Extracting (${index + 1}/${selected.size})" else "Extracting",
                             percent = 0
                         )
-                    )
+                    ) }
                     val res = fileOperationsUseCase.extract(
                         archivePath = path,
                         targetDir = targetDir,
@@ -1222,7 +1223,7 @@ class FileBrowserViewModel @Inject constructor(
                         } else if (totalEntries > 0) {
                             ((currentIndex.toFloat() / totalEntries.toFloat()) * 100).toInt().coerceIn(0, 100)
                         } else 0
-                        _uiState.value = _uiState.value.copy(
+                        _uiState.update { old -> old.copy(
                             downloadProgress = CloudTransferProgress(
                                 currentFileName = currentEntry.ifEmpty { archiveName },
                                 currentIndex = currentIndex,
@@ -1234,7 +1235,7 @@ class FileBrowserViewModel @Inject constructor(
                                 operationLabel = if (selected.size > 1) "Extracting (${index + 1}/${selected.size})" else "Extracting",
                                 percent = p
                             )
-                        )
+                        ) }
                     }
                     if (res.isSuccess) {
                         successfulArchives++
@@ -1249,27 +1250,27 @@ class FileBrowserViewModel @Inject constructor(
                             break
                         }
                         if (ex is com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
-                            _uiState.value = _uiState.value.copy(
+                            _uiState.update { old -> old.copy(
                                 isLoading = false,
                                 downloadProgress = null,
                                 pendingPasswordArchive = path,
                                 passwordError = null
-                            )
+                            ) }
                             return@launch
                         } else if (ex is com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
-                            _uiState.value = _uiState.value.copy(
+                            _uiState.update { old -> old.copy(
                                 isLoading = false,
                                 downloadProgress = null,
                                 pendingPasswordArchive = path,
                                 passwordError = "Incorrect password. Please try again."
-                            )
+                            ) }
                             return@launch
                         } else {
-                            _uiState.value = _uiState.value.copy(
+                            _uiState.update { old -> old.copy(
                                 isLoading = false,
                                 downloadProgress = null,
                                 toastMessage = "Extraction failed: ${ex?.message ?: "Unknown error"}"
-                            )
+                            ) }
                             return@launch
                         }
                     }
@@ -1282,19 +1283,19 @@ class FileBrowserViewModel @Inject constructor(
                         successfulArchives > 0 -> "Extracted $successfulArchives archive(s)"
                         else -> null
                     }
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         selectedPaths = emptySet(),
                         isSelectionMode = false,
                         toastMessage = toastMessage
-                    )
+                    ) }
                 }
             } finally {
                 withContext(NonCancellable) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         downloadProgress = null,
                         isLoading = false,
                         transferCancelledByUser = false
-                    )
+                    ) }
                     folderCacheManager.invalidateLocal(targetDir)
                     loadDirectory(targetDir)
                 }
@@ -1306,19 +1307,19 @@ class FileBrowserViewModel @Inject constructor(
         val archivePath = _uiState.value.pendingPasswordArchive ?: return
         val targetDir = _uiState.value.currentPath
         // Dismiss password dialog immediately
-        _uiState.value = _uiState.value.copy(pendingPasswordArchive = null, passwordError = null)
+        _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
         checkExtractConflictsAndRun(listOf(archivePath), targetDir, password)
     }
 
     fun dismissPasswordDialog() {
-        _uiState.value = _uiState.value.copy(pendingPasswordArchive = null, passwordError = null)
+        _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
     }
 
-    fun setShowNewFolderDialog(show: Boolean) { _uiState.value = _uiState.value.copy(showNewFolderDialog = show) }
-    fun setShowRenameDialog(item: FileItem?) { _uiState.value = _uiState.value.copy(showRenameDialog = item != null, itemToRename = item) }
-    fun setShowDeleteDialog(show: Boolean) { _uiState.value = _uiState.value.copy(showDeleteDialog = show) }
-    fun setShowPropertiesDialog(item: FileItem?) { _uiState.value = _uiState.value.copy(showPropertiesDialog = item != null, itemForProperties = item) }
-    fun setShowCompressDialog(show: Boolean) { _uiState.value = _uiState.value.copy(showCompressDialog = show) }
+    fun setShowNewFolderDialog(show: Boolean) { _uiState.update { old -> old.copy(showNewFolderDialog = show) } }
+    fun setShowRenameDialog(item: FileItem?) { _uiState.update { old -> old.copy(showRenameDialog = item != null, itemToRename = item) } }
+    fun setShowDeleteDialog(show: Boolean) { _uiState.update { old -> old.copy(showDeleteDialog = show) } }
+    fun setShowPropertiesDialog(item: FileItem?) { _uiState.update { old -> old.copy(showPropertiesDialog = item != null, itemForProperties = item) } }
+    fun setShowCompressDialog(show: Boolean) { _uiState.update { old -> old.copy(showCompressDialog = show) } }
 
     private var propertiesJob: kotlinx.coroutines.Job? = null
 
@@ -1332,12 +1333,12 @@ class FileBrowserViewModel @Inject constructor(
         propertiesJob?.cancel()
         val knownSize = items.filterNot { it.isDirectory }.sumOf { it.size }
         val folders = items.filter { it.isDirectory }
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showPropertiesDialog = true,
             propertiesItems = items,
             propertiesTotalSize = knownSize,
             propertiesIsComputing = folders.isNotEmpty()
-        )
+        ) }
         if (folders.isEmpty()) return
         propertiesJob = viewModelScope.launch(Dispatchers.IO) {
             var total = knownSize
@@ -1348,19 +1349,19 @@ class FileBrowserViewModel @Inject constructor(
                 } catch (e: Exception) {
                     0L
                 }
-                _uiState.value = _uiState.value.copy(propertiesTotalSize = total)
+                _uiState.update { old -> old.copy(propertiesTotalSize = total) }
             }
-            _uiState.value = _uiState.value.copy(propertiesIsComputing = false)
+            _uiState.update { old -> old.copy(propertiesIsComputing = false) }
         }
     }
 
     fun dismissPropertiesDialog() {
         propertiesJob?.cancel()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showPropertiesDialog = false,
             propertiesItems = emptyList(),
             propertiesTotalSize = 0L,
             propertiesIsComputing = false
-        )
+        ) }
     }
 }
