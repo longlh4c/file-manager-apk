@@ -49,8 +49,8 @@ class FolderPreferencesRepository @Inject constructor(
         val entity = FolderPreferenceEntity(
             folderPath = folderPath,
             sortOption = sortOption.name,
-            showHidden = current?.showHidden ?: false,
-            viewMode = current?.viewMode ?: "LIST"
+            showHidden = current?.showHidden ?: preferenceManager.defaultShowHiddenFlow.first(),
+            viewMode = current?.viewMode ?: getDefaultViewMode().name
         )
         folderPreferenceDao.savePreference(entity)
     }
@@ -74,7 +74,7 @@ class FolderPreferencesRepository @Inject constructor(
             folderPath = folderPath,
             sortOption = current?.sortOption ?: getDefaultSortOption().name,
             showHidden = showHidden,
-            viewMode = current?.viewMode ?: "LIST"
+            viewMode = current?.viewMode ?: getDefaultViewMode().name
         )
         folderPreferenceDao.savePreference(entity)
     }
@@ -110,7 +110,7 @@ class FolderPreferencesRepository @Inject constructor(
         val entity = FolderPreferenceEntity(
             folderPath = folderPath,
             sortOption = current?.sortOption ?: getDefaultSortOption().name,
-            showHidden = current?.showHidden ?: false,
+            showHidden = current?.showHidden ?: preferenceManager.defaultShowHiddenFlow.first(),
             viewMode = viewMode.name
         )
         folderPreferenceDao.savePreference(entity)

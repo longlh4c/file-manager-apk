@@ -32,9 +32,16 @@ class DropboxAuthActivity : ComponentActivity() {
         }
 
         lifecycleScope.launch {
-            val finish = withContext(Dispatchers.IO) { DropboxAuthManager.handleRedirect(this@DropboxAuthActivity, uri) }
+            // finishFromRedirect throws when the user denies access or the CSRF state doesn't match;
+            // uncaught here that crashed the app instead of just reporting a failed login.
+            val finish = try {
+                withContext(Dispatchers.IO) { DropboxAuthManager.handleRedirect(this@DropboxAuthActivity, uri) }
+            } catch (e: Exception) {
+                android.util.Log.w("DropboxAuthActivity", "Dropbox login failed", e)
+                null
+            }
             if (finish == null) {
-                Toast.makeText(this@DropboxAuthActivity, "Dropbox login session expired, please try again", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@DropboxAuthActivity, "Dropbox login was cancelled or expired, please try again", Toast.LENGTH_LONG).show()
                 finish()
                 return@launch
             }
@@ -47,8 +54,13 @@ class DropboxAuthActivity : ComponentActivity() {
                 "account@dropbox.com"
             }
 
+            // Signing in again to an already connected Dropbox account refreshes its tokens in place
+            // instead of adding a duplicate entry.
+            val existing = cloudUseCase.getAccounts().firstOrNull {
+                it.provider == CloudProvider.DROPBOX && it.email.equals(email, ignoreCase = true) && email != "account@dropbox.com"
+            }
             val account = CloudAccount(
-                id = UUID.randomUUID().toString(),
+                id = existing?.id ?: UUID.randomUUID().toString(),
                 provider = CloudProvider.DROPBOX,
                 accountName = "Dropbox",
                 email = email,

@@ -126,6 +126,8 @@ class CloudManager @Inject constructor(
         // life of the process (this manager is a singleton) even after the account is removed.
         folderIdCaches.remove(accountId)
         masterKeyCache.remove(accountId)
+        dropboxApi.invalidateTree(accountId)
+        megaApi.invalidateNodeTreeCache(accountId)
         try {
             val file = File(context.filesDir, "cloud_sessions/$accountId.json")
             if (file.exists()) file.delete()

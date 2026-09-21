@@ -100,6 +100,19 @@ class FolderCacheManager @Inject constructor(
             .debounce(100)
             .onEach { markMediaCachesUnreconciled() }
             .launchIn(ioScope)
+        ioScope.launch { pruneDiskCache() }
+    }
+
+    // One JSON file is written per folder ever visited (local, cloud, category, sort variant),
+    // and nothing removed them — keep only the most recently written ones.
+    private val maxDiskCacheFiles = 400
+
+    private fun pruneDiskCache() {
+        try {
+            val files = cacheDir.listFiles()?.filter { it.isFile } ?: return
+            if (files.size <= maxDiskCacheFiles) return
+            files.sortedByDescending { it.lastModified() }.drop(maxDiskCacheFiles).forEach { it.delete() }
+        } catch (e: Exception) {}
     }
 
     private fun markMediaCachesUnreconciled() {

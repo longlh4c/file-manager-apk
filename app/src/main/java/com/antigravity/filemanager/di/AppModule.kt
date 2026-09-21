@@ -26,7 +26,12 @@ object DatabaseModule {
             context,
             AppDatabase::class.java,
             "file_manager.db"
-        ).fallbackToDestructiveMigration().build()
+        )
+            // WARNING: destructive fallback wipes the recycle-bin index (its files under
+            // .filemanager_trash can then never be restored) and every connected cloud account.
+            // Any future version bump needs a real Migration, not this fallback.
+            .fallbackToDestructiveMigration()
+            .build()
     }
 
     @Provides

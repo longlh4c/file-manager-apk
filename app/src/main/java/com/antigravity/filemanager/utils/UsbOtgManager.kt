@@ -72,7 +72,9 @@ class UsbOtgManager @Inject constructor(
             }
             ContextCompat.registerReceiver(context, storageReceiver, usbFilter, exportFlag)
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            // StorageVolumeCallback is API 30. The old N (24) guard let Android 8-10 reach it and
+            // die with NoSuchMethodError, an Error the catch below never sees.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 storageManager?.registerStorageVolumeCallback(context.mainExecutor, object : StorageManager.StorageVolumeCallback() {
                     override fun onStateChanged(volume: android.os.storage.StorageVolume) {
                         refresh()

@@ -287,7 +287,8 @@ class CloudStorageUseCase @Inject constructor(
     fun observeAccounts(): Flow<List<CloudAccount>> = cloudRepository.observeConnectedAccounts()
     suspend fun getAccounts(): List<CloudAccount> = cloudRepository.getConnectedAccounts()
     suspend fun addAccount(account: CloudAccount): Result<Unit> = cloudRepository.addAccount(account)
-    suspend fun removeAccount(id: String): Result<Unit> = cloudRepository.removeAccount(id)
+    suspend fun removeAccount(id: String): Result<Unit> =
+        cloudRepository.removeAccount(id).also { folderCacheManager.invalidateCloud(id, notify = false) }
     suspend fun reorderAccounts(accounts: List<CloudAccount>): Result<Unit> = cloudRepository.updateAccountsOrder(accounts)
     suspend fun getFiles(accountId: String, path: String, forceFullRefresh: Boolean = false): Result<List<FileItem>> =
         cloudRepository.getCloudFiles(accountId, path, forceFullRefresh)
