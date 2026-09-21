@@ -278,6 +278,20 @@ class TeraBoxApiClientTest {
     }
 
     @Test
+    fun listFilesReadsEveryPage() = runBlocking {
+        val tb = fakeClient { req ->
+            val page = req.url.queryParameter("page")!!.toInt()
+            val count = if (page == 1) 1000 else 3
+            val entries = (0 until count).joinToString(",") { i ->
+                val name = "f${page}_$i.txt"
+                """{"fs_id":"${page}_$i","path":"/big/$name","server_filename":"$name","isdir":0,"size":1}"""
+            }
+            200 to """{"errno":0,"list":[$entries]}""".toByteArray()
+        }
+        assertEquals(1003, tb.listFiles(account, "/big").getOrThrow().size)
+    }
+
+    @Test
     fun listFilesSetsExtensionForFilesOnly() = runBlocking {
         val tb = fakeClient {
             200 to """{"errno":0,"list":[

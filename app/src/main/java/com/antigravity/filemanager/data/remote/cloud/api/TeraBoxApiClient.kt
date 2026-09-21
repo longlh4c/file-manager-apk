@@ -326,10 +326,10 @@ class TeraBoxApiClient @Inject constructor(
 
         val thumbUrl = rawThumb?.replace("\\/", "/")?.replace("&amp;", "&")
         if (thumbUrl.isNullOrBlank()) return null
+        // Account-scoped only: bare path keys let one account's "/Photos/a.jpg" thumbnail show up
+        // for another account's file at the same path.
         thumbnailUrls["${account.id}:$fsId"] = thumbUrl
         thumbnailUrls["${account.id}:$filePath"] = thumbUrl
-        thumbnailUrls[fsId] = thumbUrl
-        thumbnailUrls[filePath] = thumbUrl
         return thumbUrl
     }
 
@@ -374,33 +374,43 @@ class TeraBoxApiClient @Inject constructor(
             }
 
             val encodedDir = URLEncoder.encode(cleanPath, "UTF-8")
-            val pathWithQuery = "/api/list?web=1&clienttype=0&app_id=250528&channel=dubox&dir=$encodedDir&order=name&desc=0&num=1000&page=1&showempty=0"
-            val (response, body) = executeWithRetry(pathWithQuery, cookie)
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
-            }
-
-            val json = JSONObject(body)
-            val errno = json.optInt("errno", -1)
-            if (errno != 0) {
-                // errno == -9 means directory does not exist or empty
-                if (errno == -9) {
-                    return@withContext Result.success(emptyList())
+            val pageSize = 1000
+            // A folder is returned one page at a time; only reading page 1 silently cut every
+            // folder off at its first 1000 entries.
+            val pages = mutableListOf<JSONArray>()
+            var page = 1
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val pathWithQuery = "/api/list?web=1&clienttype=0&app_id=250528&channel=dubox&dir=$encodedDir&order=name&desc=0&num=$pageSize&page=$page&showempty=0"
+                val (response, body) = executeWithRetry(pathWithQuery, cookie)
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
                 }
-                return@withContext Result.failure(IOException("TeraBox listFiles failed (errno: $errno)"))
+
+                val json = JSONObject(body)
+                val errno = json.optInt("errno", -1)
+                if (errno != 0) {
+                    // errno == -9 means directory does not exist or empty
+                    if (errno == -9 && page == 1) {
+                        return@withContext Result.success(emptyList())
+                    }
+                    return@withContext Result.failure(IOException("TeraBox listFiles failed (errno: $errno)"))
+                }
+                val pageItems = json.optJSONArray("list") ?: JSONArray()
+                pages.add(pageItems)
+                if (pageItems.length() < pageSize) break
+                page++
             }
 
-            val listJson = json.optJSONArray("list") ?: JSONArray()
             val items = mutableListOf<FileItem>()
 
-            for (i in 0 until listJson.length()) {
-                val item = listJson.getJSONObject(i)
+            for (item in pages.flatMap { arr -> (0 until arr.length()).map { arr.getJSONObject(it) } }) {
                 val fileName = item.optString("server_filename", "")
                 val filePath = item.optString("path", cleanPath.trimEnd('/') + "/" + fileName)
                 val isDir = item.optInt("isdir", 0) == 1
                 val size = item.optLong("size", 0L)
                 val mtimeSec = item.optLong("server_mtime", 0L)
-                val lastModified = if (mtimeSec > 0) mtimeSec * 1000L else System.currentTimeMillis()
+                val lastModified = if (mtimeSec > 0) mtimeSec * 1000L else 0L
                 val fsId = item.opt("fs_id")?.toString() ?: filePath
                 cacheThumbnailUrl(account, item, fsId, filePath)
 
@@ -589,6 +599,7 @@ class TeraBoxApiClient @Inject constructor(
             }
 
             if (!response.isSuccessful) {
+                response.close()
                 // If failed, try regional baseUrl once
                 if (currentDomainPrefix != null) {
                     val retryUrl = "${getBaseUrl()}/rest/2.0/pcs/file?method=download&path=$encodedPath"
@@ -596,11 +607,15 @@ class TeraBoxApiClient @Inject constructor(
                     response = okHttpClient.newCall(request).execute()
                 }
                 if (!response.isSuccessful) {
+                    response.close()
                     return@withContext Result.failure(IOException("Download failed with HTTP ${response.code}"))
                 }
             }
 
-            val responseBody = response.body ?: return@withContext Result.failure(IOException("Empty response body"))
+            val responseBody = response.body ?: run {
+                response.close()
+                return@withContext Result.failure(IOException("Empty response body"))
+            }
             val totalBytes = responseBody.contentLength()
             var bytesRead = 0L
             var lastProgressTime = 0L
@@ -727,7 +742,6 @@ class TeraBoxApiClient @Inject constructor(
             }
 
             val cachedUrl = thumbnailUrls["${account.id}:$nodeIdOrPath"]
-                ?: thumbnailUrls[nodeIdOrPath]
                 ?: if (nodeIdOrPath.startsWith("http://") || nodeIdOrPath.startsWith("https://")) nodeIdOrPath else null
 
             var thumbUrl = cachedUrl
@@ -896,9 +910,9 @@ class TeraBoxApiClient @Inject constructor(
                 .build()
 
             val uploadReq = buildAuthorizedRequest(uploadUrl, cookie, method = "POST", body = multipartBody)
-            val uploadResp = okHttpClient.newCall(uploadReq).execute()
-            if (!uploadResp.isSuccessful) {
-                return@withContext Result.failure(IOException("Slice upload failed: HTTP ${uploadResp.code}"))
+            val uploadCode = okHttpClient.newCall(uploadReq).execute().use { it.code }
+            if (uploadCode !in 200..299) {
+                return@withContext Result.failure(IOException("Slice upload failed: HTTP $uploadCode"))
             }
 
             // 4. Create / Finalize
