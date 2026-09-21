@@ -300,8 +300,18 @@ class CloudExplorerViewModel @Inject constructor(
                     fetchFolderItemCounts(sortedCached)
                 }
             } else {
-                // No cache available — show loading spinner
-                _uiState.update { old -> old.copy(isLoading = true, currentPath = path, pathStack = stack) }
+                // No cache available — show loading spinner. A different folder's files must not
+                // stay listed meanwhile: if the fetch then failed, they were left on screen as if
+                // they were this folder's contents.
+                _uiState.update { old -> old.copy(
+                    isLoading = true,
+                    currentPath = path,
+                    pathStack = stack,
+                    pathSegments = segments,
+                    files = if (old.currentPath == path) old.files else emptyList(),
+                    selectedPaths = emptySet(),
+                    isSelectionMode = false
+                ) }
             }
 
             // 3. Revalidate: fetch fresh data from API in background

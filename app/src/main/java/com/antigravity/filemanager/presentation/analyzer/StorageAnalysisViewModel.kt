@@ -214,6 +214,8 @@ class StorageAnalysisViewModel @Inject constructor(
                             percent = p
                         )
                     ) }
+                }.onFailure { e ->
+                    _uiState.update { old -> old.copy(toastMessage = "Compress failed: ${e.message}") }
                 }
                 val archiveFile = File(targetArchive)
                 if (archiveFile.exists()) {
@@ -454,7 +456,12 @@ class StorageAnalysisViewModel @Inject constructor(
 
             val matchedLargeBytes = currentData.largeFiles.filter { isRemoved(it.path) }.sumOf { it.sizeBytes }
 
-            fileOperationsUseCase.delete(paths, moveToRecycleBin = true)
+            fileOperationsUseCase.delete(paths, moveToRecycleBin = true).let { result ->
+                val deleted = result.getOrNull()
+                if (deleted == null || deleted < paths.size) {
+                    _uiState.update { old -> old.copy(toastMessage = result.exceptionOrNull()?.let { "Delete failed: ${it.message}" } ?: "$deleted of ${paths.size} item(s) deleted") }
+                }
+            }
 
             _uiState.update { old -> old.copy(
                 data = currentData.copy(
@@ -469,7 +476,12 @@ class StorageAnalysisViewModel @Inject constructor(
 
     fun deleteDuplicates(paths: List<String>, onComplete: () -> Unit = {}) {
         viewModelScope.launch {
-            fileOperationsUseCase.delete(paths, moveToRecycleBin = true)
+            fileOperationsUseCase.delete(paths, moveToRecycleBin = true).let { result ->
+                val deleted = result.getOrNull()
+                if (deleted == null || deleted < paths.size) {
+                    _uiState.update { old -> old.copy(toastMessage = result.exceptionOrNull()?.let { "Delete failed: ${it.message}" } ?: "$deleted of ${paths.size} item(s) deleted") }
+                }
+            }
             // Removing a duplicate can change which copy is now the "earliest" survivor in its
             // group, and affects both the Downloads-scoped and full-storage totals — cheapest
             // correct option is the same full rescan the other mutations above already pay for.

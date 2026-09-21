@@ -37,6 +37,13 @@ fun DuplicateFilesScreen(
     viewModel: StorageAnalysisViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val toastContext = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(uiState.toastMessage) {
+        uiState.toastMessage?.let {
+            android.widget.Toast.makeText(toastContext, it, android.widget.Toast.LENGTH_SHORT).show()
+            viewModel.clearToast()
+        }
+    }
     val title = "Duplicate files"
     val groups = uiState.data.duplicateFileGroups
 

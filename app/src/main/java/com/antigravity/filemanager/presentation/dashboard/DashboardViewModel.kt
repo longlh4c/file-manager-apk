@@ -293,12 +293,15 @@ class DashboardViewModel @Inject constructor(
                         downloadProgress = com.antigravity.filemanager.domain.model.CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = operationLabel)
                     ) }
                 }
-                if (clip.isCut) {
+                val result = if (clip.isCut) {
                     fileOperationsUseCase.move(clip.paths, target, overwriteNames, skipNames, onProgress)
                 } else {
                     fileOperationsUseCase.copy(clip.paths, target, overwriteNames, skipNames, onProgress)
                 }
-                _uiState.update { old -> old.copy(downloadProgress = null) }
+                _uiState.update { old -> old.copy(
+                    downloadProgress = null,
+                    toastMessage = result.exceptionOrNull()?.let { "Error during $operationLabel: ${it.message}" } ?: old.toastMessage
+                ) }
                 globalClipboardManager.clear()
                 refresh()
             }

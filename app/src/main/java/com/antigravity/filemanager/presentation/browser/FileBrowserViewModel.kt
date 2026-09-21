@@ -1027,13 +1027,18 @@ class FileBrowserViewModel @Inject constructor(
                     operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
                 )
             ) }
-            fileOperationsUseCase.delete(paths, moveToRecycleBin) { currentName, currentIndex, total ->
+            val deleteResult = fileOperationsUseCase.delete(paths, moveToRecycleBin) { currentName, currentIndex, total ->
                 _uiState.update { old -> old.copy(
                     downloadProgress = CloudTransferProgress.forItemCount(
                         currentName, currentIndex, total, isUpload = false,
                         operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
                     )
                 ) }
+            }
+            val deletedCount = deleteResult.getOrNull()
+            if (deletedCount == null || deletedCount < paths.size) {
+                _uiState.update { old -> old.copy(toastMessage = deleteResult.exceptionOrNull()?.let { "Delete failed: ${it.message}" }
+                    ?: "$deletedCount of ${paths.size} item(s) deleted") }
             }
             _uiState.update { old -> old.copy(
                 downloadProgress = null,
@@ -1104,6 +1109,8 @@ class FileBrowserViewModel @Inject constructor(
                             percent = p
                         )
                     ) }
+                }.onFailure { e ->
+                    _uiState.update { old -> old.copy(toastMessage = "Compress failed: ${e.message}") }
                 }
             } finally {
                 withContext(NonCancellable) {
