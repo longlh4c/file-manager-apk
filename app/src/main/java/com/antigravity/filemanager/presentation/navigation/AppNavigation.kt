@@ -151,7 +151,7 @@ fun AppNavigation(
     val createOpenFileHandler: (NavHostController) -> (FileItem, FileSortOption, String?) -> Unit = { controller ->
         { file, sortOption, cloudAccountId ->
             val ext = file.extension.lowercase()
-            val isStreamUrl = file.path.startsWith("http://") || file.path.startsWith("https://")
+            val isStreamUrl = com.antigravity.filemanager.presentation.viewers.CloudMediaDataSources.isStreamPath(file.path)
             val parent = if (isStreamUrl) "" else File(file.path).parentFile?.absolutePath ?: ""
             when (ext) {
                 "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng" -> {

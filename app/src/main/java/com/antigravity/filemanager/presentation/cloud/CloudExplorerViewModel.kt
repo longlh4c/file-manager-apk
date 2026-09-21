@@ -923,6 +923,16 @@ class CloudExplorerViewModel @Inject constructor(
             if (source != null) {
                 com.antigravity.filemanager.presentation.viewers.CloudStreamHeaders.put(source.url, source.headers)
                 onReadyToOpen(file.copy(path = source.url))
+                return@launch
+            }
+            // MEGA video: no plain URL (encrypted), but ranges can be fetched and decrypted on
+            // demand. Falls through to the download-then-open flow for any other provider/format.
+            val videoSource = if (com.antigravity.filemanager.presentation.viewers.CloudMediaDataSources.isStreamableVideo(file.extension)) {
+                cloudUseCase.openVideoDataSource(accountId, file.id).getOrNull()
+            } else null
+            if (videoSource != null) {
+                val url = com.antigravity.filemanager.presentation.viewers.CloudMediaDataSources.register(accountId, file.id, videoSource)
+                onReadyToOpen(file.copy(path = url))
             } else {
                 openFile(file, onReadyToOpen)
             }
