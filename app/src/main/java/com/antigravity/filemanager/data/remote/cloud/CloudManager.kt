@@ -507,6 +507,7 @@ class CloudManager @Inject constructor(
     //region Folder & item mutations (create / delete / restore / rename / move)
     suspend fun createFolder(account: CloudAccount, folderName: String, parentPath: String): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
+            com.antigravity.filemanager.data.local.storage.invalidFileNameReason(folderName)?.let { return@withContext Result.failure(java.io.IOException(it)) }
             val itemPath = childDisplayPath(parentPath, folderName)
             // A failure here must be reported, not swallowed — callers (e.g. a recursive
             // cloud-to-cloud folder copy) rely on the folder actually existing server-side before
@@ -641,6 +642,7 @@ class CloudManager @Inject constructor(
     }
 
     suspend fun renameItem(account: CloudAccount, remotePath: String, newName: String): Result<FileItem> = withContext(Dispatchers.IO) {
+        com.antigravity.filemanager.data.local.storage.invalidFileNameReason(newName)?.let { return@withContext Result.failure(java.io.IOException(it)) }
         when (account.provider) {
             CloudProvider.DROPBOX -> dropboxApi.renameFile(account, remotePath, newName).also { dropboxApi.invalidateTree(account.id) }
             CloudProvider.GOOGLE_DRIVE -> {

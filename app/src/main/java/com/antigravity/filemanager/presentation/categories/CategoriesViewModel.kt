@@ -477,7 +477,8 @@ class CategoriesViewModel @Inject constructor(
     fun createFolder(name: String) {
         val currentDir = _uiState.value.currentSubfolderPath ?: return
         viewModelScope.launch {
-            fileOperationsUseCase.createFolder(currentDir, name)
+            val result = fileOperationsUseCase.createFolder(currentDir, name)
+            result.exceptionOrNull()?.let { e -> _uiState.update { old -> old.copy(toastMessage = e.message ?: "Could not create folder") } }
             // getCategorySubfolder's reconcile-once cache doesn't know anything changed on its
             // own — without this, openSubfolder() below just re-painted the same
             // already-"reconciled" cached list, and the new folder never appeared until something
@@ -958,8 +959,8 @@ class CategoriesViewModel @Inject constructor(
     fun renameFile(newName: String) {
         val item = _uiState.value.itemForRename ?: return
         viewModelScope.launch {
-            fileOperationsUseCase.rename(item.path, newName)
-            _uiState.update { old -> old.copy(showRenameDialog = false, itemForRename = null) }
+            val result = fileOperationsUseCase.rename(item.path, newName)
+            _uiState.update { old -> old.copy(showRenameDialog = false, itemForRename = null, toastMessage = result.exceptionOrNull()?.let { it.message ?: "Rename failed" }) }
             val folderPath = _uiState.value.currentSubfolderPath
             if (folderPath != null) {
                 openSubfolder(folderPath, _uiState.value.currentSubfolderName)

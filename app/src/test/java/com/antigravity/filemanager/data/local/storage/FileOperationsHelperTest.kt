@@ -120,6 +120,37 @@ class FileOperationsHelperTest {
     }
 
     @Test
+    fun renameOntoExistingNameIsRejectedAndKeepsBothFiles() = runBlocking {
+        val a = File(root, "a.txt").apply { writeText("A") }
+        val b = File(root, "b.txt").apply { writeText("B") }
+
+        val result = helper.rename(a.absolutePath, "b.txt")
+
+        assertTrue(result.isFailure)
+        assertEquals("A", a.readText())
+        assertEquals("B", b.readText())
+    }
+
+    @Test
+    fun renameRejectsInvalidNames() = runBlocking {
+        val a = File(root, "a.txt").apply { writeText("A") }
+        for (bad in listOf("", "  ", ".", "..", "x/y")) {
+            assertTrue("'$bad'", helper.rename(a.absolutePath, bad).isFailure)
+        }
+        assertTrue(a.exists())
+        assertTrue(helper.rename(a.absolutePath, "renamed.txt").isSuccess)
+        assertEquals("A", File(root, "renamed.txt").readText())
+    }
+
+    @Test
+    fun createDirectoryFailsWhenAFileHasThatName() = runBlocking {
+        File(root, "taken").writeText("file")
+        assertTrue(helper.createDirectory(root.absolutePath, "taken").isFailure)
+        assertTrue(helper.createDirectory(root.absolutePath, "a/b").isFailure)
+        assertTrue(helper.createDirectory(root.absolutePath, "fresh").isSuccess)
+    }
+
+    @Test
     fun uniqueFileAppendsCounterBeforeExtension() {
         File(root, "x.tar.gz").writeText("")
         File(root, "x.tar (1).gz").writeText("")

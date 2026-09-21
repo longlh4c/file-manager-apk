@@ -987,8 +987,8 @@ class FileBrowserViewModel @Inject constructor(
 
     fun createFolder(name: String) {
         viewModelScope.launch {
-            fileOperationsUseCase.createFolder(_uiState.value.currentPath, name)
-            _uiState.update { old -> old.copy(showNewFolderDialog = false) }
+            val result = fileOperationsUseCase.createFolder(_uiState.value.currentPath, name)
+            _uiState.update { old -> old.copy(showNewFolderDialog = false, toastMessage = result.exceptionOrNull()?.let { it.message ?: "Could not create folder" }) }
             folderCacheManager.invalidateLocal(_uiState.value.currentPath)
             loadDirectory(_uiState.value.currentPath)
         }
@@ -997,8 +997,8 @@ class FileBrowserViewModel @Inject constructor(
     fun renameItem(newName: String) {
         viewModelScope.launch {
             val item = _uiState.value.itemToRename ?: return@launch
-            fileOperationsUseCase.rename(item.path, newName)
-            _uiState.update { old -> old.copy(showRenameDialog = false, itemToRename = null) }
+            val result = fileOperationsUseCase.rename(item.path, newName)
+            _uiState.update { old -> old.copy(showRenameDialog = false, itemToRename = null, toastMessage = result.exceptionOrNull()?.let { it.message ?: "Rename failed" }) }
             folderCacheManager.invalidateLocal(_uiState.value.currentPath)
             loadDirectory(_uiState.value.currentPath)
         }

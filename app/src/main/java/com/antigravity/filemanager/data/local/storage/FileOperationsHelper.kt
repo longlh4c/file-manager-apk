@@ -223,6 +223,19 @@ class FileOperationsHelper @Inject constructor(
         return candidatePath == ancestorPath || candidatePath.startsWith(ancestorPath + File.separator)
     }
 
+    private fun fileItemOf(file: File): FileItem {
+        val isDir = file.isDirectory
+        return FileItem(
+            id = file.absolutePath,
+            name = file.name,
+            path = file.absolutePath,
+            size = if (isDir) 0L else file.length(),
+            lastModified = file.lastModified(),
+            isDirectory = isDir,
+            extension = if (isDir) "" else file.extension
+        )
+    }
+
     private fun scanMedia(paths: List<String>) {
         if (paths.isEmpty()) return
         try {
@@ -234,23 +247,21 @@ class FileOperationsHelper @Inject constructor(
         try {
             val file = File(filePath)
             if (!file.exists()) return@withContext Result.failure(Exception("File does not exist"))
+            invalidFileNameReason(newName)?.let { return@withContext Result.failure(IOException(it)) }
 
             val dest = File(file.parentFile, newName)
+            if (newName == file.name) return@withContext Result.success(fileItemOf(file))
+            // renameTo() silently replaces an existing file on Android, so renaming onto a taken
+            // name destroyed the other file. Exact-name listing check: a case-only rename on the
+            // case-insensitive shared storage finds no separate entry and is still allowed.
+            if (file.parentFile?.list()?.contains(newName) == true) {
+                return@withContext Result.failure(IOException("\"$newName\" already exists"))
+            }
             if (file.renameTo(dest)) {
                 try {
                     android.media.MediaScannerConnection.scanFile(context, arrayOf(filePath, dest.absolutePath), null, null)
                 } catch (e: Exception) {}
-                val isDir = dest.isDirectory
-                val item = FileItem(
-                    id = dest.absolutePath,
-                    name = dest.name,
-                    path = dest.absolutePath,
-                    size = if (isDir) 0L else dest.length(),
-                    lastModified = dest.lastModified(),
-                    isDirectory = isDir,
-                    extension = if (isDir) "" else dest.extension
-                )
-                Result.success(item)
+                Result.success(fileItemOf(dest))
             } else {
                 Result.failure(Exception("Could not rename file"))
             }
@@ -261,7 +272,11 @@ class FileOperationsHelper @Inject constructor(
 
     suspend fun createDirectory(parentPath: String, name: String): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
+            invalidFileNameReason(name)?.let { return@withContext Result.failure(IOException(it)) }
             val dir = File(parentPath, name)
+            if (dir.exists() && !dir.isDirectory) {
+                return@withContext Result.failure(IOException("A file named \"$name\" already exists"))
+            }
             if (dir.exists() || dir.mkdirs()) {
                 val item = FileItem(
                     id = dir.absolutePath,

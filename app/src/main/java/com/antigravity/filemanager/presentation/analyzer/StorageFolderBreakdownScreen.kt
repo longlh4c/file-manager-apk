@@ -40,6 +40,13 @@ fun StorageFolderBreakdownScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
+    LaunchedEffect(uiState.toastMessage) {
+        uiState.toastMessage?.let {
+            android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_SHORT).show()
+            viewModel.clearToast()
+        }
+    }
+
     var currentPath by remember { mutableStateOf(initialPath) }
     var pathHistory by remember { mutableStateOf(listOf(initialPath)) }
     var searchQuery by remember { mutableStateOf("") }

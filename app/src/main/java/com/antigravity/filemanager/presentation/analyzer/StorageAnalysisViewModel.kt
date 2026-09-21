@@ -53,7 +53,8 @@ data class StorageAnalysisUiState(
     val pendingPasswordArchive: String? = null,
     val passwordError: String? = null,
     val overwriteConflicts: List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList(),
-    val transferCancelledByUser: Boolean = false
+    val transferCancelledByUser: Boolean = false,
+    val toastMessage: String? = null
 )
 
 @HiltViewModel
@@ -73,6 +74,10 @@ class StorageAnalysisViewModel @Inject constructor(
         _uiState.update { old -> old.copy(isLoading = true) }
         loadData(isInitial = true)
         observeBookmarks()
+    }
+
+    fun clearToast() {
+        _uiState.update { old -> old.copy(toastMessage = null) }
     }
 
     fun cancelTransfer() {
@@ -126,7 +131,12 @@ class StorageAnalysisViewModel @Inject constructor(
             // (if any are in the current list), so only fast-path plain file renames — the
             // common case — and fall back to a full rescan for folders to stay correct.
             val isDirectory = File(path).isDirectory
-            fileOperationsUseCase.rename(path, newName)
+            val result = fileOperationsUseCase.rename(path, newName)
+            if (result.isFailure) {
+                // Used to patch the list as if the rename had happened even when it failed.
+                _uiState.update { old -> old.copy(toastMessage = result.exceptionOrNull()?.message ?: "Rename failed") }
+                return@launch
+            }
 
             if (isDirectory) {
                 loadDataInternal()

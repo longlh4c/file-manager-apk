@@ -1329,7 +1329,8 @@ class CloudExplorerViewModel @Inject constructor(
         if (folderName.isBlank()) return
         viewModelScope.launch {
             _uiState.update { old -> old.copy(isLoading = true) }
-            cloudUseCase.createFolder(accountId, folderName.trim(), _uiState.value.currentPath)
+            val result = cloudUseCase.createFolder(accountId, folderName.trim(), _uiState.value.currentPath)
+            result.exceptionOrNull()?.let { e -> _uiState.update { old -> old.copy(toastMessage = e.message ?: "Could not create folder") } }
             refresh()
         }
     }

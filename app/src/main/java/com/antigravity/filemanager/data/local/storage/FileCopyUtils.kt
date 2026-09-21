@@ -49,3 +49,12 @@ fun directorySize(dir: File): Long = try {
 } catch (e: Exception) {
     0L
 }
+
+/** Why [name] can't be used as a single file/folder name, or null when it's fine. */
+fun invalidFileNameReason(name: String): String? = when {
+    name.isBlank() -> "Name cannot be empty"
+    name == "." || name == ".." -> "\"$name\" is not a valid name"
+    name.contains('/') || name.contains(0.toChar()) -> "Name cannot contain \"/\""
+    name.toByteArray().size > 255 -> "Name is too long"
+    else -> null
+}
