@@ -959,10 +959,10 @@ class CloudRepositoryImpl @Inject constructor(
         cloudManager.downloadFilePartial(account, nodeId, localTargetFile, maxBytes)
     }
 
-    override suspend fun openCloudThumbnailDataSource(accountId: String, nodeId: String): Result<android.media.MediaDataSource> = withContext(Dispatchers.IO) {
+    override suspend fun openCloudThumbnailDataSource(accountId: String, nodeId: String, forPlayback: Boolean): Result<android.media.MediaDataSource> = withContext(Dispatchers.IO) {
         val account = database.cloudDao().getById(accountId)?.toDomain()
             ?: return@withContext Result.failure(Exception("Account not found"))
-        cloudManager.openThumbnailDataSource(account, nodeId)
+        cloudManager.openThumbnailDataSource(account, nodeId, forPlayback)
     }
 
     override suspend fun getCloudStreamableLink(accountId: String, remotePath: String): Result<String> = withContext(Dispatchers.IO) {

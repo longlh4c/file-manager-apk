@@ -76,6 +76,15 @@ class CloudMediaViewerViewModel @Inject constructor(
             }
         }
 
+        if (allowStreaming && CloudMediaDataSources.isStreamableVideo(file.extension)) {
+            // MEGA (client-side encrypted) can't give out a plain URL, but its ranges can be
+            // fetched and decrypted on demand. Other providers fail here and simply download.
+            val dataSource = cloudUseCase.openVideoDataSource(accountId, file.id).getOrNull()
+            if (dataSource != null) {
+                return@withContext Result.success(ResolvedMedia.Stream(CloudMediaDataSources.register(accountId, file.id, dataSource)))
+            }
+        }
+
         // notifyTransfer=false — the viewer has its own loading UI for "fetching this file to
         // preview it"; routing it through TransferGuard too meant this could also pop the global
         // "Downloading from Cloud" notification/modal on whatever *other* Cloud screen happened

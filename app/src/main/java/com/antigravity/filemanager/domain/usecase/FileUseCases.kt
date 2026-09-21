@@ -744,6 +744,10 @@ class CloudStorageUseCase @Inject constructor(
     suspend fun openThumbnailDataSource(accountId: String, nodeId: String): Result<android.media.MediaDataSource> =
         cloudRepository.openCloudThumbnailDataSource(accountId, nodeId)
 
+    /** MEGA-only: same on-demand decrypting source, tuned for sequential video playback. */
+    suspend fun openVideoDataSource(accountId: String, nodeId: String): Result<android.media.MediaDataSource> =
+        cloudRepository.openCloudThumbnailDataSource(accountId, nodeId, forPlayback = true)
+
     /** Fallback for [openThumbnailDataSource] — see [CloudManager.downloadFilePartial]. */
     suspend fun downloadFilePartial(accountId: String, nodeId: String, localTargetFile: java.io.File, maxBytes: Long): Result<java.io.File> =
         cloudRepository.downloadCloudFilePartial(accountId, nodeId, localTargetFile, maxBytes)

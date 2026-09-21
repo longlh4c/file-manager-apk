@@ -63,7 +63,7 @@ import java.util.Locale
  * [CloudStreamHeaders] — the request then goes out without its credentials.
  */
 private fun decodeViewerPathArg(arg: String): String =
-    if (arg.startsWith("http://") || arg.startsWith("https://")) arg else Uri.decode(arg)
+    if (CloudMediaDataSources.isStreamPath(arg)) arg else Uri.decode(arg)
 
 private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng")
 private val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v")
@@ -592,9 +592,7 @@ fun VideoPlayerScreen(
     // A tapped Dropbox video may already be a pre-signed streamable https URL (see
     // CloudExplorerViewModel.openVideoStream) rather than a downloaded local file — play it
     // directly instead of treating it as a filesystem path.
-    val isInitialStream = remember(actualInitialPath) {
-        actualInitialPath.startsWith("http://") || actualInitialPath.startsWith("https://")
-    }
+    val isInitialStream = remember(actualInitialPath) { CloudMediaDataSources.isStreamPath(actualInitialPath) }
     val initialDisplayName = remember(actualInitialPath, actualFileName) {
         if (isInitialStream && actualFileName.isNotEmpty()) actualFileName else File(actualInitialPath).name
     }
@@ -856,7 +854,16 @@ fun VideoPlayerScreen(
                     val exoPlayer = remember(playbackUri) {
                         val headers = CloudStreamHeaders.get(playbackUri.toString())
                         val player = ExoPlayer.Builder(context).build()
-                        if (headers.isEmpty()) {
+                        val decryptingSource = CloudMediaDataSources.get(playbackUri.toString())
+                        if (decryptingSource != null) {
+                            // MEGA: ExoPlayer reads through the on-demand decrypting source.
+                            val dataSourceFactory = androidx.media3.datasource.DataSource.Factory {
+                                MediaDataSourceDataSource(decryptingSource, playbackUri)
+                            }
+                            val mediaSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(dataSourceFactory)
+                                .createMediaSource(MediaItem.fromUri(playbackUri))
+                            player.setMediaSource(mediaSource)
+                        } else if (headers.isEmpty()) {
                             player.setMediaItem(MediaItem.fromUri(playbackUri))
                         } else {
                             val dataSourceFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()

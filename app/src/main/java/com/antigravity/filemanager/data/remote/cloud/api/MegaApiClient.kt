@@ -823,7 +823,11 @@ class MegaApiClient @Inject constructor(
      * usually only touches a small header region plus one keyframe — tens/hundreds of KB, not a
      * flat multi-MB block.
      */
-    suspend fun openThumbnailDataSource(account: CloudAccount, nodeHandle: String): Result<android.media.MediaDataSource> =
+    suspend fun openThumbnailDataSource(
+        account: CloudAccount,
+        nodeHandle: String,
+        fetchWindowBytes: Long = MegaDecryptingDataSource.DEFAULT_FETCH_WINDOW
+    ): Result<android.media.MediaDataSource> =
         withContext(Dispatchers.IO) {
             try {
                 val sid = resolveSid(account)
@@ -860,7 +864,7 @@ class MegaApiClient @Inject constructor(
                 val (aesKey, nonce) = deriveNodeContentKeyAndNonce(node.keyStr, masterKey)
                     ?: return@withContext Result.failure(Exception("Could not resolve a decryption key for node $nodeHandle"))
 
-                Result.success(MegaDecryptingDataSource(downloadUrl, aesKey, nonce, totalSize, okHttpClient))
+                Result.success(MegaDecryptingDataSource(downloadUrl, aesKey, nonce, totalSize, okHttpClient, fetchWindowBytes))
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 Result.failure(e)
@@ -1925,7 +1929,8 @@ class MegaDecryptingDataSource(
     private val aesKey: ByteArray,
     private val nonce: ByteArray,
     private val totalSize: Long,
-    private val okHttpClient: OkHttpClient
+    private val okHttpClient: OkHttpClient,
+    private val fetchWindow: Long = DEFAULT_FETCH_WINDOW
 ) : android.media.MediaDataSource() {
 
     // Single-slot window cache: MediaMetadataRetriever tends to re-read overlapping/nearby
@@ -1952,9 +1957,9 @@ class MegaDecryptingDataSource(
         }
 
         val alignedStart = (position / 16) * 16
-        // Fetch a slightly bigger window than requested (min 256KB) so nearby follow-up reads
-        // hit the cache instead of firing another round-trip each time.
-        val fetchEnd = minOf(maxOf(alignedStart + MIN_FETCH_WINDOW, wantEnd), totalSize)
+        // Fetch a slightly bigger window than requested (at least [fetchWindow]) so nearby
+        // follow-up reads hit the cache instead of firing another round-trip each time.
+        val fetchEnd = minOf(maxOf(alignedStart + fetchWindow, wantEnd), totalSize)
         val rangeEndInclusive = minOf(((fetchEnd + 15) / 16) * 16 - 1, totalSize - 1)
 
         val plain = try {
@@ -1998,6 +2003,9 @@ class MegaDecryptingDataSource(
     }
 
     companion object {
-        private const val MIN_FETCH_WINDOW = 256L * 1024
+        /** Small windows suit probing for a thumbnail frame (a few scattered reads). */
+        const val DEFAULT_FETCH_WINDOW = 256L * 1024
+        /** Playback reads sequentially, so fewer, larger requests keep up with the bitrate. */
+        const val PLAYBACK_FETCH_WINDOW = 2L * 1024 * 1024
     }
 }

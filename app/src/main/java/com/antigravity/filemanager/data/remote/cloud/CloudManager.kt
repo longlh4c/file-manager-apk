@@ -4,6 +4,7 @@ import android.content.Context
 import com.antigravity.filemanager.data.remote.cloud.api.DropboxApiClient
 import com.antigravity.filemanager.data.remote.cloud.api.GoogleDriveApiClient
 import com.antigravity.filemanager.data.remote.cloud.api.MegaApiClient
+import com.antigravity.filemanager.data.remote.cloud.api.MegaDecryptingDataSource
 import com.antigravity.filemanager.data.remote.cloud.api.TeraBoxApiClient
 import com.antigravity.filemanager.domain.model.CloudAccount
 import com.antigravity.filemanager.domain.model.CloudProvider
@@ -482,14 +483,19 @@ class CloudManager @Inject constructor(
 
     /**
      * MEGA-only: an on-demand decrypting [android.media.MediaDataSource] that fetches just the
-     * byte ranges a reader (MediaMetadataRetriever, for thumbnail extraction) actually requests,
-     * instead of eagerly downloading a fixed-size prefix. See
+     * byte ranges a reader (MediaMetadataRetriever for thumbnail extraction, or ExoPlayer via
+     * MediaDataSourceDataSource when [forPlayback]) actually requests, instead of eagerly
+     * downloading a fixed-size prefix. See
      * [com.antigravity.filemanager.data.remote.cloud.api.MegaApiClient.openThumbnailDataSource].
      */
-    suspend fun openThumbnailDataSource(account: CloudAccount, nodeId: String): Result<android.media.MediaDataSource> =
+    suspend fun openThumbnailDataSource(account: CloudAccount, nodeId: String, forPlayback: Boolean = false): Result<android.media.MediaDataSource> =
         withContext(Dispatchers.IO) {
             when (account.provider) {
-                CloudProvider.MEGA -> megaApi.openThumbnailDataSource(account, nodeId)
+                CloudProvider.MEGA -> megaApi.openThumbnailDataSource(
+                    account,
+                    nodeId,
+                    if (forPlayback) MegaDecryptingDataSource.PLAYBACK_FETCH_WINDOW else MegaDecryptingDataSource.DEFAULT_FETCH_WINDOW
+                )
                 CloudProvider.DROPBOX, CloudProvider.GOOGLE_DRIVE, CloudProvider.TERABOX ->
                     Result.failure(Exception("On-demand thumbnail data source not supported for ${account.provider}"))
             }
