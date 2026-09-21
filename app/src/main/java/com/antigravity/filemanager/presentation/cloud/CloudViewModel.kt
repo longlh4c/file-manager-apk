@@ -60,13 +60,19 @@ class CloudViewModel @Inject constructor(
                                 cloudUseCase.addAccount(account.copy(email = realEmail))
                             }
                         }
-                    } else if (account.provider == CloudProvider.TERABOX && (account.email.startsWith("user@") || account.email.startsWith("account@") || account.email.isBlank() || account.email == "terabox_user")) {
+                    } else if (account.provider == CloudProvider.TERABOX && (account.email.startsWith("user@") || account.email.startsWith("account@") || account.email.isBlank() || account.email == "terabox_user" || account.email == "TeraBox User")) {
                         launch(kotlinx.coroutines.Dispatchers.IO) {
-                            val ndus = account.accessToken ?: account.sessionHandle ?: ""
-                            val userInfoRes = teraBoxApiClient.getUserInfo(ndus)
+                            val rawCookie = account.sessionHandle.takeIf { !it.isNullOrBlank() } ?: account.accessToken ?: ""
+                            val userInfoRes = teraBoxApiClient.getUserInfo(rawCookie)
                             val uInfo = userInfoRes.getOrNull()
                             if (uInfo != null) {
-                                val displayEmail = if (!uInfo.email.isNullOrBlank()) uInfo.email else uInfo.uname
+                                val displayEmail = if (!uInfo.email.isNullOrBlank()) {
+                                    uInfo.email
+                                } else if (!uInfo.uname.isNullOrBlank() && uInfo.uname != "TeraBox User") {
+                                    uInfo.uname
+                                } else {
+                                    null
+                                }
                                 if (!displayEmail.isNullOrBlank() && displayEmail != account.email) {
                                     cloudUseCase.addAccount(account.copy(email = displayEmail))
                                 }
@@ -189,12 +195,12 @@ class CloudViewModel @Inject constructor(
                 val uInfo = userInfoRes.getOrNull()
                 val resolvedEmail = if (!uInfo?.email.isNullOrBlank()) {
                     uInfo!!.email!!
-                } else if (!uInfo?.uname.isNullOrBlank()) {
+                } else if (!uInfo?.uname.isNullOrBlank() && uInfo!!.uname != "TeraBox User") {
                     uInfo!!.uname
-                } else if (email.isNotBlank() && !email.startsWith("account@") && email != "terabox_user") {
+                } else if (email.isNotBlank() && !email.startsWith("account@") && email != "terabox_user" && email != "TeraBox User") {
                     email
                 } else {
-                    "terabox_user"
+                    uInfo?.uname?.takeIf { it.isNotBlank() } ?: "terabox_user"
                 }
 
                 val newAccount = CloudAccount(

@@ -178,25 +178,92 @@ class TeraBoxApiClient @Inject constructor(
 
     suspend fun getUserInfo(cookie: String): Result<TeraBoxUserInfo> = withContext(Dispatchers.IO) {
         try {
-            val (response, body) = executeWithRetry("/api/user/getinfo", cookie)
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
+            // First check if cookie itself has username/email
+            var cookieUname: String? = null
+            var cookieEmail: String? = null
+            val cookiePairs = cookie.split(";")
+            for (p in cookiePairs) {
+                val pair = p.trim()
+                val eqIdx = pair.indexOf('=')
+                if (eqIdx > 0) {
+                    val k = pair.substring(0, eqIdx).trim()
+                    val v = try {
+                        java.net.URLDecoder.decode(pair.substring(eqIdx + 1).trim(), "UTF-8")
+                    } catch (_: Exception) {
+                        pair.substring(eqIdx + 1).trim()
+                    }
+                    if (k.equals("passport_uname", ignoreCase = true) ||
+                        k.equals("show_name", ignoreCase = true) ||
+                        k.equals("PANWEB_UNAME", ignoreCase = true) ||
+                        k.equals("TERABOX_UNAME", ignoreCase = true)
+                    ) {
+                        if (v.isNotBlank() && cookieUname == null) cookieUname = v
+                    }
+                    if (k.equals("email", ignoreCase = true) || k.equals("login_email", ignoreCase = true) || (v.contains("@") && v.length < 50)) {
+                        if (cookieEmail == null && v.contains("@")) cookieEmail = v
+                    }
+                }
             }
-            val json = JSONObject(body)
-            val errno = json.optInt("errno", -1)
-            if (errno != 0) {
-                return@withContext Result.failure(IOException("TeraBox API error (errno: $errno)"))
+
+            var (response, body) = executeWithRetry("/api/user/getinfo", cookie)
+            var json = if (response.isSuccessful && body.isNotBlank()) {
+                try { JSONObject(body) } catch (_: Exception) { null }
+            } else null
+            var errno = json?.optInt("errno", -1) ?: -1
+
+            // Fallback 1: /rest/2.0/xpan/nas?method=uinfo
+            if (json == null || errno != 0) {
+                val (fbResp, fbBody) = executeWithRetry("/rest/2.0/xpan/nas?method=uinfo", cookie)
+                if (fbResp.isSuccessful && fbBody.isNotBlank()) {
+                    val fbJson = try { JSONObject(fbBody) } catch (_: Exception) { null }
+                    if (fbJson != null && fbJson.optInt("errno", -1) == 0) {
+                        json = fbJson
+                        errno = 0
+                    }
+                }
             }
-            val records = json.optJSONArray("records")
-            if (records != null && records.length() > 0) {
-                val record = records.getJSONObject(0)
-                val uname = record.optString("uname", "TeraBox User")
-                val uk = record.optString("uk", "")
-                val avatar = record.optString("avatar_url", "")
-                val email = record.optString("email", "").takeIf { it.isNotBlank() }
+
+            // Fallback 2: /openapi/uinfo
+            if (json == null || errno != 0) {
+                val (fbResp2, fbBody2) = executeWithRetry("/openapi/uinfo", cookie)
+                if (fbResp2.isSuccessful && fbBody2.isNotBlank()) {
+                    val fbJson2 = try { JSONObject(fbBody2) } catch (_: Exception) { null }
+                    if (fbJson2 != null && fbJson2.optInt("errno", -1) == 0) {
+                        json = fbJson2
+                        errno = 0
+                    }
+                }
+            }
+
+            if (json != null && errno == 0) {
+                val records = json.optJSONArray("records")
+                val record = if (records != null && records.length() > 0) records.getJSONObject(0) else null
+
+                val uname = record?.optString("uname")?.takeIf { it.isNotBlank() }
+                    ?: json.optString("username").takeIf { it.isNotBlank() }
+                    ?: json.optString("uname").takeIf { it.isNotBlank() }
+                    ?: json.optString("user_name").takeIf { it.isNotBlank() }
+                    ?: json.optString("nickname").takeIf { it.isNotBlank() }
+                    ?: json.optString("show_name").takeIf { it.isNotBlank() }
+                    ?: cookieUname
+                    ?: "TeraBox User"
+
+                val uk = record?.optString("uk")?.takeIf { it.isNotBlank() }
+                    ?: json.optString("uk", "")
+
+                val avatar = record?.optString("avatar_url")?.takeIf { it.isNotBlank() }
+                    ?: json.optString("avatar_url", "")
+
+                val email = record?.optString("email")?.takeIf { it.isNotBlank() }
+                    ?: json.optString("email").takeIf { it.isNotBlank() }
+                    ?: json.optString("mail").takeIf { it.isNotBlank() }
+                    ?: cookieEmail
+
                 Result.success(TeraBoxUserInfo(uname = uname, uk = uk, avatarUrl = avatar, email = email))
+            } else if (!cookieUname.isNullOrBlank() || !cookieEmail.isNullOrBlank()) {
+                Result.success(TeraBoxUserInfo(uname = cookieUname ?: (cookieEmail ?: "TeraBox User"), uk = "", email = cookieEmail))
             } else {
-                Result.success(TeraBoxUserInfo(uname = "TeraBox User", uk = "", email = null))
+                Result.failure(IOException("TeraBox API error (errno: $errno)"))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -237,7 +304,7 @@ class TeraBoxApiClient @Inject constructor(
             }
 
             val encodedDir = URLEncoder.encode(cleanPath, "UTF-8")
-            val pathWithQuery = "/api/list?dir=$encodedDir&order=name&desc=0&num=1000&page=1&showempty=0"
+            val pathWithQuery = "/api/list?web=1&clienttype=0&app_id=250528&channel=dubox&dir=$encodedDir&order=name&desc=0&num=1000&page=1&showempty=0"
             val (response, body) = executeWithRetry(pathWithQuery, cookie)
             if (!response.isSuccessful) {
                 return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
@@ -265,11 +332,15 @@ class TeraBoxApiClient @Inject constructor(
                 val mtimeSec = item.optLong("server_mtime", 0L)
                 val lastModified = if (mtimeSec > 0) mtimeSec * 1000L else System.currentTimeMillis()
                 val fsId = item.opt("fs_id")?.toString() ?: filePath
-                val thumbsObj = item.optJSONObject("thumbs")
-                val thumbUrl = thumbsObj?.optString("url3")?.takeIf { it.isNotBlank() }
+                val thumbsObj = item.optJSONObject("thumbs") ?: (try { JSONObject(item.optString("thumbs")) } catch (_: Exception) { null })
+                val rawThumb = thumbsObj?.optString("url3")?.takeIf { it.isNotBlank() }
                     ?: thumbsObj?.optString("url2")?.takeIf { it.isNotBlank() }
                     ?: thumbsObj?.optString("url1")?.takeIf { it.isNotBlank() }
                     ?: thumbsObj?.optString("icon")?.takeIf { it.isNotBlank() }
+                    ?: item.optString("thumb").takeIf { it.isNotBlank() }
+                    ?: item.optString("thumbnail").takeIf { it.isNotBlank() }
+
+                val thumbUrl = rawThumb?.replace("\\/", "/")?.replace("&amp;", "&")
 
                 if (!thumbUrl.isNullOrBlank()) {
                     thumbnailUrls["${account.id}:$fsId"] = thumbUrl
@@ -501,6 +572,60 @@ class TeraBoxApiClient @Inject constructor(
         }
     }
 
+    private fun fetchThumbnailBytes(url: String, cookieHeader: String): ByteArray? {
+        val finalCookie = buildCookieHeader(cookieHeader)
+        val referers = listOf(
+            "https://www.terabox.com/",
+            "https://www.terabox.app/",
+            "https://terabox.com/",
+            "https://www.terabox.com/main",
+            ""
+        )
+
+        // Custom client that preserves Cookie header across cross-domain redirects
+        val customClient = okHttpClient.newBuilder()
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .addNetworkInterceptor { chain ->
+                val original = chain.request()
+                val reqBuilder = original.newBuilder()
+                if (finalCookie.isNotBlank() && original.header("Cookie") == null) {
+                    reqBuilder.addHeader("Cookie", finalCookie)
+                }
+                chain.proceed(reqBuilder.build())
+            }
+            .build()
+
+        for (ref in referers) {
+            try {
+                val reqBuilder = Request.Builder()
+                    .url(url)
+                    .addHeader("User-Agent", USER_AGENT)
+                    .addHeader("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+
+                if (ref.isNotBlank()) {
+                    reqBuilder.addHeader("Referer", ref)
+                }
+                if (finalCookie.isNotBlank()) {
+                    reqBuilder.addHeader("Cookie", finalCookie)
+                }
+
+                val resp = customClient.newCall(reqBuilder.build()).execute()
+                if (resp.isSuccessful) {
+                    val bytes = resp.body?.bytes()
+                    if (bytes != null && bytes.isNotEmpty()) {
+                        return bytes
+                    }
+                } else {
+                    android.util.Log.w("TeraBoxApiClient", "Thumbnail fetch with ref='$ref' returned HTTP ${resp.code}")
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("TeraBoxApiClient", "Thumbnail fetch exception with ref='$ref': ${e.message}")
+            }
+        }
+        return null
+    }
+
     suspend fun downloadThumbnail(account: CloudAccount, nodeIdOrPath: String): Result<ByteArray> = withContext(Dispatchers.IO) {
         try {
             val cookie = getCookieString(account)
@@ -512,27 +637,44 @@ class TeraBoxApiClient @Inject constructor(
                 ?: thumbnailUrls[nodeIdOrPath]
                 ?: if (nodeIdOrPath.startsWith("http://") || nodeIdOrPath.startsWith("https://")) nodeIdOrPath else null
 
-            // Fallback: If not cached, try querying metadata via /api/filemetas
+            // Fallback: If not cached, try querying metadata via /api/filemetas or /openapi/api/filemetas
             if (thumbUrl.isNullOrBlank()) {
                 val queryParam = if (nodeIdOrPath.startsWith("/")) {
                     val encoded = URLEncoder.encode("[\"$nodeIdOrPath\"]", "UTF-8")
                     "target=$encoded&dlink=0"
                 } else {
-                    "fsids=[$nodeIdOrPath]&dlink=0"
+                    val encoded = URLEncoder.encode("[$nodeIdOrPath]", "UTF-8")
+                    "fsids=$encoded&dlink=0"
                 }
-                val (resp, body) = executeWithRetry("/api/filemetas?$queryParam", cookie)
-                if (resp.isSuccessful) {
-                    val json = JSONObject(body)
-                    val info = json.optJSONArray("info")
+
+                var metaResp = executeWithRetry("/api/filemetas?$queryParam", cookie)
+                var metaJson = if (metaResp.first.isSuccessful && metaResp.second.isNotBlank()) {
+                    try { JSONObject(metaResp.second) } catch (_: Exception) { null }
+                } else null
+
+                if (metaJson == null || metaJson.optInt("errno", -1) != 0) {
+                    val fbResp = executeWithRetry("/openapi/api/filemetas?$queryParam", cookie)
+                    if (fbResp.first.isSuccessful && fbResp.second.isNotBlank()) {
+                        metaJson = try { JSONObject(fbResp.second) } catch (_: Exception) { null }
+                    }
+                }
+
+                if (metaJson != null) {
+                    val info = metaJson.optJSONArray("info") ?: metaJson.optJSONArray("list")
                     if (info != null && info.length() > 0) {
                         val meta = info.getJSONObject(0)
-                        val thumbsObj = meta.optJSONObject("thumbs")
-                        thumbUrl = thumbsObj?.optString("url3")?.takeIf { it.isNotBlank() }
+                        val thumbsObj = meta.optJSONObject("thumbs") ?: (try { JSONObject(meta.optString("thumbs")) } catch (_: Exception) { null })
+                        val rawThumb = thumbsObj?.optString("url3")?.takeIf { it.isNotBlank() }
                             ?: thumbsObj?.optString("url2")?.takeIf { it.isNotBlank() }
                             ?: thumbsObj?.optString("url1")?.takeIf { it.isNotBlank() }
                             ?: thumbsObj?.optString("icon")?.takeIf { it.isNotBlank() }
+                            ?: meta.optString("thumb").takeIf { it.isNotBlank() }
+                            ?: meta.optString("thumbnail").takeIf { it.isNotBlank() }
+
+                        thumbUrl = rawThumb?.replace("\\/", "/")?.replace("&amp;", "&")
                         if (!thumbUrl.isNullOrBlank()) {
                             thumbnailUrls["${account.id}:$nodeIdOrPath"] = thumbUrl
+                            thumbnailUrls[nodeIdOrPath] = thumbUrl
                         }
                     }
                 }
@@ -548,25 +690,9 @@ class TeraBoxApiClient @Inject constructor(
                 "${getBaseUrl()}$thumbUrl"
             }
 
-            val finalCookie = buildCookieHeader(cookie)
-            val builder = Request.Builder()
-                .url(finalUrl)
-                .addHeader("User-Agent", USER_AGENT)
-                .addHeader("Referer", REFERER)
-                .addHeader("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-
-            if (finalCookie.isNotBlank()) {
-                builder.addHeader("Cookie", finalCookie)
-            }
-
-            val response = okHttpClient.newCall(builder.get().build()).execute()
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(IOException("Thumbnail download failed: HTTP ${response.code}"))
-            }
-
-            val bytes = response.body?.bytes()
+            val bytes = fetchThumbnailBytes(finalUrl, cookie)
             if (bytes == null || bytes.isEmpty()) {
-                return@withContext Result.failure(IOException("Empty thumbnail body"))
+                return@withContext Result.failure(IOException("Failed to download thumbnail bytes for $nodeIdOrPath"))
             }
 
             Result.success(bytes)

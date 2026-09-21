@@ -166,4 +166,51 @@ class TeraBoxApiClientTest {
 
         assertEquals("https://data.terabox.com/thumb/1003_850x580.jpg", thumbUrl)
     }
+
+    @Test
+    fun testStringifiedThumbnailJsonParsing() {
+        val sampleListJson = """
+            {
+                "errno": 0,
+                "list": [
+                    {
+                        "fs_id": 1004,
+                        "server_filename": "photo2.jpg",
+                        "path": "/photo2.jpg",
+                        "size": 102400,
+                        "isdir": 0,
+                        "thumbs": "{\"url3\":\"https:\\/\\/data.terabox.com\\/thumb\\/1004_850x580.jpg\",\"url1\":\"https:\\/\\/data.terabox.com\\/thumb\\/1004_140x90.jpg\"}"
+                    }
+                ]
+            }
+        """.trimIndent()
+
+        val root = JSONObject(sampleListJson)
+        val arr = root.getJSONArray("list")
+        val item = arr.getJSONObject(0)
+        val thumbsObj = item.optJSONObject("thumbs") ?: (try { JSONObject(item.optString("thumbs")) } catch (_: Exception) { null })
+        val rawThumb = thumbsObj?.optString("url3")?.takeIf { it.isNotBlank() }
+        val thumbUrl = rawThumb?.replace("\\/", "/")?.replace("&amp;", "&")
+
+        assertEquals("https://data.terabox.com/thumb/1004_850x580.jpg", thumbUrl)
+    }
+
+    @Test
+    fun testUserInfoJsonParsingRootAndCookie() {
+        val jsonStr = """
+            {
+                "errno": 0,
+                "username": "my_terabox_name",
+                "email": "user@example.com",
+                "avatar_url": "https://data.terabox.com/avatar.jpg"
+            }
+        """.trimIndent()
+
+        val json = JSONObject(jsonStr)
+        val uname = json.optString("username").ifBlank { json.optString("uname") }
+        val email = json.optString("email")
+
+        assertEquals("my_terabox_name", uname)
+        assertEquals("user@example.com", email)
+    }
 }

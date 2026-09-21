@@ -276,7 +276,8 @@ class CloudExplorerViewModel @Inject constructor(
             val cached = folderCacheManager.getCloudFolder(accountId, path)
             var skipRevalidate = false
             if (cached != null && cached.files.isNotEmpty()) {
-                val sortedCached = sortCloudFiles(cached.files, _uiState.value.sortOption)
+                val cachedWithThumbs = applyLocalThumbnailCache(cached.files, accountId)
+                val sortedCached = sortCloudFiles(cachedWithThumbs, _uiState.value.sortOption)
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
                     account = cachedAccount,
@@ -577,8 +578,10 @@ class CloudExplorerViewModel @Inject constructor(
         return files.map { file ->
             if (!file.isDirectory && file.thumbnailUri == null) {
                 val safeId = file.id.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                val safePath = file.path.replace(Regex("[^A-Za-z0-9._-]"), "_")
                 val cachedThumb = File(thumbDir, "$safeId.jpg").takeIf { it.exists() && it.length() > 0 }
                     ?: File(thumbDir, "${file.id}.jpg").takeIf { it.exists() && it.length() > 0 }
+                    ?: File(thumbDir, "$safePath.jpg").takeIf { it.exists() && it.length() > 0 }
                 val local = File(targetDir, file.name)
                 val cachedLink = streamableLinkCache[file.id]
                 when {
@@ -718,14 +721,21 @@ class CloudExplorerViewModel @Inject constructor(
             // endpoint at all).
             if (hasFastThumbnailEndpoint) {
                 val safeId = item.id.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                val safePath = item.path.replace(Regex("[^A-Za-z0-9._-]"), "_")
                 val cachedThumb = File(thumbDir, "$safeId.jpg").takeIf { it.exists() && it.length() > 0 }
                     ?: File(thumbDir, "${item.id}.jpg").takeIf { it.exists() && it.length() > 0 }
+                    ?: File(thumbDir, "$safePath.jpg").takeIf { it.exists() && it.length() > 0 }
                     ?: File(thumbDir, "$safeId.jpg")
                 if (cachedThumb.exists() && cachedThumb.length() > 0) {
                     withContext(Dispatchers.Main) { updateThumbnailUriInState(item.id, cachedThumb.absolutePath) }
                     return
                 }
-                val thumbResult = cloudUseCase.downloadThumbnail(accountId, item.id)
+                val thumbTarget = if (provider == com.antigravity.filemanager.domain.model.CloudProvider.TERABOX && item.path.isNotBlank()) {
+                    item.path
+                } else {
+                    item.id
+                }
+                val thumbResult = cloudUseCase.downloadThumbnail(accountId, thumbTarget)
                 val thumbBytes = thumbResult.getOrNull()
                 if (thumbBytes != null && thumbBytes.isNotEmpty()) {
                     cachedThumb.writeBytes(thumbBytes)

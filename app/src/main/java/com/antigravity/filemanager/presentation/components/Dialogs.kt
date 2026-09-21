@@ -1040,10 +1040,6 @@ fun CloudLoginWebViewDialog(
                                                 Toast.makeText(context, "Please complete TeraBox login before tapping DONE.", Toast.LENGTH_SHORT).show()
                                                 return@Button
                                             }
-                                            val ndus = tbCookies.substringAfter("ndus=").substringBefore(";").trim()
-                                            hasRedirected = true
-                                            onAuthSuccess(CloudProvider.TERABOX, finalAccountName, detectedEmail.ifBlank { "terabox_user" }, ndus, tbCookies)
-                                            return@Button
                                         }
                                     }
 
@@ -1054,6 +1050,39 @@ fun CloudLoginWebViewDialog(
                                             try {
                                                 var sid = window.u_sid || (window.localStorage ? window.localStorage.getItem('sid') : '') || '';
                                                 var email = (window.M && window.M.account ? window.M.account.email : '') || '';
+                                                
+                                                if (window.yunData) {
+                                                    try {
+                                                        if (window.yunData.SHOWNAME) email = window.yunData.SHOWNAME;
+                                                        else if (window.yunData.MYNAME) email = window.yunData.MYNAME;
+                                                        else if (window.yunData.USERNAME) email = window.yunData.USERNAME;
+                                                        else if (window.yunData.EMAIL) email = window.yunData.EMAIL;
+                                                    } catch(e) {}
+                                                }
+                                                try {
+                                                    if (!email && window.localStorage) {
+                                                        for (var lki = 0; lki < window.localStorage.length; lki++) {
+                                                            var lk = window.localStorage.key(lki);
+                                                            var lv = window.localStorage.getItem(lk) || '';
+                                                            if (lk && (lk.indexOf('user') !== -1 || lk.indexOf('account') !== -1 || lk.indexOf('profile') !== -1)) {
+                                                                var lm = lv.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                                                                if (lm) { email = lm[0]; break; }
+                                                                try {
+                                                                    var lp = JSON.parse(lv);
+                                                                    var lc = lp.email || lp.mail || lp.user_name || lp.username || lp.uname || lp.nickname || lp.show_name;
+                                                                    if (lc && typeof lc === 'string' && lc.length < 50) { email = lc; break; }
+                                                                } catch(e){}
+                                                            }
+                                                        }
+                                                    }
+                                                } catch(e) {}
+                                                if (!email) {
+                                                    var tbEl = document.querySelector('[class*="userName"], [class*="username"], [class*="user-name"], [class*="account-name"], [class*="profile-name"], [class*="nickname"]');
+                                                    if (tbEl && tbEl.innerText) {
+                                                        var tbt = tbEl.innerText.trim();
+                                                        if (tbt && tbt.length < 50) email = tbt;
+                                                    }
+                                                }
                                                 
                                                 if (!email && window.Dropbox) {
                                                     if (window.Dropbox.accountData && window.Dropbox.accountData.email) email = window.Dropbox.accountData.email;
@@ -1199,6 +1228,46 @@ fun CloudLoginWebViewDialog(
                                                 currentCookies = "$currentCookies; uid=$uidVal"
                                             }
 
+                                            if (provider == CloudProvider.TERABOX) {
+                                                val c1 = cookieManager.getCookie("https://www.terabox.com") ?: ""
+                                                val c2 = cookieManager.getCookie("https://terabox.com") ?: ""
+                                                val tbCookies = if (c1.isNotBlank() && c2.isNotBlank() && c1 != c2) "$c1; $c2" else c1.ifBlank { c2 }
+                                                val ndus = if (tbCookies.contains("ndus=")) tbCookies.substringAfter("ndus=").substringBefore(";").trim() else ""
+
+                                                var resolvedEmail = json.optString("email").trim()
+                                                if (resolvedEmail.isBlank() || resolvedEmail == "null") {
+                                                    val cookiePairs = tbCookies.split(";")
+                                                    for (p in cookiePairs) {
+                                                        val pair = p.trim()
+                                                        val eqIdx = pair.indexOf('=')
+                                                        if (eqIdx > 0) {
+                                                            val k = pair.substring(0, eqIdx).trim()
+                                                            val v = try { java.net.URLDecoder.decode(pair.substring(eqIdx + 1).trim(), "UTF-8") } catch (_: Exception) { pair.substring(eqIdx + 1).trim() }
+                                                            if ((k.equals("passport_uname", true) || k.equals("show_name", true) || k.equals("PANWEB_UNAME", true) || k.equals("TERABOX_UNAME", true) || k.equals("user_name", true)) && v.isNotBlank()) {
+                                                                resolvedEmail = v
+                                                                break
+                                                            }
+                                                            if (k.equals("email", true) || k.equals("login_email", true)) {
+                                                                if (v.contains("@")) {
+                                                                    resolvedEmail = v
+                                                                    break
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                if (resolvedEmail.isBlank() || resolvedEmail == "null") {
+                                                    resolvedEmail = detectedEmail.ifBlank {
+                                                        if (initialEmail.isNotBlank()) initialEmail else "terabox_user"
+                                                    }
+                                                }
+
+                                                hasRedirected = true
+                                                onAuthSuccess(CloudProvider.TERABOX, finalAccountName, resolvedEmail, ndus, tbCookies)
+                                                return@evaluateJavascript
+                                            }
+
                                             var email = json.optString("email").trim()
                                             if (email.isBlank() || email.contains("dropbox.com-") || email.length > 45) {
                                                 email = detectedEmail.ifBlank {
@@ -1272,7 +1341,40 @@ fun CloudLoginWebViewDialog(
                                         try {
                                             var sid = window.u_sid || (window.localStorage ? window.localStorage.getItem('sid') : '') || '';
                                             var email = '';
-                                            // 0. MEGA specific properties
+                                            // 0. TeraBox specific properties
+                                            if (window.yunData) {
+                                                try {
+                                                    if (window.yunData.SHOWNAME) email = window.yunData.SHOWNAME;
+                                                    else if (window.yunData.MYNAME) email = window.yunData.MYNAME;
+                                                    else if (window.yunData.USERNAME) email = window.yunData.USERNAME;
+                                                    else if (window.yunData.EMAIL) email = window.yunData.EMAIL;
+                                                } catch(e) {}
+                                            }
+                                            try {
+                                                if (!email && window.localStorage) {
+                                                    for (var lki = 0; lki < window.localStorage.length; lki++) {
+                                                        var lk = window.localStorage.key(lki);
+                                                        var lv = window.localStorage.getItem(lk) || '';
+                                                        if (lk && (lk.indexOf('user') !== -1 || lk.indexOf('account') !== -1 || lk.indexOf('profile') !== -1)) {
+                                                            var lm = lv.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                                                            if (lm) { email = lm[0]; break; }
+                                                            try {
+                                                                var lp = JSON.parse(lv);
+                                                                var lc = lp.email || lp.mail || lp.user_name || lp.username || lp.uname || lp.nickname || lp.show_name;
+                                                                if (lc && typeof lc === 'string' && lc.length < 50) { email = lc; break; }
+                                                            } catch(e){}
+                                                        }
+                                                    }
+                                                }
+                                            } catch(e) {}
+                                            if (!email) {
+                                                var tbEl = document.querySelector('[class*="userName"], [class*="username"], [class*="user-name"], [class*="account-name"], [class*="profile-name"], [class*="nickname"]');
+                                                if (tbEl && tbEl.innerText) {
+                                                    var tbt = tbEl.innerText.trim();
+                                                    if (tbt && tbt.length < 50) email = tbt;
+                                                }
+                                            }
+                                            // MEGA specific properties
                                             if (window.u_attr && window.u_attr.email) email = window.u_attr.email;
                                             else if (window.M && window.M.account && window.M.account.email) email = window.M.account.email;
                                             else if (window.M && window.M.user && window.M.user.email) email = window.M.user.email;
@@ -1602,8 +1704,38 @@ fun CloudLoginWebViewDialog(
                                             val c2 = cookieManager.getCookie("https://terabox.com") ?: ""
                                             val tbCookies = if (c1.isNotBlank() && c2.isNotBlank() && c1 != c2) "$c1; $c2" else c1.ifBlank { c2 }
                                             val ndus = if (tbCookies.contains("ndus=")) tbCookies.substringAfter("ndus=").substringBefore(";").trim() else ""
+
+                                            var resolvedEmail = json.optString("email").trim()
+                                            if (resolvedEmail.isBlank() || resolvedEmail == "null") {
+                                                val cookiePairs = tbCookies.split(";")
+                                                for (p in cookiePairs) {
+                                                    val pair = p.trim()
+                                                    val eqIdx = pair.indexOf('=')
+                                                    if (eqIdx > 0) {
+                                                        val k = pair.substring(0, eqIdx).trim()
+                                                        val v = try { java.net.URLDecoder.decode(pair.substring(eqIdx + 1).trim(), "UTF-8") } catch (_: Exception) { pair.substring(eqIdx + 1).trim() }
+                                                        if ((k.equals("passport_uname", true) || k.equals("show_name", true) || k.equals("PANWEB_UNAME", true) || k.equals("TERABOX_UNAME", true) || k.equals("user_name", true)) && v.isNotBlank()) {
+                                                            resolvedEmail = v
+                                                            break
+                                                        }
+                                                        if (k.equals("email", true) || k.equals("login_email", true)) {
+                                                            if (v.contains("@")) {
+                                                                resolvedEmail = v
+                                                                break
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            if (resolvedEmail.isBlank() || resolvedEmail == "null") {
+                                                resolvedEmail = detectedEmail.ifBlank {
+                                                    if (initialEmail.isNotBlank()) initialEmail else "terabox_user"
+                                                }
+                                            }
+
                                             hasRedirected = true
-                                            onAuthSuccess(CloudProvider.TERABOX, finalAccountName, detectedEmail.ifBlank { "terabox_user" }, ndus, tbCookies)
+                                            onAuthSuccess(CloudProvider.TERABOX, finalAccountName, resolvedEmail, ndus, tbCookies)
                                             return@evaluateJavascript
                                         }
 
@@ -1766,6 +1898,30 @@ fun CloudLoginWebViewDialog(
                                         """
                                         (function() {
                                             try {
+                                                if (window.yunData) {
+                                                    var y = window.yunData.SHOWNAME || window.yunData.MYNAME || window.yunData.USERNAME || window.yunData.EMAIL;
+                                                    if (y) return y;
+                                                }
+                                                try {
+                                                    if (window.localStorage) {
+                                                        for (var lki = 0; lki < window.localStorage.length; lki++) {
+                                                            var lk = window.localStorage.key(lki);
+                                                            var lv = window.localStorage.getItem(lk) || '';
+                                                            if (lk && (lk.indexOf('user') !== -1 || lk.indexOf('account') !== -1 || lk.indexOf('profile') !== -1)) {
+                                                                var lm = lv.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                                                                if (lm) return lm[0];
+                                                                try {
+                                                                    var lp = JSON.parse(lv);
+                                                                    var lc = lp.email || lp.mail || lp.user_name || lp.username || lp.uname || lp.nickname || lp.show_name;
+                                                                    if (lc && typeof lc === 'string' && lc.length < 50) return lc;
+                                                                } catch(e){}
+                                                            }
+                                                        }
+                                                    }
+                                                } catch(e){}
+                                                var tbEl = document.querySelector('[class*="userName"], [class*="username"], [class*="user-name"], [class*="account-name"], [class*="profile-name"], [class*="nickname"]');
+                                                if (tbEl && tbEl.innerText && tbEl.innerText.trim().length < 50) return tbEl.innerText.trim();
+
                                                 var emailEl = document.querySelector('[data-email], a[aria-label*="@"], div[data-identifier], .gb_d, [aria-label*="Google Account"], [aria-label*="Tài khoản Google"]');
                                                 if (emailEl) {
                                                     var attr = emailEl.getAttribute('data-email') || emailEl.getAttribute('data-identifier') || emailEl.getAttribute('aria-label') || emailEl.innerText || '';
@@ -1781,8 +1937,28 @@ fun CloudLoginWebViewDialog(
                                         """.trimIndent()
                                     ) { res ->
                                         val cleaned = res?.trim('"', ' ') ?: ""
-                                        if (cleaned.isNotBlank() && cleaned.contains("@")) {
+                                        if (cleaned.isNotBlank() && cleaned != "null") {
                                             detectedEmail = cleaned
+                                        }
+                                    }
+
+                                    if (provider == CloudProvider.TERABOX && detectedEmail.isBlank()) {
+                                        val tbCookies = (cookieManager.getCookie("https://www.terabox.com") ?: "") + "; " + (cookieManager.getCookie("https://terabox.com") ?: "")
+                                        for (p in tbCookies.split(";")) {
+                                            val pair = p.trim()
+                                            val eq = pair.indexOf('=')
+                                            if (eq > 0) {
+                                                val k = pair.substring(0, eq).trim()
+                                                val v = try { java.net.URLDecoder.decode(pair.substring(eq + 1).trim(), "UTF-8") } catch (_: Exception) { pair.substring(eq + 1).trim() }
+                                                if ((k.equals("passport_uname", true) || k.equals("show_name", true) || k.equals("PANWEB_UNAME", true) || k.equals("TERABOX_UNAME", true)) && v.isNotBlank()) {
+                                                    detectedEmail = v
+                                                    break
+                                                }
+                                                if ((k.equals("email", true) || k.equals("login_email", true)) && v.contains("@")) {
+                                                    detectedEmail = v
+                                                    break
+                                                }
+                                            }
                                         }
                                     }
 
