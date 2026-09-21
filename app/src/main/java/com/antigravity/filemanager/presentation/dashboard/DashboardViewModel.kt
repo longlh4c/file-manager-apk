@@ -318,7 +318,8 @@ class DashboardViewModel @Inject constructor(
         pendingOverwriteAction = null
         _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
         if (action != null) {
-            viewModelScope.launch { action(overwriteNames, skipNames) }
+            activeTransferJob?.cancel()
+            activeTransferJob = viewModelScope.launch { action(overwriteNames, skipNames) }
         }
     }
 

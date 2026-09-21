@@ -74,10 +74,9 @@ class FileOperationsUseCase @Inject constructor(
                     )
                 )
             }
-            if (result.isSuccess) {
-                folderCacheManager.invalidateMediaFolders()
-                mediaChangeSignal.notifyChanged()
-            }
+            // Even a failed copy/move may have written part of the files.
+            folderCacheManager.invalidateMediaFolders()
+            mediaChangeSignal.notifyChanged()
             return result
         } finally {
             transferGuard.end()
@@ -107,10 +106,9 @@ class FileOperationsUseCase @Inject constructor(
                     )
                 )
             }
-            if (result.isSuccess) {
-                folderCacheManager.invalidateMediaFolders()
-                mediaChangeSignal.notifyChanged()
-            }
+            // Even a failed copy/move may have written part of the files.
+            folderCacheManager.invalidateMediaFolders()
+            mediaChangeSignal.notifyChanged()
             return result
         } finally {
             transferGuard.end()

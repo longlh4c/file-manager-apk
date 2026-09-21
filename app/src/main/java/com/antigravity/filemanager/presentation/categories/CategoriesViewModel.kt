@@ -204,9 +204,18 @@ class CategoriesViewModel @Inject constructor(
         }
     }
 
+    private var navigationJob: kotlinx.coroutines.Job? = null
+
+    // Loading the root grid, opening a subfolder and going back all replace what is on screen;
+    // only the latest may land, or a slower earlier load pulls the user back to where they left.
+    private fun launchNavigation(block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit) {
+        navigationJob?.cancel()
+        navigationJob = viewModelScope.launch(block = block)
+    }
+
     fun loadFolders() {
         val rootKey = "category_${categoryType.name}"
-        viewModelScope.launch {
+        launchNavigation {
             val savedSort = folderPreferencesRepository.getSortOption(rootKey)
             val savedHidden = folderPreferencesRepository.getShowHidden(rootKey)
             val savedViewMode = folderPreferencesRepository.getViewMode(rootKey)
@@ -227,7 +236,7 @@ class CategoriesViewModel @Inject constructor(
 
             if (filteredCached != null) {
                 _uiState.update { old -> old.copy(isLoading = false, folders = filteredCached) }
-                if (cached?.isFresh == true) return@launch
+                if (cached?.isFresh == true) return@launchNavigation
             } else {
                 _uiState.update { old -> old.copy(isLoading = true) }
             }
@@ -245,7 +254,7 @@ class CategoriesViewModel @Inject constructor(
     }
 
     fun openSubfolder(folderPath: String, folderName: String) {
-        viewModelScope.launch {
+        launchNavigation {
             val savedSort = folderPreferencesRepository.getSortOption(folderPath)
             val savedHidden = folderPreferencesRepository.getShowHidden(folderPath)
             val savedViewMode = folderPreferencesRepository.getViewMode(folderPath)
@@ -284,7 +293,7 @@ class CategoriesViewModel @Inject constructor(
                 viewMode = savedViewMode,
                 subfolderFiles = cached?.files ?: fallbackFiles
             ) }
-            if (cached != null && cached.isFresh) return@launch
+            if (cached != null && cached.isFresh) return@launchNavigation
 
             val allFiles = fileOperationsUseCase.getFiles(
                 folderPath,
@@ -354,7 +363,7 @@ class CategoriesViewModel @Inject constructor(
         if (history.size > 1) {
             val newHistory = history.dropLast(1)
             val prev = newHistory.last()
-            viewModelScope.launch {
+            launchNavigation {
                 val savedSort = folderPreferencesRepository.getSortOption(prev.first)
                 val savedHidden = folderPreferencesRepository.getShowHidden(prev.first)
                 val savedViewMode = folderPreferencesRepository.getViewMode(prev.first)
@@ -575,7 +584,8 @@ class CategoriesViewModel @Inject constructor(
             }
             return
         }
-        viewModelScope.launch {
+        activeTransferJob?.cancel()
+        activeTransferJob = viewModelScope.launch {
             val sources = _uiState.value.clipboardPaths
             val isMove = _uiState.value.isCutOperation
 
@@ -651,19 +661,23 @@ class CategoriesViewModel @Inject constructor(
         isMove: Boolean,
         overwriteNames: Set<String> = emptySet(),
         skipNames: Set<String> = emptySet()
-    ) {
+    ): Result<Unit> {
         val operationLabel = if (isMove) "Moving" else "Copying"
         val onProgress: (String, Int, Int) -> Unit = { currentFile, currentIndex, totalFiles ->
             _uiState.update { old -> old.copy(
                 downloadProgress = CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = operationLabel)
             ) }
         }
-        if (isMove) {
+        val result = if (isMove) {
             fileOperationsUseCase.move(sources, target, overwriteNames, skipNames, onProgress)
         } else {
             fileOperationsUseCase.copy(sources, target, overwriteNames, skipNames, onProgress)
         }
-        _uiState.update { old -> old.copy(downloadProgress = null) }
+        _uiState.update { old -> old.copy(
+            downloadProgress = null,
+            toastMessage = result.exceptionOrNull()?.let { "Error during $operationLabel: ${it.message}" } ?: old.toastMessage
+        ) }
+        return result
     }
 
     private var activeTransferJob: kotlinx.coroutines.Job? = null
@@ -760,7 +774,7 @@ class CategoriesViewModel @Inject constructor(
         val currentDir = _uiState.value.currentSubfolderPath
         viewModelScope.launch {
             suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>) {
-                runLocalCopyOrMove(selected, destPath, isMove, overwriteNames, skipNames)
+                val result = runLocalCopyOrMove(selected, destPath, isMove, overwriteNames, skipNames)
                 if (currentDir != null) {
                     openSubfolder(currentDir, _uiState.value.currentSubfolderName)
                 } else {
@@ -769,7 +783,7 @@ class CategoriesViewModel @Inject constructor(
                 _uiState.update { old -> old.copy(
                     selectedPaths = emptySet(),
                     isSelectionMode = false,
-                    toastMessage = "Transferred $count file(s) successfully!"
+                    toastMessage = if (result.isSuccess) "Transferred $count file(s) successfully!" else old.toastMessage
                 ) }
             }
 

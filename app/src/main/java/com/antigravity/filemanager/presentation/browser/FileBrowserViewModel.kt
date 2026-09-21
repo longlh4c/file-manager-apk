@@ -280,7 +280,10 @@ class FileBrowserViewModel @Inject constructor(
                 isSearching = false
             ) }
         }
-        viewModelScope.launch {
+        // Only the latest navigation may land: an older load finishing later used to set
+        // currentPath back to the folder the user had already left.
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             val savedSort = folderPreferencesRepository.getSortOption(path)
             val savedHidden = folderPreferencesRepository.getShowHidden(path)
             val savedViewMode = folderPreferencesRepository.getViewMode(path)
@@ -342,6 +345,7 @@ class FileBrowserViewModel @Inject constructor(
     }
 
     private var watchJob: Job? = null
+    private var loadJob: Job? = null
 
     /** Restarted on every loadDirectory — silently re-fetches this exact folder whenever a file
      * is added/removed/renamed inside it while it's on screen, so the user doesn't have to
@@ -623,7 +627,7 @@ class FileBrowserViewModel @Inject constructor(
         isMove: Boolean,
         overwriteNames: Set<String> = emptySet(),
         skipNames: Set<String> = emptySet()
-    ) {
+    ): Result<Unit> {
         val operationLabel = if (isMove) "Moving" else "Copying"
         val onProgress: (String, Int, Int) -> Unit = { currentFile, currentIndex, totalFiles ->
             _uiState.update { old -> old.copy(
@@ -639,6 +643,7 @@ class FileBrowserViewModel @Inject constructor(
         if (result.isFailure) {
             _uiState.update { old -> old.copy(toastMessage = "Error during $operationLabel: ${result.exceptionOrNull()?.message}") }
         }
+        return result
     }
 
     /** After a local copy/move, both the destination and (on move) each source's parent may have stale cache entries. */
@@ -856,7 +861,7 @@ class FileBrowserViewModel @Inject constructor(
         val count = selected.size
         viewModelScope.launch {
             suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>) {
-                runLocalCopyOrMove(selected, destPath, isMove, overwriteNames, skipNames)
+                val result = runLocalCopyOrMove(selected, destPath, isMove, overwriteNames, skipNames)
                 folderCacheManager.invalidateLocal(destPath)
                 if (isMove) {
                     folderCacheManager.invalidateLocal(_uiState.value.currentPath)
@@ -865,7 +870,7 @@ class FileBrowserViewModel @Inject constructor(
                 _uiState.update { old -> old.copy(
                     selectedPaths = emptySet(),
                     isSelectionMode = false,
-                    toastMessage = "Transferred $count file(s) successfully!"
+                    toastMessage = if (result.isSuccess) "Transferred $count file(s) successfully!" else old.toastMessage
                 ) }
             }
 
