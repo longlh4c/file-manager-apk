@@ -12,6 +12,8 @@ import com.dropbox.core.v2.files.FolderMetadata
 import com.dropbox.core.v2.files.ListRevisionsMode
 import com.dropbox.core.v2.files.Metadata
 import com.dropbox.core.v2.files.WriteMode
+import com.dropbox.core.v2.files.CommitInfo
+import com.dropbox.core.v2.files.UploadSessionCursor
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -63,6 +65,11 @@ class DropboxApiClient @Inject constructor(
     private val treeTtlMillis = 24L * 60 * 60 * 1000
 
     private fun treeMutexFor(accountId: String): Mutex = treeMutexes.getOrPut(accountId) { Mutex() }
+
+    private companion object {
+        const val SINGLE_UPLOAD_LIMIT = 150L * 1024 * 1024
+        const val UPLOAD_CHUNK_SIZE = 8L * 1024 * 1024
+    }
 
     private fun treeCacheDir(): File = File(context.filesDir, "dropbox_tree_cache").apply { mkdirs() }
     private fun treeCacheFile(accountId: String): File = File(treeCacheDir(), "$accountId.json")
@@ -143,7 +150,7 @@ class DropboxApiClient @Inject constructor(
         val entry = DropboxEntry(path, parent, metadata.name, false, metadata.size, metadata.serverModified.time, metadata.id)
         // WriteMode.OVERWRITE means a re-upload of an existing name reuses the same path, so drop
         // any stale entry for that path before adding the fresh one.
-        val updated = cached.entries.filterNot { it.path == path } + entry
+        val updated = cached.entries.filterNot { it.path.equals(path, ignoreCase = true) } + entry
         // Renew the freshness timestamp too, not just the contents — otherwise the cache keeps
         // counting down from whenever it was first fetched regardless of being patched, and a
         // listing shortly after several patches can still land past the original TTL and pay for
@@ -168,7 +175,7 @@ class DropboxApiClient @Inject constructor(
         // This used to be "now", which put a freshly created folder wildly out of position
         // whenever the list was sorted by date, since every other folder sits at epoch 0.
         val entry = DropboxEntry(path, parent, name, true, 0L, 0L, id)
-        val updated = cached.entries.filterNot { it.path == path } + entry
+        val updated = cached.entries.filterNot { it.path.equals(path, ignoreCase = true) } + entry
         val newCache = TreeCache(updated, System.currentTimeMillis())
         treeCache[accountId] = newCache
         persistTreeToDisk(accountId, newCache)
@@ -186,7 +193,7 @@ class DropboxApiClient @Inject constructor(
             return
         }
         val normalized = path.trimEnd('/')
-        val updated = cached.entries.filterNot { it.path == normalized || it.path.startsWith("$normalized/") }
+        val updated = cached.entries.filterNot { it.path.equals(normalized, ignoreCase = true) || it.path.startsWith("$normalized/", ignoreCase = true) }
         android.util.Log.d("DropboxApiClient", "patchTreeAfterDelete: path='$normalized' removed ${cached.entries.size - updated.size} entries (${cached.entries.size} -> ${updated.size})")
         val newCache = TreeCache(updated, System.currentTimeMillis())
         treeCache[accountId] = newCache
@@ -217,7 +224,7 @@ class DropboxApiClient @Inject constructor(
         val freshEntries = freshItems.map { item ->
             DropboxEntry(item.path, normalizedPath, item.name, item.isDirectory, item.size, item.lastModified, item.id)
         }
-        val kept = cached.entries.filterNot { it.parentPath == normalizedPath }
+        val kept = cached.entries.filterNot { it.parentPath.equals(normalizedPath, ignoreCase = true) }
         val newCache = TreeCache(kept + freshEntries, System.currentTimeMillis())
         treeCache[account.id] = newCache
         persistTreeToDisk(account.id, newCache)
@@ -311,26 +318,32 @@ class DropboxApiClient @Inject constructor(
                 return@withContext listFolder(account, path)
             }
             val entries = getOrFetchTree(account).getOrElse { return@withContext Result.failure(it) }
-            val normalizedPath = if (path == "/" || path.isBlank()) "" else path.trimEnd('/')
-            val childrenByParent = entries.groupBy { it.parentPath }
+            // Dropbox paths are case-insensitive, and path_display casing is not guaranteed to be
+            // consistent between a folder and its children — match on lowercase keys, or a folder
+            // whose children report a different casing lists as empty.
+            val normalizedPath = (if (path == "/" || path.isBlank()) "" else path.trimEnd('/')).lowercase()
+            val childrenByParent = entries.groupBy { it.parentPath.lowercase() }
             val direct = childrenByParent[normalizedPath] ?: emptyList()
+            // Dropbox's API never gives a folder its own modified-time, so use the newest file
+            // modified anywhere underneath it (like Dropbox's own desktop app). Computed in one
+            // pass over the tree by propagating each file's date to its ancestors — a per-folder
+            // scan of the whole account tree was O(folders × entries) per listing.
+            val newestUnder = HashMap<String, Long>()
+            for (e in entries) {
+                if (e.isDirectory) continue
+                var parent = e.parentPath.lowercase()
+                while (parent.isNotEmpty()) {
+                    val current = newestUnder[parent]
+                    if (current != null && current >= e.lastModified) break
+                    newestUnder[parent] = e.lastModified
+                    parent = parent.substringBeforeLast('/', "")
+                }
+            }
             val items = direct.map { entry ->
-                val children = if (entry.isDirectory) childrenByParent[entry.path] else null
+                val children = if (entry.isDirectory) childrenByParent[entry.path.lowercase()] else null
                 val subfolders = children?.count { it.isDirectory } ?: 0
                 val childFiles = children?.count { !it.isDirectory } ?: 0
-                // Dropbox's API never gives a folder its own modified-time, so instead of always
-                // showing 0 (which made "sort by date" put every folder in an arbitrary tie-order),
-                // use the newest file modified anywhere underneath it — recursively, not just
-                // direct children — matching how Dropbox's own desktop app displays a folder's
-                // date. entries here is the WHOLE cached account tree, so this is free (no extra
-                // network call), just a path-prefix scan.
-                val effectiveLastModified = if (entry.isDirectory) {
-                    val prefix = "${entry.path}/"
-                    entries.filter { !it.isDirectory && it.path.startsWith(prefix) }
-                        .maxOfOrNull { it.lastModified } ?: 0L
-                } else {
-                    entry.lastModified
-                }
+                val effectiveLastModified = if (entry.isDirectory) newestUnder[entry.path.lowercase()] ?: 0L else entry.lastModified
                 FileItem(
                     id = entry.id,
                     name = entry.name,
@@ -438,7 +451,10 @@ class DropboxApiClient @Inject constructor(
             val client = buildClient(account)
             val usage = client.users().spaceUsage
             val used = usage.used
-            val allocated = usage.allocation.individualValue?.allocated ?: (2L * 1024 * 1024 * 1024)
+            val allocation = usage.allocation
+            val allocated = allocation.individualValue?.allocated
+                ?: allocation.teamValue?.allocated // Business accounts share a team pool
+                ?: (2L * 1024 * 1024 * 1024)
             Result.success(Pair(allocated, used))
         } catch (e: Exception) {
             Result.failure(e)
@@ -536,11 +552,29 @@ class DropboxApiClient @Inject constructor(
             }
             try {
                 val metadata = progressStream.use { input ->
-                    client.files().uploadBuilder(targetPath)
-                        .withMode(WriteMode.OVERWRITE)
-                        .withAutorename(false)
-                        .withMute(false)
-                        .uploadAndFinish(input)
+                    if (totalBytes <= SINGLE_UPLOAD_LIMIT) {
+                        client.files().uploadBuilder(targetPath)
+                            .withMode(WriteMode.OVERWRITE)
+                            .withAutorename(false)
+                            .withMute(false)
+                            .uploadAndFinish(input)
+                    } else {
+                        // /upload rejects anything over 150 MB outright; bigger files have to go
+                        // through an upload session, one chunk per request.
+                        val sessionId = client.files().uploadSessionStart().uploadAndFinish(input, UPLOAD_CHUNK_SIZE).sessionId
+                        var offset = UPLOAD_CHUNK_SIZE
+                        while (totalBytes - offset > UPLOAD_CHUNK_SIZE) {
+                            client.files().uploadSessionAppendV2(UploadSessionCursor(sessionId, offset)).uploadAndFinish(input, UPLOAD_CHUNK_SIZE)
+                            offset += UPLOAD_CHUNK_SIZE
+                        }
+                        val commit = CommitInfo.newBuilder(targetPath)
+                            .withMode(WriteMode.OVERWRITE)
+                            .withAutorename(false)
+                            .withMute(false)
+                            .build()
+                        client.files().uploadSessionFinish(UploadSessionCursor(sessionId, offset), commit)
+                            .uploadAndFinish(input, totalBytes - offset)
+                    }
                 }
                 onProgress?.invoke(totalBytes, totalBytes)
                 android.util.Log.d("DropboxApiClient", "uploadFile: success, pathDisplay=${metadata.pathDisplay}")
