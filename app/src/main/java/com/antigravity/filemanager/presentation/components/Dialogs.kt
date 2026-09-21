@@ -849,18 +849,6 @@ fun AddCloudDialog(
                         ),
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedButton(
-                        onClick = { showTeraBoxWebView = true },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = TealPrimary),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, TealPrimary.copy(alpha = 0.7f)),
-                        shape = RoundedCornerShape(6.dp)
-                    ) {
-                        Icon(Icons.Default.Language, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("SIGN IN VIA IN-APP BROWSER", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    }
                     if (isAddingAccount) {
                         Spacer(modifier = Modifier.height(10.dp))
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth(), color = TealPrimary)
@@ -1269,7 +1257,7 @@ fun CloudLoginWebViewDialog(
                                 if (provider == CloudProvider.GOOGLE_DRIVE) {
                                     userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0"
                                 } else if (provider == CloudProvider.TERABOX) {
-                                    userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+                                    userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
                                 }
                             }
 
@@ -1683,7 +1671,7 @@ fun CloudLoginWebViewDialog(
                                         if (provider == CloudProvider.GOOGLE_DRIVE) {
                                             settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0"
                                         } else if (provider == CloudProvider.TERABOX) {
-                                            settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+                                            settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
                                         }
                                         CookieManager.getInstance().setAcceptCookie(true)
                                         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
