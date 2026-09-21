@@ -97,7 +97,7 @@ class EmbeddedHttpServer @Inject constructor(
             val uri = session.uri
 
             if (method == Method.OPTIONS) {
-                return addCorsHeaders(newFixedLengthResponse(Response.Status.OK, "text/plain", ""))
+                return finalizeResponse(newFixedLengthResponse(Response.Status.OK, "text/plain", ""))
             }
 
             // Authentication check (except for root page which serves the UI containing the prompt)
@@ -109,7 +109,7 @@ class EmbeddedHttpServer @Inject constructor(
                         "application/json",
                         "{\"error\":\"Unauthorized\",\"requireAuth\":true}"
                     )
-                    return addCorsHeaders(resp)
+                    return finalizeResponse(resp)
                 }
             }
 
@@ -128,7 +128,7 @@ class EmbeddedHttpServer @Inject constructor(
                 }
             } catch (e: Exception) {
                 android.util.Log.e("EmbeddedHttpServer", "Error handling HTTP request: $uri", e)
-                addCorsHeaders(newFixedLengthResponse(
+                finalizeResponse(newFixedLengthResponse(
                     Response.Status.INTERNAL_ERROR,
                     "application/json",
                     "{\"error\":\"${e.message?.replace("\"", "\\\"") ?: "Internal Server Error"}\"}"
@@ -139,24 +139,27 @@ class EmbeddedHttpServer @Inject constructor(
         private fun resolveSafeFile(relativePath: String): File? {
             val cleanRel = relativePath.trim().removePrefix("/").replace("\\", "/")
             val file = if (cleanRel.isEmpty()) storageRoot else File(storageRoot, cleanRel)
-            // Path traversal prevention: verify canonical path starts with storageRoot
-            return if (file.canonicalPath.startsWith(storageRoot.canonicalPath)) file else null
+            // Path traversal prevention. The separator matters: a bare prefix check let
+            // "../10" through to a sibling volume like /storage/emulated/10.
+            val canonical = file.canonicalFile
+            val rootPath = storageRoot.canonicalPath
+            return if (canonical.path == rootPath || canonical.path.startsWith(rootPath + File.separator)) file else null
         }
 
         private fun handleList(session: IHTTPSession): Response {
             val relPath = session.parms["path"] ?: ""
-            val targetDir = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val targetDir = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
             )
 
             if (!targetDir.exists() || !targetDir.isDirectory) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.NOT_FOUND, "application/json", "{\"error\":\"Folder not found\"}")
                 )
             }
 
             if (targetDir != storageRoot && isInsideSystemOrHiddenFolder(targetDir)) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Access to system directory is restricted\"}")
                 )
             }
@@ -186,7 +189,7 @@ class EmbeddedHttpServer @Inject constructor(
                 put("items", jsonArray)
             }
 
-            return addCorsHeaders(newFixedLengthResponse(
+            return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
                 resObj.toString()
@@ -196,18 +199,18 @@ class EmbeddedHttpServer @Inject constructor(
         private fun handleSearch(session: IHTTPSession): Response {
             val relPath = session.parms["path"] ?: ""
             val query = (session.parms["q"] ?: "").trim()
-            val targetDir = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val targetDir = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
             )
 
             if (!targetDir.exists() || !targetDir.isDirectory) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.NOT_FOUND, "application/json", "{\"error\":\"Folder not found\"}")
                 )
             }
 
             if (targetDir != storageRoot && isInsideSystemOrHiddenFolder(targetDir)) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Access to system directory is restricted\"}")
                 )
             }
@@ -257,7 +260,7 @@ class EmbeddedHttpServer @Inject constructor(
                 put("items", jsonArray)
             }
 
-            return addCorsHeaders(newFixedLengthResponse(
+            return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
                 resObj.toString()
@@ -266,18 +269,18 @@ class EmbeddedHttpServer @Inject constructor(
 
         private fun handleDownload(session: IHTTPSession): Response {
             val relPath = session.parms["path"] ?: ""
-            val targetFile = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val targetFile = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Invalid path")
             )
 
             if (!targetFile.exists()) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
                 )
             }
 
             if (targetFile != storageRoot && isInsideSystemOrHiddenFolder(targetFile)) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.FORBIDDEN, "text/plain", "Access to system files or folders is restricted")
                 )
             }
@@ -329,7 +332,7 @@ class EmbeddedHttpServer @Inject constructor(
                     pis
                 )
                 response.addHeader("Content-Disposition", "attachment; filename=\"$zipName\"")
-                return addCorsHeaders(response)
+                return finalizeResponse(response)
             }
 
             val fileLen = targetFile.length()
@@ -345,14 +348,20 @@ class EmbeddedHttpServer @Inject constructor(
                 if (dashIdx != -1) {
                     val startStr = rangeVal.substring(0, dashIdx).trim()
                     val endStr = rangeVal.substring(dashIdx + 1).trim()
-                    if (startStr.isNotEmpty()) rangeStart = startStr.toLongOrNull() ?: 0L
-                    if (endStr.isNotEmpty()) rangeEnd = endStr.toLongOrNull() ?: (fileLen - 1L)
+                    if (startStr.isEmpty()) {
+                        // Suffix range "bytes=-N": the last N bytes.
+                        val suffix = endStr.toLongOrNull() ?: 0L
+                        rangeStart = (fileLen - suffix).coerceAtLeast(0L)
+                    } else {
+                        rangeStart = startStr.toLongOrNull() ?: 0L
+                        if (endStr.isNotEmpty()) rangeEnd = endStr.toLongOrNull() ?: (fileLen - 1L)
+                    }
                 }
 
                 if (rangeStart > rangeEnd || rangeStart >= fileLen) {
                     val errResp = newFixedLengthResponse(Response.Status.RANGE_NOT_SATISFIABLE, "text/plain", "")
                     errResp.addHeader("Content-Range", "bytes */$fileLen")
-                    return addCorsHeaders(errResp)
+                    return finalizeResponse(errResp)
                 }
 
                 if (rangeEnd >= fileLen) rangeEnd = fileLen - 1L
@@ -370,7 +379,7 @@ class EmbeddedHttpServer @Inject constructor(
                 response.addHeader("Content-Range", "bytes $rangeStart-$rangeEnd/$fileLen")
                 response.addHeader("Accept-Ranges", "bytes")
                 response.addHeader("Content-Disposition", "inline; filename=\"${targetFile.name}\"")
-                return addCorsHeaders(response)
+                return finalizeResponse(response)
             } else {
                 val fis = FileInputStream(targetFile)
                 val response = newFixedLengthResponse(
@@ -381,7 +390,7 @@ class EmbeddedHttpServer @Inject constructor(
                 )
                 response.addHeader("Accept-Ranges", "bytes")
                 response.addHeader("Content-Disposition", "inline; filename=\"${targetFile.name}\"")
-                return addCorsHeaders(response)
+                return finalizeResponse(response)
             }
         }
 
@@ -395,12 +404,12 @@ class EmbeddedHttpServer @Inject constructor(
 
         private fun handleUpload(session: IHTTPSession): Response {
             val relPath = session.parms["path"] ?: ""
-            val targetDir = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val targetDir = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
             )
 
             if (targetDir != storageRoot && isInsideSystemOrHiddenFolder(targetDir)) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Upload to system directory is restricted\"}")
                 )
             }
@@ -452,7 +461,7 @@ class EmbeddedHttpServer @Inject constructor(
                 )
             }
 
-            return addCorsHeaders(newFixedLengthResponse(
+            return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
                 "{\"success\":true,\"count\":${uploadedPaths.size}}"
@@ -464,7 +473,7 @@ class EmbeddedHttpServer @Inject constructor(
             val folderName = session.parms["name"]?.trim() ?: ""
 
             if (folderName.isEmpty() || folderName.contains("/") || folderName.contains("\\")) {
-                return addCorsHeaders(newFixedLengthResponse(
+                return finalizeResponse(newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
                     "{\"error\":\"Invalid folder name\"}"
@@ -472,19 +481,19 @@ class EmbeddedHttpServer @Inject constructor(
             }
 
             if (isSystemOrHiddenName(folderName, isDirectory = true)) {
-                return addCorsHeaders(newFixedLengthResponse(
+                return finalizeResponse(newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
                     "{\"error\":\"Cannot create system or hidden folder\"}"
                 ))
             }
 
-            val parentDir = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val parentDir = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid parent path\"}")
             )
 
             if (parentDir != storageRoot && isInsideSystemOrHiddenFolder(parentDir)) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Cannot create folder inside system directory\"}")
                 )
             }
@@ -492,7 +501,7 @@ class EmbeddedHttpServer @Inject constructor(
             val newDir = File(parentDir, folderName)
             val created = newDir.mkdirs()
 
-            return addCorsHeaders(newFixedLengthResponse(
+            return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
                 "{\"success\":$created}"
@@ -501,12 +510,12 @@ class EmbeddedHttpServer @Inject constructor(
 
         private fun handleDelete(session: IHTTPSession): Response {
             val relPath = session.parms["path"] ?: ""
-            val target = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val target = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
             )
 
             if (!target.exists() || target.canonicalPath == storageRoot.canonicalPath || isInsideSystemOrHiddenFolder(target)) {
-                return addCorsHeaders(newFixedLengthResponse(
+                return finalizeResponse(newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
                     "{\"error\":\"Cannot delete system folder, hidden item, or root directory\"}"
@@ -514,17 +523,18 @@ class EmbeddedHttpServer @Inject constructor(
             }
 
             val deleted = target.deleteRecursively()
-            return addCorsHeaders(newFixedLengthResponse(
+            return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
                 "{\"success\":$deleted}"
             ))
         }
 
-        private fun addCorsHeaders(response: Response): Response {
-            response.addHeader("Access-Control-Allow-Origin", "*")
-            response.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            response.addHeader("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token")
+        // The web UI is served from this same origin, so no CORS headers are sent: a wildcard
+        // Access-Control-Allow-Origin let any website opened by anyone on the LAN read (and, with
+        // no password set, list/download) the device's files through the visitor's browser.
+        private fun finalizeResponse(response: Response): Response {
+            response.addHeader("X-Content-Type-Options", "nosniff")
             return response
         }
     }

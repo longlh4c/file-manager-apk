@@ -11,14 +11,11 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import net.lingala.zip4j.ZipFile
 import net.lingala.zip4j.exception.ZipException
-import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.apache.commons.compress.archivers.sevenz.SevenZMethod
 import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
-import com.github.junrar.Junrar
 import com.github.junrar.Archive
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.util.Locale
@@ -37,35 +34,8 @@ class ArchiveInvalidPasswordException(
 
 @Singleton
 class FileOperationsHelper @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val scanner: LocalFileScanner
+    @ApplicationContext private val context: Context
 ) {
-
-    // Returns a collision-free destination file, appending " (1)", " (2)", etc. as needed.
-    private fun uniqueDestination(targetFolder: File, name: String): File {
-        var candidate = File(targetFolder, name)
-        if (!candidate.exists()) return candidate
-        val dotIndex = name.lastIndexOf('.')
-        val base = if (dotIndex > 0) name.substring(0, dotIndex) else name
-        val ext = if (dotIndex > 0) name.substring(dotIndex) else ""
-        var counter = 1
-        while (candidate.exists()) {
-            candidate = File(targetFolder, "$base ($counter)$ext")
-            counter++
-        }
-        return candidate
-    }
-
-    private fun getFolderContentSize(file: File): Long {
-        if (!file.isDirectory) return file.length()
-        var size = 0L
-        try {
-            file.walkTopDown().maxDepth(5).forEach { child ->
-                if (child.isFile) size += child.length()
-            }
-        } catch (e: Exception) {}
-        return size
-    }
 
     // Finds conflicting file/folder names in targetDir before copy/move.
     suspend fun findConflicts(sourcePaths: List<String>, targetDir: String): List<com.antigravity.filemanager.domain.model.OverwriteConflict> = withContext(Dispatchers.IO) {
@@ -77,8 +47,8 @@ class FileOperationsHelper @Inject constructor(
                 val isDir = source.isDirectory || dest.isDirectory
                 com.antigravity.filemanager.domain.model.OverwriteConflict(
                     name = source.name,
-                    existingSize = if (dest.isDirectory) getFolderContentSize(dest) else dest.length(),
-                    newSize = if (source.isDirectory) getFolderContentSize(source) else source.length(),
+                    existingSize = directorySize(dest),
+                    newSize = directorySize(source),
                     isDirectory = isDir
                 )
             } else null
@@ -95,7 +65,6 @@ class FileOperationsHelper @Inject constructor(
         try {
             val targetFolder = File(targetDir)
             if (!targetFolder.exists()) targetFolder.mkdirs()
-            val scannedPaths = mutableListOf<String>()
 
             // overwrite is decided once per top-level source (matching the pre-existing conflict
             // dialog, which only ever resolves top-level name clashes) and carried down to every
@@ -105,61 +74,23 @@ class FileOperationsHelper @Inject constructor(
             for (path in sourcePaths) {
                 val source = File(path)
                 if (!source.exists() || source.name in skipNames) continue
-                val overwriteThis = source.name in overwriteNames
-                val dest = if (overwriteThis) File(targetFolder, source.name) else uniqueDestination(targetFolder, source.name)
+                if (source.isDirectory && isSameOrDescendant(targetFolder, source)) {
+                    return@withContext Result.failure(IOException("Cannot copy a folder into itself: ${source.name}"))
+                }
+                val dest = resolveDestination(targetFolder, source, overwriteNames)
                 // Copying a file onto itself (same-folder paste with overwrite chosen) is a
                 // no-op: doing it for real would truncate the source before it's read.
                 if (dest.absolutePath == source.absolutePath) continue
                 collectFileCopyEntries(source, dest, fileEntries, dirEntries)
             }
 
-            val total = fileEntries.size + dirEntries.size
-            var current = 0
-
-            // 1. Create all directory trees first so subfolders always exist
-            for (entry in dirEntries) {
-                currentCoroutineContext().ensureActive()
-                current++
-                onProgress?.invoke(entry.source.name, current, total)
-                if (!entry.dest.exists()) {
-                    entry.dest.mkdirs()
-                }
+            val outcome = copyEntries(dirEntries, fileEntries, deleteSources = false, onProgress = onProgress)
+            scanMedia(outcome.copiedPaths)
+            if (outcome.failedSources.isNotEmpty()) {
+                Result.failure(IOException("Failed to copy ${outcome.failedSources.size} file(s)"))
+            } else {
+                Result.success(Unit)
             }
-
-            // 2. Copy files with error isolation so one failing file does not abort remaining files/folders
-            for (entry in fileEntries) {
-                currentCoroutineContext().ensureActive()
-                current++
-                onProgress?.invoke(entry.source.name, current, total)
-                try {
-                    entry.dest.parentFile?.mkdirs()
-                    if (entry.dest.exists()) {
-                        if (entry.dest.isDirectory) {
-                            entry.dest.deleteRecursively()
-                        } else {
-                            entry.dest.setWritable(true)
-                            entry.dest.delete()
-                        }
-                    }
-                    entry.source.copyTo(entry.dest, overwrite = true)
-                    scannedPaths.add(entry.dest.absolutePath)
-                } catch (e: Exception) {
-                    if (e is CancellationException) throw e
-                    android.util.Log.e("FileOperationsHelper", "Failed to copy file: ${entry.source.absolutePath} -> ${entry.dest.absolutePath}", e)
-                }
-            }
-
-            try {
-                val logFile = File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "file_ops_debug.log")
-                logFile.appendText("[COPY] Sources: $sourcePaths, Target: $targetDir, Dirs: ${dirEntries.size}, Files: ${fileEntries.size}\n")
-            } catch (e: Exception) {}
-
-            if (scannedPaths.isNotEmpty()) {
-                try {
-                    android.media.MediaScannerConnection.scanFile(context, scannedPaths.toTypedArray(), null, null)
-                } catch (e: Exception) {}
-            }
-            Result.success(Unit)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Result.failure(e)
@@ -180,95 +111,123 @@ class FileOperationsHelper @Inject constructor(
 
             // Phase 1: renameTo() is atomic and effectively instant for a same-filesystem move —
             // even a folder with thousands of files inside moves in one O(1) call, so there's
-            // nothing meaningful to report progress on here (same reasoning as moveToTrash's own
-            // renameTo() above). Only a genuine cross-filesystem move (internal storage <-> SD
-            // card, say) falls through to it failing, handled for real in phase 2 below.
-            data class PendingItem(val source: File, val dest: File)
-            val renameFailures = mutableListOf<PendingItem>()
+            // nothing meaningful to report progress on here. Only a genuine cross-filesystem move
+            // (internal storage <-> SD card, say) falls through to it failing, handled for real
+            // in phase 2 below.
+            val renameFailures = mutableListOf<FileCopyEntry>()
             for (path in sourcePaths) {
                 currentCoroutineContext().ensureActive()
                 val source = File(path)
                 if (!source.exists() || source.name in skipNames) continue
-                val overwriteThis = source.name in overwriteNames
-                val dest = if (overwriteThis) File(targetFolder, source.name) else uniqueDestination(targetFolder, source.name)
+                // renameTo() into its own subtree fails, and phase 2's copy-then-delete fallback
+                // would then delete the freshly made copy together with the source.
+                if (source.isDirectory && isSameOrDescendant(targetFolder, source)) {
+                    return@withContext Result.failure(IOException("Cannot move a folder into itself: ${source.name}"))
+                }
+                val dest = resolveDestination(targetFolder, source, overwriteNames)
                 // Moving a file onto itself is a no-op.
                 if (dest.absolutePath == source.absolutePath) continue
-                if (overwriteThis && dest.exists()) {
+                if (dest.exists()) {
                     if (dest.isDirectory) dest.deleteRecursively() else dest.delete()
                 }
                 if (source.renameTo(dest)) {
                     scannedPaths.add(source.absolutePath)
                     scannedPaths.add(dest.absolutePath)
                 } else {
-                    renameFailures.add(PendingItem(source, dest))
+                    renameFailures.add(FileCopyEntry(source, dest))
                 }
             }
 
             // Phase 2: genuine cross-filesystem fallback, flattened into per-file copy work the
-            // same way copy() is above
+            // same way copy() is above. Each file's source is deleted only once its copy landed.
             val fileEntries = mutableListOf<FileCopyEntry>()
             val dirEntries = mutableListOf<FileCopyEntry>()
             for (item in renameFailures) {
                 collectFileCopyEntries(item.source, item.dest, fileEntries, dirEntries)
             }
-            val total = fileEntries.size + dirEntries.size
-            var current = 0
-
-            // 1. Create all directory trees first
-            for (entry in dirEntries) {
-                currentCoroutineContext().ensureActive()
-                current++
-                onProgress?.invoke(entry.source.name, current, total)
-                if (!entry.dest.exists()) {
-                    entry.dest.mkdirs()
-                }
-            }
-
-            // 2. Copy files with error isolation
-            for (entry in fileEntries) {
-                currentCoroutineContext().ensureActive()
-                current++
-                onProgress?.invoke(entry.source.name, current, total)
-                try {
-                    entry.dest.parentFile?.mkdirs()
-                    if (entry.dest.exists()) {
-                        if (entry.dest.isDirectory) {
-                            entry.dest.deleteRecursively()
-                        } else {
-                            entry.dest.setWritable(true)
-                            entry.dest.delete()
-                        }
-                    }
-                    entry.source.copyTo(entry.dest, overwrite = true)
-                    entry.source.delete()
-                } catch (e: Exception) {
-                    if (e is CancellationException) throw e
-                    android.util.Log.e("FileOperationsHelper", "Failed to move file: ${entry.source.absolutePath} -> ${entry.dest.absolutePath}", e)
-                }
-            }
+            val outcome = copyEntries(dirEntries, fileEntries, deleteSources = true, onProgress = onProgress)
             for (item in renameFailures) {
-                if (item.source.exists()) {
-                    item.source.deleteRecursively()
-                }
+                val prefix = item.source.absolutePath + File.separator
+                val anyFailed = outcome.failedSources.any { it == item.source.absolutePath || it.startsWith(prefix) }
+                // A source with files that failed to copy keeps whatever is left, instead of
+                // being wiped together with files that never landed anywhere.
+                if (!anyFailed && item.source.exists()) item.source.deleteRecursively()
                 scannedPaths.add(item.source.absolutePath)
                 scannedPaths.add(item.dest.absolutePath)
             }
-
-            try {
-                val logFile = File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS), "file_ops_debug.log")
-                logFile.appendText("[MOVE] Sources: $sourcePaths, Target: $targetDir, Dirs: ${dirEntries.size}, Files: ${fileEntries.size}\n")
-            } catch (e: Exception) {}
-
-            if (scannedPaths.isNotEmpty()) {
-                try {
-                    android.media.MediaScannerConnection.scanFile(context, scannedPaths.toTypedArray(), null, null)
-                } catch (e: Exception) {}
+            scanMedia(scannedPaths)
+            if (outcome.failedSources.isNotEmpty()) {
+                Result.failure(IOException("Failed to move ${outcome.failedSources.size} file(s)"))
+            } else {
+                Result.success(Unit)
             }
-            Result.success(Unit)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Result.failure(e)
         }
+    }
+
+    private class CopyOutcome(val copiedPaths: List<String>, val failedSources: List<String>)
+
+    // Creates every directory first so subfolders always exist, then copies each file with error
+    // isolation so one failing file does not abort the remaining ones.
+    private suspend fun copyEntries(
+        dirEntries: List<FileCopyEntry>,
+        fileEntries: List<FileCopyEntry>,
+        deleteSources: Boolean,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)?
+    ): CopyOutcome {
+        val total = fileEntries.size + dirEntries.size
+        var current = 0
+        for (entry in dirEntries) {
+            currentCoroutineContext().ensureActive()
+            current++
+            onProgress?.invoke(entry.source.name, current, total)
+            if (!entry.dest.exists()) entry.dest.mkdirs()
+        }
+
+        val copiedPaths = mutableListOf<String>()
+        val failedSources = mutableListOf<String>()
+        for (entry in fileEntries) {
+            currentCoroutineContext().ensureActive()
+            current++
+            onProgress?.invoke(entry.source.name, current, total)
+            try {
+                entry.dest.parentFile?.mkdirs()
+                if (entry.dest.exists()) {
+                    if (entry.dest.isDirectory) {
+                        entry.dest.deleteRecursively()
+                    } else {
+                        entry.dest.setWritable(true)
+                        entry.dest.delete()
+                    }
+                }
+                entry.source.copyTo(entry.dest, overwrite = true)
+                if (deleteSources) entry.source.delete()
+                copiedPaths.add(entry.dest.absolutePath)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                failedSources.add(entry.source.absolutePath)
+                android.util.Log.e("FileOperationsHelper", "Failed to copy file: ${entry.source.absolutePath} -> ${entry.dest.absolutePath}", e)
+            }
+        }
+        return CopyOutcome(copiedPaths, failedSources)
+    }
+
+    private fun resolveDestination(targetFolder: File, source: File, overwriteNames: Set<String>): File =
+        if (source.name in overwriteNames) File(targetFolder, source.name) else uniqueFile(targetFolder, source.name)
+
+    private fun isSameOrDescendant(candidate: File, ancestor: File): Boolean {
+        val candidatePath = candidate.canonicalPath
+        val ancestorPath = ancestor.canonicalPath
+        return candidatePath == ancestorPath || candidatePath.startsWith(ancestorPath + File.separator)
+    }
+
+    private fun scanMedia(paths: List<String>) {
+        if (paths.isEmpty()) return
+        try {
+            android.media.MediaScannerConnection.scanFile(context, paths.toTypedArray(), null, null)
+        } catch (e: Exception) {}
     }
 
     suspend fun rename(filePath: String, newName: String): Result<FileItem> = withContext(Dispatchers.IO) {
@@ -321,17 +280,9 @@ class FileOperationsHelper @Inject constructor(
         }
     }
 
-    // zip4j's isRunInThread=true + ProgressMonitor polling was tried here for live byte-level
-    // progress, twice, and both times it hung on-device: the ProgressMonitor's state never
-    // reliably settled back to READY, the polling loop sat there forever, and — much worse —
-    // zip4j's detached background thread kept writing to the archive indefinitely with nothing
-    // to stop it (cancelling the polling coroutine does NOT cancel that thread, since it isn't
-    // tied to coroutine cancellation at all). One run grew a compress target to 3.9 GB and filled
-    // the device's disk before it was caught. Given that failure mode is silent disk exhaustion,
-    // not just a stuck spinner, this reverts to plain synchronous addFile/addFolder/extractAll —
-    // same as before progress reporting existed — with progress reported only between whole
-    // files (index/total), never live within one, since that's the only part of this that was
-    // ever actually safe.
+    // Archives are streamed manually on the calling coroutine (never zip4j's isRunInThread mode,
+    // whose detached thread ignores coroutine cancellation and once filled a device's disk), so
+    // byte-level progress and cancellation are both checked between buffer writes.
 
     suspend fun compressFiles(
         sourcePaths: List<String>,
@@ -349,12 +300,6 @@ class FileOperationsHelper @Inject constructor(
             Result.failure(e)
         }
     }
-
-    suspend fun zipFiles(
-        sourcePaths: List<String>,
-        targetZipPath: String,
-        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
-    ): Result<FileItem> = compressFiles(sourcePaths, targetZipPath, onProgress)
 
     private suspend fun compressZip(
         sourcePaths: List<String>,
@@ -555,168 +500,152 @@ class FileOperationsHelper @Inject constructor(
     fun isArchiveEncrypted(archiveFilePath: String): Boolean {
         val file = File(archiveFilePath)
         if (!file.exists() || !file.isFile) return false
-        val ext = file.extension.lowercase(Locale.ROOT)
         return try {
-            when (ext) {
-                "7z" -> {
-                    try {
-                        SevenZFile(file).use { sz ->
-                            var entry = sz.nextEntry
-                            while (entry != null) {
-                                if (!entry.isDirectory && entry.hasStream()) {
-                                    val buf = ByteArray(1)
-                                    sz.read(buf)
-                                    return false
-                                }
-                                entry = sz.nextEntry
-                            }
-                            false
+            when (file.extension.lowercase(Locale.ROOT)) {
+                "7z" -> SevenZFile(file).use { sz ->
+                    var entry = sz.nextEntry
+                    while (entry != null) {
+                        if (!entry.isDirectory && entry.hasStream()) {
+                            sz.read(ByteArray(1))
+                            return false
                         }
-                    } catch (e: org.apache.commons.compress.PasswordRequiredException) {
-                        true
-                    } catch (_: Exception) {
-                        false
+                        entry = sz.nextEntry
                     }
+                    false
                 }
-                "rar" -> {
-                    try {
-                        Archive(file).use { it.isEncrypted || it.isPasswordProtected }
-                    } catch (_: Exception) {
-                        false
-                    }
-                }
-                "zip" -> {
-                    try {
-                        ZipFile(file).isEncrypted
-                    } catch (_: Exception) {
-                        false
-                    }
-                }
+                "rar" -> Archive(file).use { it.isEncrypted || it.isPasswordProtected }
+                "zip" -> ZipFile(file).use { it.isEncrypted }
                 else -> false
             }
+        } catch (e: org.apache.commons.compress.PasswordRequiredException) {
+            true
         } catch (_: Exception) {
             false
         }
     }
 
+    // --- Archive opening helpers: each maps the library's own password failures onto
+    // ArchivePasswordRequiredException / ArchiveInvalidPasswordException so callers see one
+    // consistent pair of exceptions regardless of format. ---
+
+    private fun openSevenZ(archiveFile: File, password: String?): SevenZFile {
+        val passwordChars = if (password.isNullOrEmpty()) null else password.toCharArray()
+        return try {
+            SevenZFile(archiveFile, passwordChars)
+        } catch (e: org.apache.commons.compress.PasswordRequiredException) {
+            throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+        } catch (e: IOException) {
+            if (passwordChars != null) throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+            throw e
+        }
+    }
+
+    private fun openRar(archiveFile: File, password: String?): Archive {
+        val archive = try {
+            if (!password.isNullOrEmpty()) Archive(archiveFile, password) else Archive(archiveFile)
+        } catch (e: Exception) {
+            if (looksLikeRarPasswordError(e, includeCorruption = false)) throw rarPasswordException(archiveFile, password)
+            throw e
+        }
+        if ((archive.isEncrypted || archive.isPasswordProtected) && password.isNullOrEmpty()) {
+            archive.close()
+            throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+        }
+        return archive
+    }
+
+    private fun looksLikeRarPasswordError(e: Throwable, includeCorruption: Boolean): Boolean {
+        val msg = e.message?.lowercase(Locale.ROOT) ?: return false
+        return msg.contains("password") || msg.contains("encrypted") || msg.contains("header") ||
+            (includeCorruption && (msg.contains("crc") || msg.contains("corrupt")))
+    }
+
+    private fun rarPasswordException(archiveFile: File, password: String?): IOException =
+        if (password.isNullOrEmpty()) ArchivePasswordRequiredException(archiveFile.absolutePath)
+        else ArchiveInvalidPasswordException(archiveFile.absolutePath)
+
+    private fun openZip(archiveFile: File, password: String?): ZipFile {
+        val zipFile = ZipFile(archiveFile)
+        if (zipFile.isEncrypted) {
+            if (password.isNullOrEmpty()) {
+                zipFile.close()
+                throw ArchivePasswordRequiredException(archiveFile.absolutePath)
+            }
+            zipFile.setPassword(password.toCharArray())
+        }
+        return zipFile
+    }
+
+    private fun isZipPasswordError(e: ZipException, includeChecksum: Boolean = false): Boolean =
+        e.type == ZipException.Type.WRONG_PASSWORD ||
+            e.message?.contains("password", ignoreCase = true) == true ||
+            (includeChecksum && (e.message?.contains("checksum", ignoreCase = true) == true ||
+                e.message?.contains("crc", ignoreCase = true) == true))
+
+    private fun zipHeaders(zipFile: ZipFile, archiveFile: File): List<net.lingala.zip4j.model.FileHeader> = try {
+        zipFile.fileHeaders ?: emptyList()
+    } catch (e: ZipException) {
+        if (isZipPasswordError(e)) throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
+        throw e
+    }
+
+    /** Zip-Slip guard: true when [dest] resolves inside the extraction root. */
+    private fun isInsideTarget(dest: File, targetCanonical: String): Boolean {
+        val destCanonical = dest.canonicalPath
+        return destCanonical == targetCanonical || destCanonical.startsWith(targetCanonical + File.separator)
+    }
+
+    private fun normalizeEntryName(name: String): String = name.replace('\\', '/').trimStart('/')
+
+    private fun deleteCreated(createdFiles: List<File>) {
+        for (f in createdFiles) {
+            try {
+                if (f.exists()) {
+                    if (f.isDirectory) f.deleteRecursively() else f.delete()
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
     fun validateArchivePassword(archiveFile: File, password: String?) {
         if (!archiveFile.exists() || !archiveFile.isFile) return
-        val ext = archiveFile.extension.lowercase(Locale.ROOT)
-        when (ext) {
-            "7z" -> {
-                val passwordChars = if (password.isNullOrEmpty()) null else password.toCharArray()
-                val sevenZFile = try {
-                    SevenZFile(archiveFile, passwordChars)
+        when (archiveFile.extension.lowercase(Locale.ROOT)) {
+            "7z" -> openSevenZ(archiveFile, password).use { archive ->
+                try {
+                    var entry = archive.nextEntry
+                    while (entry != null) {
+                        if (!entry.isDirectory && entry.hasStream() && archive.read(ByteArray(32)) != -1) break
+                        entry = archive.nextEntry
+                    }
                 } catch (e: org.apache.commons.compress.PasswordRequiredException) {
                     throw ArchivePasswordRequiredException(archiveFile.absolutePath)
                 } catch (e: IOException) {
-                    if (passwordChars != null) {
-                        throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                    }
+                    if (!password.isNullOrEmpty()) throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
                     throw e
                 }
-
-                sevenZFile.use { archive ->
+            }
+            "rar" -> openRar(archiveFile, password).use { arc ->
+                val testHeader = arc.fileHeaders?.firstOrNull { !it.isDirectory && it.unpSize > 0 }
+                    ?: arc.fileHeaders?.firstOrNull { !it.isDirectory }
+                if (testHeader != null && (!password.isNullOrEmpty() || arc.isEncrypted || arc.isPasswordProtected)) {
                     try {
-                        var entry = archive.nextEntry
-                        while (entry != null) {
-                            if (!entry.isDirectory && entry.hasStream()) {
-                                val buf = ByteArray(32)
-                                val count = archive.read(buf)
-                                if (count != -1) {
-                                    break
-                                }
-                            }
-                            entry = archive.nextEntry
-                        }
-                    } catch (e: org.apache.commons.compress.PasswordRequiredException) {
-                        throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                    } catch (e: IOException) {
-                        if (passwordChars != null) {
-                            throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                        }
+                        arc.extractFile(testHeader, DiscardingOutputStream)
+                    } catch (e: Exception) {
+                        if (e is ArchivePasswordRequiredException) throw e
+                        if (looksLikeRarPasswordError(e, includeCorruption = true)) throw rarPasswordException(archiveFile, password)
                         throw e
                     }
                 }
             }
-            "rar" -> {
-                val archive = try {
-                    if (!password.isNullOrEmpty()) {
-                        Archive(archiveFile, password)
-                    } else {
-                        Archive(archiveFile)
-                    }
-                } catch (e: Exception) {
-                    val msg = e.message?.lowercase(Locale.ROOT) ?: ""
-                    if (msg.contains("password") || msg.contains("encrypted") || msg.contains("header")) {
-                        if (password.isNullOrEmpty()) {
-                            throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                        } else {
-                            throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                        }
-                    }
-                    throw e
-                }
-                archive.use { arc ->
-                    if ((arc.isEncrypted || arc.isPasswordProtected) && password.isNullOrEmpty()) {
-                        throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                    }
-                    val testHeader = arc.fileHeaders?.firstOrNull { !it.isDirectory && it.unpSize > 0 }
-                        ?: arc.fileHeaders?.firstOrNull { !it.isDirectory }
-                    if (testHeader != null && (!password.isNullOrEmpty() || arc.isEncrypted || arc.isPasswordProtected)) {
-                        try {
-                            val dummyOut = object : java.io.OutputStream() {
-                                override fun write(b: Int) {}
-                                override fun write(b: ByteArray, off: Int, len: Int) {}
-                            }
-                            arc.extractFile(testHeader, dummyOut)
-                        } catch (e: Exception) {
-                            if (e is ArchivePasswordRequiredException) throw e
-                            val msg = e.message?.lowercase(Locale.ROOT) ?: ""
-                            if (msg.contains("password") || msg.contains("encrypted") || msg.contains("header") || msg.contains("crc") || msg.contains("corrupt")) {
-                                if (password.isNullOrEmpty()) {
-                                    throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                                } else {
-                                    throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                                }
-                            }
-                            throw e
-                        }
-                    }
-                }
-            }
-            else -> {
-                val zipFile = ZipFile(archiveFile)
-                if (zipFile.isEncrypted) {
-                    if (password.isNullOrEmpty()) {
-                        throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                    }
-                    zipFile.setPassword(password.toCharArray())
-                }
-                val headers = try {
-                    zipFile.fileHeaders ?: emptyList()
-                } catch (e: ZipException) {
-                    if (e.type == ZipException.Type.WRONG_PASSWORD || e.message?.contains("password", ignoreCase = true) == true) {
-                        throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                    }
-                    throw e
-                }
+            else -> openZip(archiveFile, password).use { zipFile ->
+                val headers = zipHeaders(zipFile, archiveFile)
                 val testHeader = headers.firstOrNull { !it.isDirectory && it.uncompressedSize > 0 }
                     ?: headers.firstOrNull { !it.isDirectory }
                 if (testHeader != null && (testHeader.isEncrypted || zipFile.isEncrypted)) {
                     try {
-                        zipFile.getInputStream(testHeader).use { stream ->
-                            val buf = ByteArray(32)
-                            stream.read(buf)
-                        }
+                        zipFile.getInputStream(testHeader).use { it.read(ByteArray(32)) }
                     } catch (e: ZipException) {
-                        if (e.type == ZipException.Type.WRONG_PASSWORD ||
-                            e.message?.contains("password", ignoreCase = true) == true ||
-                            e.message?.contains("checksum", ignoreCase = true) == true ||
-                            e.message?.contains("crc", ignoreCase = true) == true
-                        ) {
-                            throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                        }
+                        if (isZipPasswordError(e, includeChecksum = true)) throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
                         throw e
                     }
                 }
@@ -734,128 +663,31 @@ class FileOperationsHelper @Inject constructor(
         // Pre-validate password first so invalid password triggers immediately without creating any conflict/extract state
         validateArchivePassword(archiveFile, password)
 
-        val ext = archiveFile.extension.lowercase(Locale.ROOT)
+        // (entry name, uncompressed size) for every file entry, whatever the format
+        val fileEntries: List<Pair<String, Long>> = when (archiveFile.extension.lowercase(Locale.ROOT)) {
+            "7z" -> openSevenZ(archiveFile, password).use { archive ->
+                archive.entries.filter { !it.isDirectory }.map { it.name to it.size }
+            }
+            "rar" -> openRar(archiveFile, password).use { archive ->
+                (archive.fileHeaders ?: emptyList()).filter { !it.isDirectory }.map { it.fileName to it.unpSize }
+            }
+            else -> openZip(archiveFile, password).use { zipFile ->
+                zipHeaders(zipFile, archiveFile).filter { !it.isDirectory }.map { it.fileName to it.uncompressedSize }
+            }
+        }
+
         val destDir = File(targetDir)
         val targetCanonical = destDir.canonicalPath
-
-        when (ext) {
-            "7z" -> {
-                val passwordChars = if (password.isNullOrEmpty()) null else password.toCharArray()
-                val sevenZFile = try {
-                    SevenZFile(archiveFile, passwordChars)
-                } catch (e: org.apache.commons.compress.PasswordRequiredException) {
-                    throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                } catch (e: IOException) {
-                    if (passwordChars != null) {
-                        throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                    }
-                    throw e
-                }
-                sevenZFile.use { archive ->
-                    val conflicts = mutableListOf<com.antigravity.filemanager.domain.model.OverwriteConflict>()
-                    for (entry in archive.entries) {
-                        if (entry.isDirectory) continue
-                        val normName = entry.name.replace('\\', '/').trimStart('/')
-                        val destFile = File(destDir, normName)
-                        if (!destFile.canonicalPath.startsWith(targetCanonical + File.separator) && destFile.canonicalPath != targetCanonical) {
-                            continue
-                        }
-                        if (destFile.exists()) {
-                            conflicts.add(
-                                com.antigravity.filemanager.domain.model.OverwriteConflict(
-                                    name = normName,
-                                    existingSize = destFile.length(),
-                                    newSize = entry.size,
-                                    isDirectory = false
-                                )
-                            )
-                        }
-                    }
-                    conflicts
-                }
-            }
-            "rar" -> {
-                val arc = try {
-                    if (!password.isNullOrEmpty()) {
-                        Archive(archiveFile, password)
-                    } else {
-                        Archive(archiveFile)
-                    }
-                } catch (e: Exception) {
-                    val msg = e.message?.lowercase(Locale.ROOT) ?: ""
-                    if (msg.contains("password") || msg.contains("encrypted") || msg.contains("header")) {
-                        if (password.isNullOrEmpty()) {
-                            throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                        } else {
-                            throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                        }
-                    }
-                    throw e
-                }
-                arc.use { archive ->
-                    if ((archive.isEncrypted || archive.isPasswordProtected) && password.isNullOrEmpty()) {
-                        throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                    }
-                    val conflicts = mutableListOf<com.antigravity.filemanager.domain.model.OverwriteConflict>()
-                    val headers = archive.fileHeaders ?: emptyList()
-                    for (header in headers) {
-                        if (header.isDirectory) continue
-                        val normName = header.fileName.replace('\\', '/').trimStart('/')
-                        val destFile = File(destDir, normName)
-                        if (!destFile.canonicalPath.startsWith(targetCanonical + File.separator) && destFile.canonicalPath != targetCanonical) {
-                            continue
-                        }
-                        if (destFile.exists()) {
-                            conflicts.add(
-                                com.antigravity.filemanager.domain.model.OverwriteConflict(
-                                    name = normName,
-                                    existingSize = destFile.length(),
-                                    newSize = header.unpSize,
-                                    isDirectory = false
-                                )
-                            )
-                        }
-                    }
-                    conflicts
-                }
-            }
-            else -> {
-                val zipFile = ZipFile(archiveFile)
-                if (zipFile.isEncrypted) {
-                    if (password.isNullOrEmpty()) {
-                        throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                    }
-                    zipFile.setPassword(password.toCharArray())
-                }
-                val conflicts = mutableListOf<com.antigravity.filemanager.domain.model.OverwriteConflict>()
-                val headers = try {
-                    zipFile.fileHeaders ?: emptyList()
-                } catch (e: ZipException) {
-                    if (e.type == ZipException.Type.WRONG_PASSWORD || e.message?.contains("password", ignoreCase = true) == true) {
-                        throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                    }
-                    throw e
-                }
-                for (header in headers) {
-                    if (header.isDirectory) continue
-                    val normName = header.fileName.replace('\\', '/').trimStart('/')
-                    val destFile = File(destDir, normName)
-                    if (!destFile.canonicalPath.startsWith(targetCanonical + File.separator) && destFile.canonicalPath != targetCanonical) {
-                        continue
-                    }
-                    if (destFile.exists()) {
-                        conflicts.add(
-                            com.antigravity.filemanager.domain.model.OverwriteConflict(
-                                name = normName,
-                                existingSize = destFile.length(),
-                                newSize = header.uncompressedSize,
-                                isDirectory = false
-                            )
-                        )
-                    }
-                }
-                conflicts
-            }
+        fileEntries.mapNotNull { (rawName, size) ->
+            val normName = normalizeEntryName(rawName)
+            val destFile = File(destDir, normName)
+            if (!isInsideTarget(destFile, targetCanonical) || !destFile.exists()) return@mapNotNull null
+            com.antigravity.filemanager.domain.model.OverwriteConflict(
+                name = normName,
+                existingSize = destFile.length(),
+                newSize = size,
+                isDirectory = false
+            )
         }
     }
 
@@ -872,23 +704,19 @@ class FileOperationsHelper @Inject constructor(
             // Pre-validate password first before touching target filesystem!
             validateArchivePassword(archiveFile, password)
 
-            val ext = archiveFile.extension.lowercase(Locale.ROOT)
             val destDir = File(targetDir)
             if (!destDir.exists()) destDir.mkdirs()
 
-            when (ext) {
+            when (archiveFile.extension.lowercase(Locale.ROOT)) {
                 "7z" -> extract7z(archiveFile, destDir, password, overwriteNames, skipNames, onProgress)
                 "rar" -> extractRar(archiveFile, destDir, password, overwriteNames, skipNames, onProgress)
-                else -> extractZipInternal(archiveFile, targetDir, password, overwriteNames, skipNames, onProgress)
+                else -> extractZipInternal(archiveFile, destDir, password, overwriteNames, skipNames, onProgress)
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Result.failure(e)
         }
     }
-
-    suspend fun extractZip(zipFilePath: String, targetDir: String): Result<com.antigravity.filemanager.domain.model.ExtractResult> =
-        extractArchive(zipFilePath, targetDir, null)
 
     private suspend fun extract7z(
         archiveFile: File,
@@ -899,18 +727,7 @@ class FileOperationsHelper @Inject constructor(
         onProgress: ((currentEntry: String, currentIndex: Int, totalEntries: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
     ): Result<com.antigravity.filemanager.domain.model.ExtractResult> {
         val targetCanonical = targetDir.canonicalPath
-        val passwordChars = if (password.isNullOrEmpty()) null else password.toCharArray()
-
-        val sevenZFile = try {
-            SevenZFile(archiveFile, passwordChars)
-        } catch (e: org.apache.commons.compress.PasswordRequiredException) {
-            throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-        } catch (e: IOException) {
-            if (passwordChars != null) {
-                throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-            }
-            throw e
-        }
+        val sevenZFile = openSevenZ(archiveFile, password)
 
         val createdFiles = mutableListOf<File>()
         try {
@@ -930,10 +747,10 @@ class FileOperationsHelper @Inject constructor(
                 var entry = archive.nextEntry
                 while (entry != null) {
                     currentCoroutineContext().ensureActive()
-                    val normName = entry.name.replace('\\', '/').trimStart('/')
+                    val normName = normalizeEntryName(entry.name)
                     val defaultDestFile = File(targetDir, normName)
                     // Zip-Slip protection
-                    if (!defaultDestFile.canonicalPath.startsWith(targetCanonical + File.separator) && defaultDestFile.canonicalPath != targetCanonical) {
+                    if (!isInsideTarget(defaultDestFile, targetCanonical)) {
                         throw SecurityException("Zip Slip detected in archive: ${entry.name}")
                     }
 
@@ -957,7 +774,7 @@ class FileOperationsHelper @Inject constructor(
                             defaultDestFile
                         } else {
                             val parent = defaultDestFile.parentFile ?: targetDir
-                            uniqueDestination(parent, defaultDestFile.name)
+                            uniqueFile(parent, defaultDestFile.name)
                         }
 
                         if (!destFile.exists()) {
@@ -983,13 +800,10 @@ class FileOperationsHelper @Inject constructor(
                         } catch (e: org.apache.commons.compress.PasswordRequiredException) {
                             if (destFile.exists()) destFile.delete()
                             throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                        } catch (e: IOException) {
-                            if (destFile.exists()) destFile.delete()
-                            if (passwordChars != null) {
-                                throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                            }
-                            throw e
                         } catch (t: Throwable) {
+                            // The password was already validated up front, so any other I/O
+                            // failure here (disk full, permission, corrupt entry) is reported as
+                            // itself rather than as "incorrect password".
                             if (destFile.exists()) destFile.delete()
                             throw t
                         }
@@ -999,13 +813,7 @@ class FileOperationsHelper @Inject constructor(
                 return Result.success(com.antigravity.filemanager.domain.model.ExtractResult(totalEntries, extractedCount, skippedCount))
             }
         } catch (t: Throwable) {
-            for (f in createdFiles) {
-                try {
-                    if (f.exists()) {
-                        if (f.isDirectory) f.deleteRecursively() else f.delete()
-                    }
-                } catch (_: Exception) {}
-            }
+            deleteCreated(createdFiles)
             throw t
         }
     }
@@ -1022,15 +830,7 @@ class FileOperationsHelper @Inject constructor(
         val createdFiles = mutableListOf<File>()
         try {
             val targetCanonical = targetDir.canonicalPath
-            val archive = if (!password.isNullOrEmpty()) {
-                Archive(archiveFile, password)
-            } else {
-                Archive(archiveFile)
-            }
-            archive.use { arc ->
-                if ((arc.isEncrypted || arc.isPasswordProtected) && password.isNullOrEmpty()) {
-                    throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                }
+            openRar(archiveFile, password).use { arc ->
                 val allHeaders = arc.fileHeaders ?: emptyList()
                 val fileHeaders = allHeaders.filter { !it.isDirectory }
                 val totalEntries = fileHeaders.size
@@ -1045,9 +845,9 @@ class FileOperationsHelper @Inject constructor(
 
                 for (header in allHeaders) {
                     job.ensureActive()
-                    val normName = header.fileName.replace('\\', '/').trimStart('/')
+                    val normName = normalizeEntryName(header.fileName)
                     val defaultDestFile = File(targetDir, normName)
-                    if (!defaultDestFile.canonicalPath.startsWith(targetCanonical + File.separator) && defaultDestFile.canonicalPath != targetCanonical) {
+                    if (!isInsideTarget(defaultDestFile, targetCanonical)) {
                         throw SecurityException("Zip Slip detected in archive: ${header.fileName}")
                     }
 
@@ -1070,7 +870,7 @@ class FileOperationsHelper @Inject constructor(
                             defaultDestFile
                         } else {
                             val parent = defaultDestFile.parentFile ?: targetDir
-                            uniqueDestination(parent, defaultDestFile.name)
+                            uniqueFile(parent, defaultDestFile.name)
                         }
                         if (!destFile.exists()) {
                             createdFiles.add(destFile)
@@ -1115,46 +915,26 @@ class FileOperationsHelper @Inject constructor(
                 return Result.success(com.antigravity.filemanager.domain.model.ExtractResult(totalEntries, extractedCount, skippedCount))
             }
         } catch (e: Throwable) {
-            for (f in createdFiles) {
-                try {
-                    if (f.exists()) {
-                        if (f.isDirectory) f.deleteRecursively() else f.delete()
-                    }
-                } catch (_: Exception) {}
-            }
-            if (e is ArchivePasswordRequiredException || e is ArchiveInvalidPasswordException) throw e
-            val msg = e.message?.lowercase(Locale.ROOT) ?: ""
-            if (msg.contains("password") || msg.contains("encrypted") || msg.contains("header") || msg.contains("crc") || msg.contains("corrupt")) {
-                if (password.isNullOrEmpty()) {
-                    throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-                } else {
-                    throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                }
-            }
+            deleteCreated(createdFiles)
+            if (e is ArchivePasswordRequiredException || e is ArchiveInvalidPasswordException || e is CancellationException) throw e
+            if (looksLikeRarPasswordError(e, includeCorruption = true)) throw rarPasswordException(archiveFile, password)
             throw e
         }
     }
 
     private suspend fun extractZipInternal(
         archiveFile: File,
-        targetDir: String,
+        destDir: File,
         password: String?,
         overwriteNames: Set<String> = emptySet(),
         skipNames: Set<String> = emptySet(),
         onProgress: ((currentEntry: String, currentIndex: Int, totalEntries: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
     ): Result<com.antigravity.filemanager.domain.model.ExtractResult> {
-        val zipFile = ZipFile(archiveFile)
-        if (zipFile.isEncrypted) {
-            if (password.isNullOrEmpty()) {
-                throw ArchivePasswordRequiredException(archiveFile.absolutePath)
-            }
-            zipFile.setPassword(password.toCharArray())
-        }
         val createdFiles = mutableListOf<File>()
+        val zipFile = openZip(archiveFile, password)
         try {
-            val destDir = File(targetDir)
             val targetCanonical = destDir.canonicalPath
-            val allHeaders = zipFile.fileHeaders ?: emptyList()
+            val allHeaders = zipHeaders(zipFile, archiveFile)
             val fileHeaders = allHeaders.filter { !it.isDirectory }
             val totalEntries = fileHeaders.size
             val totalBytes = fileHeaders.sumOf { it.uncompressedSize }
@@ -1168,9 +948,9 @@ class FileOperationsHelper @Inject constructor(
 
             val buffer = ByteArray(64 * 1024)
             for (header in allHeaders) {
-                val normName = header.fileName.replace('\\', '/').trimStart('/')
+                val normName = normalizeEntryName(header.fileName)
                 val defaultDestFile = File(destDir, normName)
-                if (!defaultDestFile.canonicalPath.startsWith(targetCanonical + File.separator) && defaultDestFile.canonicalPath != targetCanonical) {
+                if (!isInsideTarget(defaultDestFile, targetCanonical)) {
                     throw SecurityException("Zip Slip detected in archive: ${header.fileName}")
                 }
 
@@ -1193,7 +973,7 @@ class FileOperationsHelper @Inject constructor(
                         defaultDestFile
                     } else {
                         val parent = defaultDestFile.parentFile ?: destDir
-                        uniqueDestination(parent, defaultDestFile.name)
+                        uniqueFile(parent, defaultDestFile.name)
                     }
                     if (!destFile.exists()) {
                         createdFiles.add(destFile)
@@ -1219,7 +999,7 @@ class FileOperationsHelper @Inject constructor(
                         onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
                     } catch (e: ZipException) {
                         if (destFile.exists()) destFile.delete()
-                        if (e.type == ZipException.Type.WRONG_PASSWORD || e.message?.contains("password", ignoreCase = true) == true) {
+                        if (isZipPasswordError(e)) {
                             throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
                         }
                         throw e
@@ -1231,19 +1011,16 @@ class FileOperationsHelper @Inject constructor(
             }
             return Result.success(com.antigravity.filemanager.domain.model.ExtractResult(totalEntries, extractedCount, skippedCount))
         } catch (t: Throwable) {
-            for (f in createdFiles) {
-                try {
-                    if (f.exists()) {
-                        if (f.isDirectory) f.deleteRecursively() else f.delete()
-                    }
-                } catch (_: Exception) {}
-            }
-            if (t is ZipException) {
-                if (t.type == ZipException.Type.WRONG_PASSWORD || t.message?.contains("password", ignoreCase = true) == true) {
-                    throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
-                }
-            }
+            deleteCreated(createdFiles)
+            if (t is ZipException && isZipPasswordError(t)) throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
             throw t
+        } finally {
+            try { zipFile.close() } catch (_: Exception) {}
         }
     }
+}
+
+private object DiscardingOutputStream : java.io.OutputStream() {
+    override fun write(b: Int) {}
+    override fun write(b: ByteArray, off: Int, len: Int) {}
 }

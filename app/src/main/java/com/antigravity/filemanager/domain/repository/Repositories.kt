@@ -83,13 +83,6 @@ interface IFileRepository {
         password: String? = null
     ): List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList()
     fun isArchiveEncrypted(archiveFilePath: String): Boolean = false
-    suspend fun zipFiles(
-        sourcePaths: List<String>,
-        targetZipPath: String,
-        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
-    ): Result<FileItem> = compressFiles(sourcePaths, targetZipPath, onProgress)
-    suspend fun extractZip(zipFilePath: String, targetDirectory: String): Result<ExtractResult> =
-        extractArchive(zipFilePath, targetDirectory, null)
     suspend fun getFileDetails(filePath: String): FileItem?
 }
 

@@ -26,3 +26,26 @@ fun collectFileCopyEntries(source: File, dest: File, fileEntries: MutableList<Fi
         fileEntries.add(FileCopyEntry(source, dest))
     }
 }
+
+/** A collision-free file in [folder] for [name], appending " (1)", " (2)", ... before the
+ * extension as needed. */
+fun uniqueFile(folder: File, name: String): File {
+    var candidate = File(folder, name)
+    if (!candidate.exists()) return candidate
+    val dotIndex = name.lastIndexOf('.')
+    val base = if (dotIndex > 0) name.substring(0, dotIndex) else name
+    val ext = if (dotIndex > 0) name.substring(dotIndex) else ""
+    var counter = 1
+    while (candidate.exists()) {
+        candidate = File(folder, "$base ($counter)$ext")
+        counter++
+    }
+    return candidate
+}
+
+/** Total size of every file under [dir] (or [dir]'s own length for a plain file); 0 on failure. */
+fun directorySize(dir: File): Long = try {
+    if (dir.isDirectory) dir.walkTopDown().filter { it.isFile }.sumOf { it.length() } else dir.length()
+} catch (e: Exception) {
+    0L
+}

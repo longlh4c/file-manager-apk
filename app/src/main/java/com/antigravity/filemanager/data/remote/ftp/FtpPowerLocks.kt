@@ -19,10 +19,12 @@ import android.os.PowerManager
 class FtpPowerLocks(context: Context) {
     private val wakeLock: PowerManager.WakeLock = (context.getSystemService(Context.POWER_SERVICE) as PowerManager)
         .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FileManager::FtpWakeLock")
+        .apply { setReferenceCounted(false) } // a repeated acquire() must not outlive one release()
 
     @Suppress("DEPRECATION")
     private val screenWakeLock: PowerManager.WakeLock = (context.getSystemService(Context.POWER_SERVICE) as PowerManager)
         .newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE, "FileManager::FtpScreenWakeLock")
+        .apply { setReferenceCounted(false) }
 
     @Suppress("DEPRECATION")
     private val wifiLock: WifiManager.WifiLock? = (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager)

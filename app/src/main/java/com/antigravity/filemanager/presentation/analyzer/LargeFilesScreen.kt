@@ -79,14 +79,15 @@ fun LargeFilesScreen(
         )
     }
 
-    if (showRenameDialog && itemToRename != null) {
+    val renameTarget = itemToRename
+    if (showRenameDialog && renameTarget != null) {
         TextInputDialog(
             title = "Rename",
-            initialValue = itemToRename!!.name,
+            initialValue = renameTarget.name,
             confirmButtonText = "OK",
-            selectNameWithoutExtension = !itemToRename!!.isDirectory,
+            selectNameWithoutExtension = !renameTarget.isDirectory,
             onConfirm = { newName ->
-                viewModel.rename(itemToRename!!.path, newName) {
+                viewModel.rename(renameTarget.path, newName) {
                     selectedPaths = emptySet()
                 }
                 showRenameDialog = false

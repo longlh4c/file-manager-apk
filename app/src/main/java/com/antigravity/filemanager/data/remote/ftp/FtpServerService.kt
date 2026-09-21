@@ -25,6 +25,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -41,6 +43,9 @@ class FtpServerService : Service() {
 
     private lateinit var powerLocks: FtpPowerLocks
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    // Start and stop run as separate coroutines; this keeps a quick stop->start (or a start with
+    // new settings) from interleaving halfway through each other.
+    private val lifecycleMutex = Mutex()
 
     companion object {
         const val ACTION_START = "ACTION_START_FTP"
@@ -85,6 +90,9 @@ class FtpServerService : Service() {
                             val httpPort = preferenceManager.httpPortFlow.first()
                             val password = preferenceManager.ftpPasswordFlow.first()
                             startServer(port, httpPort, password, random = false)
+                        } else {
+                            // Sticky restart with nothing to resume: don't linger as an idle service.
+                            stopSelf()
                         }
                     }
                 }
@@ -94,7 +102,11 @@ class FtpServerService : Service() {
     }
 
     private fun startServer(port: Int, httpPort: Int, pass: String, random: Boolean) {
-        serviceScope.launch {
+        launchLocked {
+            // start() on an already-running server is a no-op that keeps the OLD port/password,
+            // while the state below would advertise the new ones — restart so they match.
+            if (ftpServer.isRunning) ftpServer.stop()
+            if (httpServer.isRunning) httpServer.stop()
             val effectivePort = if (port in 1024..65535) port else 1524
             var effectiveHttpPort = if (httpPort in 1024..65535) httpPort else 8080
             if (effectiveHttpPort == effectivePort) {
@@ -118,6 +130,7 @@ class FtpServerService : Service() {
                 val notificationText = "Web: http://$ip:$effectiveHttpPort\nFTP: ftp://$ip:$effectivePort"
                 startForegroundNotification(notificationText)
             } else {
+                powerLocks.release()
                 _ftpState.value = _ftpState.value.copy(isRunning = false)
                 preferenceManager.setFtpWasRunning(false)
                 stopSelf()
@@ -125,8 +138,12 @@ class FtpServerService : Service() {
         }
     }
 
+    private fun launchLocked(block: suspend () -> Unit) {
+        serviceScope.launch { lifecycleMutex.withLock { block() } }
+    }
+
     private fun stopServer() {
-        serviceScope.launch {
+        launchLocked {
             ftpServer.stop()
             httpServer.stop()
             preferenceManager.setFtpWasRunning(false)

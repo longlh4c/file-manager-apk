@@ -1824,6 +1824,11 @@ class CloudExplorerViewModel @Inject constructor(
                 if (!skipRefresh) refresh()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 _uiState.value = _uiState.value.copy(downloadProgress = null, isLoading = false, toastMessage = "Transfer cancelled")
+            } catch (e: Exception) {
+                // Anything unexpected used to escape to viewModelScope (crashing the app) with
+                // isLoading left stuck on.
+                android.util.Log.e("CloudExplorerViewModel", "paste failed", e)
+                _uiState.value = _uiState.value.copy(downloadProgress = null, isLoading = false, toastMessage = "Paste failed: ${e.message}")
             }
         }
 

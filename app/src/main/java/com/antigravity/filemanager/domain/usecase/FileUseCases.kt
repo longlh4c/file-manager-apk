@@ -10,9 +10,7 @@ import java.io.File
 import javax.inject.Inject
 
 class GetDashboardDataUseCase @Inject constructor(
-    private val storageRepository: IStorageRepository,
-    private val recycleBinRepository: IRecycleBinRepository,
-    private val cloudRepository: ICloudRepository
+    private val storageRepository: IStorageRepository
 ) {
     suspend fun getStorageInfo(): StorageVolumeInfo = storageRepository.getStorageVolumeInfo()
     suspend fun getSummaries(): List<CategorySummary> = storageRepository.getCategorySummaries()
@@ -234,15 +232,6 @@ class FileOperationsUseCase @Inject constructor(
     fun isArchiveEncrypted(archivePath: String): Boolean =
         fileRepository.isArchiveEncrypted(archivePath)
 
-    suspend fun zip(
-        sourcePaths: List<String>,
-        targetZipPath: String,
-        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
-    ): Result<FileItem> = compress(sourcePaths, targetZipPath, onProgress)
-
-    suspend fun unzip(zipPath: String, targetDir: String, password: String? = null): Result<com.antigravity.filemanager.domain.model.ExtractResult> =
-        extract(zipPath, targetDir, password)
-
     suspend fun search(query: String, rootPath: String? = null, category: CategoryType? = null): List<FileItem> =
         fileRepository.searchFiles(query, rootPath, category)
 
@@ -372,13 +361,20 @@ class CloudStorageUseCase @Inject constructor(
             // Directories in localPaths have no single "upload" call — recursively create a
             // matching remote folder tree first, then flatten every real file underneath into
             // (file, itsResolvedTargetDir) pairs. Files passed in directly keep target=remoteDir.
-            val flatFiles = mutableListOf<Pair<File, String>>()
+            // Conflict choices only ever resolve top-level names (same as local copy/move): a
+            // skipped folder is left out entirely, and every file inside an overwritten folder
+            // overwrites its remote counterpart.
+            val flatFiles = mutableListOf<UploadItem>()
             for (path in localPaths) {
                 val entry = File(path)
+                if (entry.name in skipNames) continue
+                val overwrite = entry.name in overwriteNames
                 if (entry.isDirectory) {
-                    flattenDirectoryForUpload(accountId, entry, remoteDir, flatFiles)
+                    val nested = mutableListOf<Pair<File, String>>()
+                    flattenDirectoryForUpload(accountId, entry, remoteDir, nested)
+                    nested.mapTo(flatFiles) { (file, dir) -> UploadItem(file, dir, overwrite) }
                 } else if (entry.isFile) {
-                    flatFiles.add(entry to remoteDir)
+                    flatFiles.add(UploadItem(entry, remoteDir, overwrite))
                 }
             }
 
@@ -410,23 +406,24 @@ class CloudStorageUseCase @Inject constructor(
             // "Skip" on every conflict still reported "Transferred N file(s) successfully" for
             // zero real uploads. Track what actually went out and hand that back instead.
             var uploadedCount = 0
-            flatFiles.forEachIndexed { index, (file, targetDir) ->
-                if (file.name in skipNames) return@forEachIndexed
-
+            flatFiles.forEachIndexed { index, (file, targetDir, overwrite) ->
                 val existingNames = existingNamesFor(targetDir)
                 val conflictItem = existingItemsByDir[targetDir]?.find { it.name == file.name }
                 var uploadSource = file
-                var tempCopy: File? = null
+                var tempDir: File? = null
                 if (conflictItem != null) {
-                    if (file.name in overwriteNames) {
+                    if (overwrite) {
                         cloudRepository.deleteCloudFile(accountId, conflictItem.path)
                         existingNames.remove(file.name)
                     } else {
+                        // "Keep both": the providers name the upload after the local file, so it
+                        // needs a renamed copy — made in app cache, never next to the user's own
+                        // file (where a same-named local file made copyTo() throw, and a crash
+                        // mid-upload left the copy behind in their folder).
                         val uniqueName = uniqueCloudName(existingNames, file.name)
-                        val copy = File(file.parentFile, uniqueName)
-                        file.copyTo(copy, overwrite = false)
-                        uploadSource = copy
-                        tempCopy = copy
+                        val dir = File(System.getProperty("java.io.tmpdir"), "upload_${System.nanoTime()}").apply { mkdirs() }
+                        tempDir = dir
+                        uploadSource = file.copyTo(File(dir, uniqueName), overwrite = true)
                         existingNames.add(uniqueName)
                     }
                 } else {
@@ -435,11 +432,14 @@ class CloudStorageUseCase @Inject constructor(
 
                 val fileSize = uploadSource.length()
                 onFileProgress?.invoke(uploadSource.name, index + 1, totalFiles, 0L, fileSize)
-                val uploadResult = cloudRepository.uploadCloudFile(accountId, uploadSource.absolutePath, targetDir) { sent, total ->
-                    val effTotal = if (total > 0) total else fileSize
-                    onFileProgress?.invoke(uploadSource.name, index + 1, totalFiles, sent, effTotal)
+                val uploadResult = try {
+                    cloudRepository.uploadCloudFile(accountId, uploadSource.absolutePath, targetDir) { sent, total ->
+                        val effTotal = if (total > 0) total else fileSize
+                        onFileProgress?.invoke(uploadSource.name, index + 1, totalFiles, sent, effTotal)
+                    }
+                } finally {
+                    tempDir?.deleteRecursively()
                 }
-                tempCopy?.delete()
                 if (uploadResult.isFailure) {
                     // Every remaining file would fail for the same reason (same account/target),
                     // so stop here instead of silently reporting success for a partial batch.
@@ -456,6 +456,8 @@ class CloudStorageUseCase @Inject constructor(
             transferGuard.end()
         }
     }
+
+    private data class UploadItem(val file: File, val targetDir: String, val overwrite: Boolean)
 
     // Recursively mirrors a local directory tree into the cloud: reuses an existing remote
     // folder of the same name if present (merge), otherwise creates one — then walks children,
@@ -566,16 +568,23 @@ class CloudStorageUseCase @Inject constructor(
         )
         val filesToDownload = mutableListOf<FileDownloadItem>()
         val emptyFolders = mutableListOf<Pair<File, String>>()
+        val failedTopSources = mutableSetOf<String>()
 
         suspend fun crawlFolder(currentRemoteDir: String, currentLocalDir: File, topSource: String) {
             kotlinx.coroutines.currentCoroutineContext().ensureActive()
             currentLocalDir.mkdirs()
             val childrenResult = cloudRepository.getCloudFiles(accountId, currentRemoteDir)
             val children = childrenResult.getOrNull()
-            if (children.isNullOrEmpty()) {
-                if (childrenResult.isSuccess) {
-                    emptyFolders.add(currentLocalDir to topSource)
-                }
+            if (children == null) {
+                // An unlistable folder was previously treated like an empty one — and a move then
+                // deleted the whole source folder from the cloud without having downloaded it.
+                android.util.Log.e("CloudStorageUseCase", "downloadFilesToLocal: listing failed for '$currentRemoteDir'", childrenResult.exceptionOrNull())
+                failedNames.add(File(currentRemoteDir).name)
+                failedTopSources.add(topSource)
+                return
+            }
+            if (children.isEmpty()) {
+                emptyFolders.add(currentLocalDir to topSource)
                 return
             }
             for (child in children) {
@@ -599,7 +608,7 @@ class CloudStorageUseCase @Inject constructor(
             val destFile = if (name in overwriteNames) {
                 File(targetFolder, name)
             } else if (File(targetFolder, name).exists()) {
-                uniqueLocalDestination(targetFolder, name)
+                com.antigravity.filemanager.data.local.storage.uniqueFile(targetFolder, name)
             } else {
                 File(targetFolder, name)
             }
@@ -619,7 +628,6 @@ class CloudStorageUseCase @Inject constructor(
         }
 
         val totalCount = filesToDownload.size
-        val failedTopSources = mutableSetOf<String>()
 
         // 2. Download all files
         filesToDownload.forEachIndexed { index, item ->
@@ -721,20 +729,6 @@ class CloudStorageUseCase @Inject constructor(
             folderCacheManager.notifyCloudFilesRemoved(accountId, parentPath, removedPaths)
         }
         return CloudDownloadToLocalResult(scannedPaths, failedNames)
-    }
-
-    private fun uniqueLocalDestination(targetFolder: File, name: String): File {
-        var candidate = File(targetFolder, name)
-        if (!candidate.exists()) return candidate
-        val dotIndex = name.lastIndexOf('.')
-        val base = if (dotIndex > 0) name.substring(0, dotIndex) else name
-        val ext = if (dotIndex > 0) name.substring(dotIndex) else ""
-        var counter = 1
-        while (candidate.exists()) {
-            candidate = File(targetFolder, "$base ($counter)$ext")
-            counter++
-        }
-        return candidate
     }
 
     suspend fun downloadThumbnail(accountId: String, nodeId: String): Result<ByteArray> =
