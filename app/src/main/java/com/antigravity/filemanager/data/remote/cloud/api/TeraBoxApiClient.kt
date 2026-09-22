@@ -493,25 +493,36 @@ class TeraBoxApiClient @Inject constructor(
         }
     }
 
+    /** Runs a /api/filemanager operation synchronously (async=0) with the page jsToken. The
+     * top-level errno can be 0 while an individual item failed, so per-item errors count too. */
+    private fun fileManager(opera: String, fileListJson: String, cookie: String): Result<Unit> {
+        val jsToken = fetchJsToken(cookie)
+        val tokenQuery = if (jsToken.isNotBlank()) "&jsToken=${URLEncoder.encode(jsToken, "UTF-8")}" else ""
+        val formBody = FormBody.Builder().add("filelist", fileListJson).build()
+        val (response, body) = executeWithRetry(
+            "/api/filemanager?opera=$opera&async=0&onnest=fail$tokenQuery", cookie, method = "POST", body = formBody
+        )
+        if (!response.isSuccessful) {
+            return Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
+        }
+        val json = JSONObject(body)
+        val info = json.optJSONArray("info")
+        val itemErrno = (0 until (info?.length() ?: 0))
+            .map { info!!.optJSONObject(it)?.optInt("errno", 0) ?: 0 }
+            .firstOrNull { it != 0 } ?: 0
+        val errno = json.optInt("errno", -1).takeIf { it != 0 } ?: itemErrno
+        if (errno != 0) {
+            android.util.Log.e("TeraBoxApiClient", "filemanager $opera failed: ${body.take(500)}")
+            return Result.failure(IOException("TeraBox $opera failed (errno: $errno)"))
+        }
+        return Result.success(Unit)
+    }
+
     suspend fun deleteFile(account: CloudAccount, remotePath: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val cookie = getCookieString(account)
             val fileListJson = JSONArray().put(remotePath).toString()
-            val formBody = FormBody.Builder()
-                .add("filelist", fileListJson)
-                .build()
-
-            val (response, body) = executeWithRetry("/api/filemanager?opera=delete", cookie, method = "POST", body = formBody)
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
-            }
-
-            val json = JSONObject(body)
-            val errno = json.optInt("errno", -1)
-            if (errno != 0) {
-                return@withContext Result.failure(IOException("TeraBox delete failed (errno: $errno)"))
-            }
-            Result.success(Unit)
+            fileManager("delete", fileListJson, cookie)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -525,21 +536,7 @@ class TeraBoxApiClient @Inject constructor(
                 put("newname", newName)
             }
             val fileListJson = JSONArray().put(renameEntry).toString()
-            val formBody = FormBody.Builder()
-                .add("filelist", fileListJson)
-                .build()
-
-            val (response, body) = executeWithRetry("/api/filemanager?opera=rename", cookie, method = "POST", body = formBody)
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
-            }
-
-            val json = JSONObject(body)
-            val errno = json.optInt("errno", -1)
-            if (errno != 0) {
-                return@withContext Result.failure(IOException("TeraBox rename failed (errno: $errno)"))
-            }
-            Result.success(Unit)
+            fileManager("rename", fileListJson, cookie)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -560,21 +557,7 @@ class TeraBoxApiClient @Inject constructor(
                 put("newname", fileName)
             }
             val fileListJson = JSONArray().put(moveEntry).toString()
-            val formBody = FormBody.Builder()
-                .add("filelist", fileListJson)
-                .build()
-
-            val (response, body) = executeWithRetry("/api/filemanager?opera=move", cookie, method = "POST", body = formBody)
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
-            }
-
-            val json = JSONObject(body)
-            val errno = json.optInt("errno", -1)
-            if (errno != 0) {
-                return@withContext Result.failure(IOException("TeraBox move failed (errno: $errno)"))
-            }
-            Result.success(Unit)
+            fileManager("move", fileListJson, cookie)
         } catch (e: Exception) {
             Result.failure(e)
         }

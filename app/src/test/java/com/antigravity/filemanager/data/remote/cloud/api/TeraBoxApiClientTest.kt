@@ -345,6 +345,26 @@ class TeraBoxApiClientTest {
         assertEquals("/dir/${file.name}", item.path)
     }
 
+    @Test
+    fun deleteRunsSynchronouslyAndReportsPerItemFailure() = runBlocking {
+        var query = ""
+        val tb = fakeClient { req ->
+            when (req.url.encodedPath) {
+                "/api/filemanager" -> {
+                    query = req.url.query.orEmpty()
+                    200 to """{"errno":0,"info":[{"errno":-9,"path":"/_owltest"}]}""".toByteArray()
+                }
+                else -> 404 to ByteArray(0)
+            }
+        }
+
+        val result = tb.deleteFile(account, "/_owltest")
+
+        assertTrue(result.isFailure)
+        assertTrue(query.contains("opera=delete"))
+        assertTrue(query.contains("async=0"))
+    }
+
     private fun formField(req: okhttp3.Request, name: String): String {
         val buffer = okio.Buffer()
         req.body!!.writeTo(buffer)
