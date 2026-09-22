@@ -139,7 +139,7 @@ fun DashboardScreen(
         ) {
             items(
                 uiState.categories.filterNot { it.type == CategoryType.CLOUD || it.type == CategoryType.ACCESS_FROM_NETWORK },
-                key = { it.type.name + it.title }
+                key = { it.type.name + it.title + it.id }
             ) { summary ->
                 CategoryCard(
                     summary = summary,
@@ -162,7 +162,7 @@ fun DashboardScreen(
                             CategoryType.ACCESS_FROM_NETWORK -> {}
                             CategoryType.RECYCLE_BIN -> onNavigateToTrash()
                             CategoryType.USB_OTG -> {
-                                val usbDrive = uiState.usbDrives.find { it.displayName == summary.title } ?: uiState.usbDrives.firstOrNull()
+                                val usbDrive = uiState.usbDrives.find { it.rootPath == summary.id }
                                 if (usbDrive != null) {
                                     onNavigateToBrowser(usbDrive.rootPath, usbDrive.displayName)
                                 }

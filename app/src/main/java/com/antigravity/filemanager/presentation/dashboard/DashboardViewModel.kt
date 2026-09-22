@@ -337,7 +337,8 @@ class DashboardViewModel @Inject constructor(
                     type = CategoryType.USB_OTG,
                     title = drive.displayName,
                     totalSizeBytes = drive.totalBytes,
-                    subtitle = "${drive.formattedUsed} / ${drive.formattedTotal}"
+                    subtitle = "${drive.formattedUsed} / ${drive.formattedTotal}",
+                    id = drive.rootPath
                 )
             }
             filtered + usbSummaries

@@ -157,12 +157,17 @@ class FileBrowserViewModel @Inject constructor(
 
     private fun observeUsbConnection() {
         viewModelScope.launch {
-            usbOtgManager.connectedUsbDrives.collect { drives ->
+            // Only a finished scan can say a drive is gone: the list starts out empty, and a
+            // browser restored inside a drive (process death) was bounced out before it was read.
+            kotlinx.coroutines.flow.combine(usbOtgManager.connectedUsbDrives, usbOtgManager.scanned) { drives, scanned ->
+                drives.takeIf { scanned }
+            }.collect { drives ->
+                if (drives == null) return@collect
                 val current = _uiState.value.currentPath
                 val isUsbPath = _uiState.value.categoryType == com.antigravity.filemanager.domain.model.CategoryType.USB_OTG ||
                         (current.startsWith("/storage/") && !current.startsWith("/storage/emulated"))
                 if (isUsbPath) {
-                    val isDriveStillConnected = drives.any { current.startsWith(it.rootPath) }
+                    val isDriveStillConnected = drives.any { current == it.rootPath || current.startsWith(it.rootPath + "/") }
                     if (!isDriveStillConnected) {
                         _uiState.update { old -> old.copy(
                             shouldNavigateBackOnUsbDisconnect = true

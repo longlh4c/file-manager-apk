@@ -147,7 +147,10 @@ data class CategorySummary(
     val title: String,
     val totalSizeBytes: Long = 0L,
     val itemCount: Int = 0,
-    val subtitle: String = ""
+    val subtitle: String = "",
+    // Tells apart several cards of one type (a USB drive's root path): two drives with the same
+    // name produced duplicate list keys, crashing the dashboard, and opened the same drive.
+    val id: String = ""
 ) {
     val formattedDisplay: String
         get() = when (type) {
