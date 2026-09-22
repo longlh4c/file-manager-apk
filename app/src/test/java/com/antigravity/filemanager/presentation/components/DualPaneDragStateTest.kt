@@ -3,6 +3,7 @@ package com.antigravity.filemanager.presentation.components
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import com.antigravity.filemanager.domain.usecase.ActivePanel
+import com.antigravity.filemanager.domain.usecase.GlobalClipboardState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -17,11 +18,11 @@ class DualPaneDragStateTest {
     private var finished = false
 
     private fun state(rightFolder: String = "/sdcard/B") = DualPaneDragState().apply {
-        register(ActivePanel.LEFT, DualPaneDropTarget("/sdcard/A", "A", leftBounds) { _, _ -> error("left must not receive") })
-        register(ActivePanel.RIGHT, DualPaneDropTarget(rightFolder, "B", rightBounds) { paths, isMove -> dropped = paths to isMove })
+        register(ActivePanel.LEFT, DualPaneDropTarget("/sdcard/A", "A", leftBounds) { error("left must not receive") })
+        register(ActivePanel.RIGHT, DualPaneDropTarget(rightFolder, "B", rightBounds) { dropped = it.paths to it.isCut })
     }
 
-    private fun payload() = DualPaneDragPayload(ActivePanel.LEFT, listOf("/sdcard/A/x.txt"), "/sdcard/A") { finished = true }
+    private fun payload() = DualPaneDragPayload(ActivePanel.LEFT, GlobalClipboardState(paths = listOf("/sdcard/A/x.txt")), "/sdcard/A") { finished = true }
 
     @Test
     fun droppingOnTheOtherPaneAsksAndThenMoves() {

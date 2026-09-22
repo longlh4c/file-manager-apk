@@ -13,6 +13,7 @@ import com.antigravity.filemanager.domain.model.FileSortOption
 import com.antigravity.filemanager.domain.usecase.CloudStorageUseCase
 import com.antigravity.filemanager.domain.usecase.FileOperationsUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardManager
+import com.antigravity.filemanager.domain.usecase.GlobalClipboardState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -1540,10 +1541,28 @@ class CloudExplorerViewModel @Inject constructor(
     private var pendingOverwriteAction: (suspend (overwriteNames: Set<String>, skipNames: Set<String>) -> Unit)? = null
 
     fun paste() {
-        val sources = _uiState.value.clipboardPaths
+        val s = _uiState.value
+        pasteItems(
+            GlobalClipboardState(
+                paths = s.clipboardPaths,
+                isCut = s.isCutOperation,
+                sourceCloudAccountId = s.clipboardSourceCloudAccountId,
+                itemSizes = s.clipboardItemSizes,
+                itemIsDirectory = s.clipboardItemIsDirectory
+            ),
+            fromClipboard = true
+        )
+    }
+
+    /** Items dropped onto this folder from the other dual-panel pane (local or cloud); the same
+     * flow as paste, leaving the clipboard alone. */
+    fun dropItems(items: GlobalClipboardState) = pasteItems(items, fromClipboard = false)
+
+    private fun pasteItems(clip: GlobalClipboardState, fromClipboard: Boolean) {
+        val sources = clip.paths
         if (sources.isEmpty() || _uiState.value.isLoading) return
-        val sourceCloudAccountId = _uiState.value.clipboardSourceCloudAccountId
-        val isMove = _uiState.value.isCutOperation
+        val sourceCloudAccountId = clip.sourceCloudAccountId
+        val isMove = clip.isCut
         val targetPath = _uiState.value.currentPath
 
         suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>) {
@@ -1650,7 +1669,7 @@ class CloudExplorerViewModel @Inject constructor(
                     // straight to downloadFile() as if it were a single file, which always failed
                     // and silently dropped every file inside it.
                     val tempDir = File(context.cacheDir, "clipboard_transfer").apply { mkdirs() }
-                    val isDirectoryByPath = _uiState.value.clipboardItemIsDirectory
+                    val isDirectoryByPath = clip.itemIsDirectory
                     data class FlatEntry(val remoteFilePath: String, val targetDir: String, val topSource: String)
                     val flat = mutableListOf<FlatEntry>()
                     // Tracks whether every file under a given top-level source transferred
@@ -1830,7 +1849,7 @@ class CloudExplorerViewModel @Inject constructor(
                     _uiState.update { old -> old.copy(downloadProgress = null) }
                     tempDir.deleteRecursively()
                 }
-                globalClipboardManager.clear()
+                if (fromClipboard) globalClipboardManager.clear()
                 _uiState.update { old -> old.copy(
                     isLoading = false,
                     toastMessage = if (failures == 0) {
@@ -1858,7 +1877,7 @@ class CloudExplorerViewModel @Inject constructor(
         // resetting the same network call instead of ever letting it finish.
         _uiState.update { old -> old.copy(isLoading = true) }
         activeTransferJob = viewModelScope.launch {
-            val itemSizes = _uiState.value.clipboardItemSizes
+            val itemSizes = clip.itemSizes
             val items = sources.map { path ->
                 val name = File(path).name
                 val size = itemSizes[path] ?: (if (sourceCloudAccountId == null) File(path).length() else 0L)
@@ -1906,6 +1925,21 @@ class CloudExplorerViewModel @Inject constructor(
         val isDirectory = matching.associate { it.path to it.isDirectory }
         globalClipboardManager.copyFromCloud(accountId, selected, sizes, ids, isDirectory)
         clearSelection()
+    }
+
+    /** What dragging [file] to the other dual-panel pane carries: the selection plus [file], in
+     * the same form as copySelected(). Nothing is dragged out of a trash view. */
+    fun dragItems(file: FileItem): GlobalClipboardState {
+        if (_uiState.value.isInsideTrashView) return GlobalClipboardState()
+        val keys = _uiState.value.selectedPaths + file.id
+        val matching = visibleFiles().filter { it.id in keys || it.path in keys }
+        return GlobalClipboardState(
+            paths = matching.map { it.path },
+            sourceCloudAccountId = accountId,
+            itemSizes = matching.associate { it.path to it.size },
+            cloudFileIds = matching.associate { it.path to it.id },
+            itemIsDirectory = matching.associate { it.path to it.isDirectory }
+        )
     }
 
     fun cutSelected() {

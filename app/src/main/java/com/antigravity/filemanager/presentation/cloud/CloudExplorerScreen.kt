@@ -567,9 +567,19 @@ fun CloudExplorerScreen(
                 )
             }
 
+            // The folder shown here receives items dragged from the other dual-panel pane.
+            var dropBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
+            if (!uiState.isInsideTrashView) {
+                DualPaneDropTargetEffect(
+                    location = cloudLocation(accountId, uiState.currentPath),
+                    folderName = if (uiState.currentPath.isBlank() || uiState.currentPath == "/") uiState.account?.accountName ?: title else uiState.currentPath.trimEnd('/').substringAfterLast('/'),
+                    bounds = dropBounds,
+                    onDrop = { items -> viewModel.dropItems(items) }
+                )
+            }
             PullToRefreshWrapper(
                 onRefresh = { viewModel.refresh(isManual = true) },
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize().onWindowBounds { dropBounds = it }
             ) {
                 if (uiState.isSearching && filteredFiles.isEmpty()) {
                     Box(
@@ -642,6 +652,11 @@ fun CloudExplorerScreen(
                         items(filteredFiles, key = { it.id }) { file ->
                             FileListItem(
                                 file = file,
+                                modifier = Modifier.dualPaneDragSource(
+                                    sourceLocation = cloudLocation(accountId, uiState.currentPath),
+                                    items = { viewModel.dragItems(file) },
+                                    onFinished = { viewModel.clearSelection() }
+                                ),
                                 // Keyed by id, not path: MEGA (and its Rubbish Bin in particular)
                                 // allows multiple siblings with the identical name, and this
                                 // app's display "path" for a cloud item is built from its name —

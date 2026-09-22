@@ -613,15 +613,21 @@ fun FileBrowserScreen(
             // The folder shown here receives items dragged from the other dual-panel pane.
             var dropBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
             com.antigravity.filemanager.presentation.components.DualPaneDropTargetEffect(
-                folderPath = uiState.currentPath,
+                location = uiState.currentPath,
                 folderName = java.io.File(uiState.currentPath).name,
                 bounds = dropBounds,
-                onDrop = { paths, isMove -> viewModel.dropItems(paths, isMove) }
+                onDrop = { items -> viewModel.dropItems(items) }
             )
             val dragSource: (FileItem) -> Modifier = { file ->
                 Modifier.dualPaneDragSource(
-                    sourceDir = uiState.currentPath,
-                    paths = { (viewModel.uiState.value.selectedPaths + file.path).toList() },
+                    sourceLocation = uiState.currentPath,
+                    items = {
+                        val paths = (viewModel.uiState.value.selectedPaths + file.path).toList()
+                        com.antigravity.filemanager.domain.usecase.GlobalClipboardState(
+                            paths = paths,
+                            itemSizes = paths.associateWith { java.io.File(it).length() }
+                        )
+                    },
                     onFinished = { viewModel.clearSelection() }
                 )
             }

@@ -568,28 +568,47 @@ class FileBrowserViewModel @Inject constructor(
     private var pendingOverwriteAction: (suspend (overwriteNames: Set<String>, skipNames: Set<String>) -> Unit)? = null
 
     fun paste() {
-        val sources = _uiState.value.clipboardPaths
+        val s = _uiState.value
+        pasteItems(
+            com.antigravity.filemanager.domain.usecase.GlobalClipboardState(
+                paths = s.clipboardPaths,
+                isCut = s.isCutOperation,
+                sourceCloudAccountId = s.clipboardSourceCloudAccountId,
+                itemSizes = s.clipboardItemSizes,
+                itemIsDirectory = s.clipboardItemIsDirectory
+            ),
+            fromClipboard = true
+        )
+    }
+
+    /** Items dropped onto this folder from the other dual-panel pane (local or cloud); the same
+     * flow as paste (conflict dialog, progress, refresh), leaving the clipboard alone. */
+    fun dropItems(items: com.antigravity.filemanager.domain.usecase.GlobalClipboardState) =
+        pasteItems(items, fromClipboard = false)
+
+    private fun pasteItems(clip: com.antigravity.filemanager.domain.usecase.GlobalClipboardState, fromClipboard: Boolean) {
+        val sources = clip.paths
         val target = _uiState.value.currentPath
-        val cloudAccountId = _uiState.value.clipboardSourceCloudAccountId
+        val cloudAccountId = clip.sourceCloudAccountId
+        val isMove = clip.isCut
         if (sources.isEmpty()) return
+        val clearClipboard = { if (fromClipboard) globalClipboardManager.clear() }
 
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
             if (cloudAccountId != null) {
-                val isMove = _uiState.value.isCutOperation
-                val itemSizes = _uiState.value.clipboardItemSizes
-                val conflicts = cloudStorageUseCase.findLocalConflicts(sources, target, itemSizes, _uiState.value.clipboardItemIsDirectory)
+                val conflicts = cloudStorageUseCase.findLocalConflicts(sources, target, clip.itemSizes, clip.itemIsDirectory)
                 if (conflicts.isNotEmpty()) {
                     pendingOverwriteAction = { overwriteNames, skipNames ->
-                        pasteFromCloud(cloudAccountId, sources, target, isMove, overwriteNames, skipNames)
-                        globalClipboardManager.clear()
+                        pasteFromCloud(cloudAccountId, sources, target, isMove, clip, overwriteNames, skipNames)
+                        clearClipboard()
                         folderCacheManager.invalidateLocal(target)
                         loadDirectory(target)
                     }
                     _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
                 } else {
-                    pasteFromCloud(cloudAccountId, sources, target, isMove)
-                    globalClipboardManager.clear()
+                    pasteFromCloud(cloudAccountId, sources, target, isMove, clip)
+                    clearClipboard()
                     folderCacheManager.invalidateLocal(target)
                     loadDirectory(target)
                 }
@@ -597,17 +616,8 @@ class FileBrowserViewModel @Inject constructor(
             }
 
             // Keep the clipboard after a failed paste so the user can retry without re-copying.
-            pasteLocal(sources, target, _uiState.value.isCutOperation) { globalClipboardManager.clear() }
+            pasteLocal(sources, target, isMove) { clearClipboard() }
         }
-    }
-
-    /** Local items dropped onto this folder from the other dual-panel pane; the same copy/move
-     * flow as paste (conflict dialog, progress, refresh), leaving the clipboard alone. */
-    fun dropItems(sources: List<String>, isMove: Boolean) {
-        val target = _uiState.value.currentPath
-        if (sources.isEmpty()) return
-        activeTransferJob?.cancel()
-        activeTransferJob = viewModelScope.launch { pasteLocal(sources, target, isMove) {} }
     }
 
     private suspend fun pasteLocal(sources: List<String>, target: String, isMove: Boolean, onSuccess: () -> Unit) {
@@ -699,19 +709,26 @@ class FileBrowserViewModel @Inject constructor(
         _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
     }
 
-    private suspend fun pasteFromCloud(accountId: String, remotePaths: List<String>, targetDir: String, isMove: Boolean, overwriteNames: Set<String> = emptySet(), skipNames: Set<String> = emptySet()) {
+    private suspend fun pasteFromCloud(
+        accountId: String,
+        remotePaths: List<String>,
+        targetDir: String,
+        isMove: Boolean,
+        clip: com.antigravity.filemanager.domain.usecase.GlobalClipboardState,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet()
+    ) {
         try {
-            val itemSizes = _uiState.value.clipboardItemSizes
             val result = cloudStorageUseCase.downloadFilesToLocal(
                 context = context,
                 accountId = accountId,
                 remotePaths = remotePaths,
                 targetDir = targetDir,
-                itemSizes = itemSizes,
+                itemSizes = clip.itemSizes,
                 isMove = isMove,
                 overwriteNames = overwriteNames,
                 skipNames = skipNames,
-                itemIsDirectory = _uiState.value.clipboardItemIsDirectory
+                itemIsDirectory = clip.itemIsDirectory
             ) { progress -> _uiState.update { old -> old.copy(downloadProgress = progress) } }
 
             // result.scannedPaths.size is how many actually got written — was always "Pasted

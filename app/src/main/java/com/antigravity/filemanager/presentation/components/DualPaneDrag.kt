@@ -22,6 +22,7 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.dp
 import com.antigravity.filemanager.domain.usecase.ActivePanel
+import com.antigravity.filemanager.domain.usecase.GlobalClipboardState
 
 /** Which dual-panel pane a screen is shown in; null outside dual-panel mode. */
 val LocalPane = staticCompositionLocalOf<ActivePanel?> { null }
@@ -31,18 +32,27 @@ val LocalDualPaneDrag = staticCompositionLocalOf<DualPaneDragState?> { null }
 
 class DualPaneDragPayload(
     val sourcePane: ActivePanel,
-    val paths: List<String>,
-    val sourceDir: String,
+    /** What is dragged, in clipboard form: local paths, or remote paths plus their account. */
+    val items: GlobalClipboardState,
+    /** Where it is dragged from: a local folder path, or [cloudLocation] for a cloud folder. */
+    val sourceLocation: String,
     /** Called once the drop was acted on (e.g. to clear the source's selection). */
     val onFinished: () -> Unit
-)
+) {
+    val paths: List<String> get() = items.paths
+}
 
 class DualPaneDropTarget(
-    val folderPath: String,
+    /** Same form as [DualPaneDragPayload.sourceLocation]. */
+    val location: String,
     val folderName: String,
     val bounds: Rect,
-    val onDrop: (paths: List<String>, isMove: Boolean) -> Unit
+    /** Receives the dropped items with [GlobalClipboardState.isCut] set to the user's choice. */
+    val onDrop: (items: GlobalClipboardState) -> Unit
 )
+
+/** The drag-and-drop location of a folder in a cloud account. */
+fun cloudLocation(accountId: String, path: String): String = "cloud:$accountId:$path"
 
 class PendingDualPaneDrop(val payload: DualPaneDragPayload, val target: DualPaneDropTarget)
 
@@ -66,7 +76,7 @@ class DualPaneDragState {
         get() {
             val p = payload ?: return null
             return targets.entries.firstOrNull { (pane, target) ->
-                pane != p.sourcePane && target.bounds.contains(pointer) && target.folderPath != p.sourceDir
+                pane != p.sourcePane && target.bounds.contains(pointer) && target.location != p.sourceLocation
             }?.value
         }
 
@@ -95,7 +105,7 @@ class DualPaneDragState {
         val drop = pendingDrop ?: return
         pendingDrop = null
         if (isMove != null) {
-            drop.target.onDrop(drop.payload.paths, isMove)
+            drop.target.onDrop(drop.payload.items.copy(isCut = isMove))
             drop.payload.onFinished()
         }
     }
@@ -111,16 +121,16 @@ class DualPaneDragState {
 
 /**
  * Makes an item draggable to the other pane. A plain long press still just selects (the item's
- * own click handling); only moving the finger after the long press starts a drag. [paths] is
+ * own click handling); only moving the finger after the long press starts a drag. [items] is
  * read when the drag starts, so it sees the selection the long press just changed.
  */
-fun Modifier.dualPaneDragSource(sourceDir: String, paths: () -> List<String>, onFinished: () -> Unit): Modifier = composed {
+fun Modifier.dualPaneDragSource(sourceLocation: String, items: () -> GlobalClipboardState, onFinished: () -> Unit): Modifier = composed {
     val state = LocalDualPaneDrag.current
     val pane = LocalPane.current
     if (state == null || pane == null) return@composed this
-    val currentPaths by rememberUpdatedState(paths)
+    val currentItems by rememberUpdatedState(items)
     val currentOnFinished by rememberUpdatedState(onFinished)
-    val currentDir by rememberUpdatedState(sourceDir)
+    val currentLocation by rememberUpdatedState(sourceLocation)
     var coordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
     this
         .onGloballyPositioned { coordinates = it }
@@ -152,10 +162,10 @@ fun Modifier.dualPaneDragSource(sourceDir: String, paths: () -> List<String>, on
                         }
                         val window = coordinates?.localToWindow(change.position) ?: continue
                         if (!dragging && (change.position - down.position).getDistance() > startDistance) {
-                            val items = currentPaths()
-                            if (items.isNotEmpty()) {
+                            val dragged = currentItems()
+                            if (dragged.paths.isNotEmpty()) {
                                 dragging = true
-                                state.start(DualPaneDragPayload(pane, items, currentDir, currentOnFinished), window)
+                                state.start(DualPaneDragPayload(pane, dragged, currentLocation, currentOnFinished), window)
                             }
                         }
                         if (dragging) {
@@ -170,20 +180,20 @@ fun Modifier.dualPaneDragSource(sourceDir: String, paths: () -> List<String>, on
         }
 }
 
-/** Registers the local folder a screen shows as a drop target for the other pane. */
+/** Registers the folder a screen shows (local or cloud) as a drop target for the other pane. */
 @Composable
 fun DualPaneDropTargetEffect(
-    folderPath: String,
+    location: String,
     folderName: String,
     bounds: Rect?,
-    onDrop: (paths: List<String>, isMove: Boolean) -> Unit
+    onDrop: (items: GlobalClipboardState) -> Unit
 ) {
     val state = LocalDualPaneDrag.current ?: return
     val pane = LocalPane.current ?: return
     if (bounds == null) return
     val currentOnDrop by rememberUpdatedState(onDrop)
-    DisposableEffect(state, pane, folderPath, bounds) {
-        val target = DualPaneDropTarget(folderPath, folderName, bounds) { paths, isMove -> currentOnDrop(paths, isMove) }
+    DisposableEffect(state, pane, location, bounds) {
+        val target = DualPaneDropTarget(location, folderName, bounds) { currentOnDrop(it) }
         state.register(pane, target)
         onDispose { state.unregister(pane, target) }
     }
