@@ -603,15 +603,15 @@ class FileBrowserViewModel @Inject constructor(
             val conflicts = fileOperationsUseCase.findConflicts(sources, target)
             if (conflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames ->
-                    runLocalCopyOrMove(sources, target, isMove, overwriteNames, skipNames)
-                    globalClipboardManager.clear()
+                    // Keep the clipboard after a failed paste so the user can retry without re-copying.
+                    if (runLocalCopyOrMove(sources, target, isMove, overwriteNames, skipNames).isSuccess) globalClipboardManager.clear()
                     invalidateLocalCacheForPaste(sources, target, isMove)
                     loadDirectory(target)
                 }
                 _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
             } else {
-                runLocalCopyOrMove(sources, target, isMove)
-                globalClipboardManager.clear()
+                // Keep the clipboard after a failed paste so the user can retry without re-copying.
+                if (runLocalCopyOrMove(sources, target, isMove).isSuccess) globalClipboardManager.clear()
                 invalidateLocalCacheForPaste(sources, target, isMove)
                 loadDirectory(target)
             }

@@ -93,6 +93,7 @@ class FileOperationsHelperTest {
         val extracted = helper.extractArchive(archive.absolutePath, out.absolutePath)
         assertTrue(extracted.isSuccess)
         assertEquals("1", File(out, "docs/one.txt").readText())
+        assertTrue("nested empty folder survives", File(out, "docs/empty").isDirectory)
 
         val conflicts = helper.getArchiveConflicts(archive.absolutePath, out.absolutePath)
         assertEquals(listOf("docs/one.txt"), conflicts.map { it.name })

@@ -590,8 +590,8 @@ class CategoriesViewModel @Inject constructor(
             val isMove = _uiState.value.isCutOperation
 
             suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>) {
-                runLocalCopyOrMove(sources, targetDir, isMove, overwriteNames, skipNames)
-                globalClipboardManager.clear()
+                // Keep the clipboard after a failed paste so the user can retry without re-copying.
+                if (runLocalCopyOrMove(sources, targetDir, isMove, overwriteNames, skipNames).isSuccess) globalClipboardManager.clear()
                 val currentName = _uiState.value.currentSubfolderName
                 openSubfolder(targetDir, currentName)
             }

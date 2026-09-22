@@ -302,7 +302,7 @@ class DashboardViewModel @Inject constructor(
                     downloadProgress = null,
                     toastMessage = result.exceptionOrNull()?.let { "Error during $operationLabel: ${it.message}" } ?: old.toastMessage
                 ) }
-                globalClipboardManager.clear()
+                if (result.isSuccess) globalClipboardManager.clear()
                 refresh()
             }
 

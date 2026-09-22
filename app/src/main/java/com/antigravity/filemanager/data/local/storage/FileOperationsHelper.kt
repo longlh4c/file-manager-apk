@@ -327,10 +327,13 @@ class FileOperationsHelper @Inject constructor(
 
         data class FileEntry(val file: File, val entryPathInZip: String)
         val fileEntries = mutableListOf<FileEntry>()
-        val emptyFolderFallbacks = mutableListOf<File>()
+        // Entry paths of folders with no files anywhere below them, written as directory entries so
+        // they survive the round trip (only a wholly empty top-level folder used to be kept).
+        val emptyFolderEntries = mutableListOf<String>()
 
         fun collectFiles(dir: File, entryPrefix: String) {
             val children = dir.listFiles() ?: return
+            if (children.isEmpty()) emptyFolderEntries.add("$entryPrefix/")
             for (child in children) {
                 val childEntryPath = "$entryPrefix/${child.name}"
                 if (child.isDirectory) {
@@ -345,9 +348,7 @@ class FileOperationsHelper @Inject constructor(
             val f = File(path)
             when {
                 f.isDirectory -> {
-                    val before = fileEntries.size
                     collectFiles(f, f.name)
-                    if (fileEntries.size == before) emptyFolderFallbacks.add(f)
                 }
                 f.isFile -> fileEntries.add(FileEntry(f, f.name))
             }
@@ -389,9 +390,8 @@ class FileOperationsHelper @Inject constructor(
                 }
                 zos.closeEntry()
             }
-            for (emptyFolder in emptyFolderFallbacks) {
+            for (folderPath in emptyFolderEntries) {
                 currentCoroutineContext().ensureActive()
-                val folderPath = if (emptyFolder.name.endsWith("/")) emptyFolder.name else "${emptyFolder.name}/"
                 val params = net.lingala.zip4j.model.ZipParameters().apply {
                     fileNameInZip = folderPath
                 }
