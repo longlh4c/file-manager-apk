@@ -83,6 +83,14 @@ interface IFileRepository {
         password: String? = null
     ): List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList()
     fun isArchiveEncrypted(archiveFilePath: String): Boolean = false
+    suspend fun listArchiveEntries(archiveFilePath: String, password: String?): List<com.antigravity.filemanager.domain.model.ArchiveEntryInfo>
+    suspend fun extractArchiveEntries(
+        archiveFilePath: String,
+        selectedPaths: List<String>,
+        baseDir: String,
+        targetDirectory: String,
+        password: String?
+    ): Result<List<java.io.File>>
     suspend fun getFileDetails(filePath: String): FileItem?
 }
 

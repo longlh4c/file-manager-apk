@@ -223,4 +223,52 @@ class FileOperationsHelperTest {
         assertEquals("x.tar (2).gz", uniqueFile(root, "x.tar.gz").name)
         assertEquals("fresh", uniqueFile(root, "fresh").name)
     }
+
+    /** docs/a.txt, docs/deep/b.txt and top.txt, zipped. */
+    private fun browseArchive(): File {
+        val src = File(root, "pack").apply { mkdirs() }
+        File(src, "docs/deep").mkdirs()
+        File(src, "docs/a.txt").writeText("A")
+        File(src, "docs/deep/b.txt").writeText("B")
+        File(src, "top.txt").writeText("T")
+        val archive = File(root, "pack.zip")
+        runBlocking {
+            assertTrue(helper.compressFiles(listOf(File(src, "docs").absolutePath, File(src, "top.txt").absolutePath), archive.absolutePath).isSuccess)
+        }
+        return archive
+    }
+
+    @Test
+    fun listArchiveEntriesReturnsEveryEntryWithoutTrailingSlashes() = runBlocking {
+        val entries = helper.listArchiveEntries(browseArchive().absolutePath)
+
+        val files = entries.filter { !it.isDirectory }.map { it.path }.toSet()
+        assertEquals(setOf("docs/a.txt", "docs/deep/b.txt", "top.txt"), files)
+        assertTrue(entries.none { it.path.endsWith("/") })
+        assertEquals(1L, entries.single { it.path == "top.txt" }.size)
+    }
+
+    @Test
+    fun extractEntriesWritesOnlyTheSelectionRelativeToTheBrowsedFolder() = runBlocking {
+        val out = File(root, "out").apply { mkdirs() }
+
+        val result = helper.extractArchiveEntries(browseArchive().absolutePath, listOf("docs/deep"), "docs", out.absolutePath)
+
+        assertTrue(result.isSuccess)
+        assertEquals(listOf("deep"), out.list()!!.toList())
+        assertEquals("B", File(out, "deep/b.txt").readText())
+    }
+
+    @Test
+    fun extractEntriesKeepsAnExistingItemAndUsesANumberedName() = runBlocking {
+        val out = File(root, "out").apply { mkdirs() }
+        File(out, "top.txt").writeText("mine")
+
+        val result = helper.extractArchiveEntries(browseArchive().absolutePath, listOf("top.txt"), "", out.absolutePath)
+
+        assertTrue(result.isSuccess)
+        assertEquals("mine", File(out, "top.txt").readText())
+        assertEquals("T", File(out, "top (1).txt").readText())
+        assertEquals(listOf("top (1).txt"), result.getOrThrow().map { it.name })
+    }
 }

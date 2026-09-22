@@ -668,6 +668,151 @@ class FileOperationsHelper @Inject constructor(
         }
     }
 
+    /** Every entry of the archive, for browsing it like a folder. Throws the same password
+     * exceptions as extraction when the archive needs one. */
+    suspend fun listArchiveEntries(
+        archiveFilePath: String,
+        password: String? = null
+    ): List<com.antigravity.filemanager.domain.model.ArchiveEntryInfo> = withContext(Dispatchers.IO) {
+        val archiveFile = File(archiveFilePath)
+        if (!archiveFile.isFile) throw IOException("Archive not found")
+        validateArchivePassword(archiveFile, password)
+        val entries = when (archiveFile.extension.lowercase(Locale.ROOT)) {
+            "7z" -> openSevenZ(archiveFile, password).use { archive ->
+                archive.entries.map {
+                    com.antigravity.filemanager.domain.model.ArchiveEntryInfo(
+                        path = normalizeEntryName(it.name).trimEnd('/'),
+                        size = if (it.isDirectory) 0L else it.size,
+                        isDirectory = it.isDirectory,
+                        lastModified = if (it.hasLastModifiedDate) it.lastModifiedDate.time else 0L
+                    )
+                }
+            }
+            "rar" -> openRar(archiveFile, password).use { archive ->
+                (archive.fileHeaders ?: emptyList()).map {
+                    com.antigravity.filemanager.domain.model.ArchiveEntryInfo(
+                        path = normalizeEntryName(it.fileName).trimEnd('/'),
+                        size = if (it.isDirectory) 0L else it.unpSize,
+                        isDirectory = it.isDirectory,
+                        lastModified = it.mTime?.time ?: 0L
+                    )
+                }
+            }
+            else -> openZip(archiveFile, password).use { zipFile ->
+                zipHeaders(zipFile, archiveFile).map {
+                    com.antigravity.filemanager.domain.model.ArchiveEntryInfo(
+                        path = normalizeEntryName(it.fileName).trimEnd('/'),
+                        size = if (it.isDirectory) 0L else it.uncompressedSize,
+                        isDirectory = it.isDirectory,
+                        lastModified = it.lastModifiedTimeEpoch
+                    )
+                }
+            }
+        }
+        entries.filter { it.path.isNotEmpty() }
+    }
+
+    /**
+     * Extracts only [selectedPaths] (entries and/or folders, as listed by [listArchiveEntries])
+     * into [targetDir]. Paths are made relative to [baseDir], the archive folder being browsed,
+     * so picking "docs/report.pdf" while inside "docs" writes "report.pdf", not "docs/report.pdf".
+     * A selected item whose name is already taken in [targetDir] is saved under a numbered name
+     * (keep both), never over the existing one. Returns the extracted files.
+     */
+    suspend fun extractArchiveEntries(
+        archiveFilePath: String,
+        selectedPaths: List<String>,
+        baseDir: String,
+        targetDir: String,
+        password: String? = null
+    ): Result<List<File>> = withContext(Dispatchers.IO) {
+        val createdFiles = mutableListOf<File>()
+        try {
+            val archiveFile = File(archiveFilePath)
+            validateArchivePassword(archiveFile, password)
+            val destDir = File(targetDir).apply { mkdirs() }
+            val destCanonical = destDir.canonicalPath
+            val base = baseDir.trim('/')
+            val basePrefix = if (base.isEmpty()) "" else "$base/"
+            // Each selected item's name in the destination, renamed if that name is taken.
+            val selected = selectedPaths.map { it.trim('/') }.filter { it.isNotEmpty() }
+            val renamed = selected.associateWith { sel ->
+                val name = sel.removePrefix(basePrefix)
+                if (File(destDir, name).exists()) uniqueFile(destDir, name).name else name
+            }
+            fun destFor(entryPath: String): File? {
+                val sel = selected.firstOrNull { entryPath == it || entryPath.startsWith("$it/") } ?: return null
+                val relative = renamed.getValue(sel) + entryPath.removePrefix(sel)
+                val dest = File(destDir, relative)
+                if (!isInsideTarget(dest, destCanonical)) throw SecurityException("Zip Slip detected in archive: $entryPath")
+                return dest
+            }
+            val extracted = mutableListOf<File>()
+            // Records the outermost folder mkdirs() actually creates, so a failed extraction
+            // removes the whole new branch, not just its innermost folder.
+            fun mkdirTracked(dir: File) {
+                var outermost: File? = null
+                var p: File? = dir
+                while (p != null && !p.exists()) { outermost = p; p = p.parentFile }
+                dir.mkdirs()
+                outermost?.let { createdFiles.add(it) }
+            }
+            fun write(dest: File, input: java.io.InputStream) {
+                dest.parentFile?.let { mkdirTracked(it) }
+                createdFiles.add(dest)
+                FileOutputStream(dest).use { input.copyTo(it, 64 * 1024) }
+                extracted.add(dest)
+            }
+            when (archiveFile.extension.lowercase(Locale.ROOT)) {
+                "7z" -> openSevenZ(archiveFile, password).use { archive ->
+                    var entry = archive.nextEntry
+                    while (entry != null) {
+                        currentCoroutineContext().ensureActive()
+                        val dest = destFor(normalizeEntryName(entry.name).trimEnd('/'))
+                        if (dest != null) {
+                            if (entry.isDirectory) mkdirTracked(dest)
+                            else write(dest, object : java.io.InputStream() {
+                                override fun read(): Int = archive.read()
+                                override fun read(b: ByteArray, off: Int, len: Int): Int = archive.read(b, off, len)
+                            })
+                        }
+                        entry = archive.nextEntry
+                    }
+                }
+                "rar" -> openRar(archiveFile, password).use { archive ->
+                    for (header in archive.fileHeaders ?: emptyList()) {
+                        currentCoroutineContext().ensureActive()
+                        val dest = destFor(normalizeEntryName(header.fileName).trimEnd('/')) ?: continue
+                        if (header.isDirectory) { mkdirTracked(dest); continue }
+                        dest.parentFile?.let { mkdirTracked(it) }
+                        createdFiles.add(dest)
+                        FileOutputStream(dest).use { archive.extractFile(header, it) }
+                        extracted.add(dest)
+                    }
+                }
+                else -> openZip(archiveFile, password).use { zipFile ->
+                    for (header in zipHeaders(zipFile, archiveFile)) {
+                        currentCoroutineContext().ensureActive()
+                        val dest = destFor(normalizeEntryName(header.fileName).trimEnd('/')) ?: continue
+                        if (header.isDirectory) { mkdirTracked(dest); continue }
+                        zipFile.getInputStream(header).use { write(dest, it) }
+                    }
+                }
+            }
+            if (extracted.isNotEmpty()) {
+                try {
+                    android.media.MediaScannerConnection.scanFile(context, extracted.map { it.absolutePath }.toTypedArray(), null, null)
+                } catch (_: Exception) {}
+            }
+            Result.success(extracted)
+        } catch (e: Exception) {
+            // Nothing half-written is left behind, whatever failed (cancel, disk full, bad data).
+            deleteCreated(createdFiles.asReversed())
+            if (e is CancellationException) throw e
+            Result.failure(e)
+        }
+    }
+
     suspend fun getArchiveConflicts(
         archiveFilePath: String,
         targetDir: String,

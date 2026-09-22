@@ -168,6 +168,12 @@ fun AppNavigation(
                 "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v" -> {
                     controller.navigate(Screen.VideoPlayer.createRoute(file.path, parent, sortOption.name, cloudAccountId, fileName = file.name))
                 }
+                // Browsed in-app (see ArchiveViewerScreen) instead of handed to another app.
+                "zip", "7z", "rar" -> if (isStreamUrl) {
+                    com.antigravity.filemanager.utils.FileOpener.openFile(context, file)
+                } else {
+                    controller.navigate(Screen.ArchiveViewer.createRoute(file.path))
+                }
                 else -> {
                     com.antigravity.filemanager.utils.FileOpener.openFile(context, file)
                 }
@@ -571,6 +577,17 @@ private fun LeftPaneContent(
                 }
 
                 composable(
+                    route = Screen.ArchiveViewer.route,
+                    arguments = listOf(navArgument("path") { type = NavType.StringType; defaultValue = "" })
+                ) {
+                    com.antigravity.filemanager.presentation.archive.ArchiveViewerScreen(
+                        onNavigateBack = { navController.popBackStack() },
+                        onOpenFile = openFileHandler
+                    )
+                }
+
+
+                composable(
                     route = Screen.ImageViewer.route,
                     arguments = listOf(
                         navArgument("path") { type = NavType.StringType; defaultValue = "" },
@@ -900,6 +917,17 @@ private fun RightPaneContent(
                         )
                     }
                 }
+
+                composable(
+                    route = Screen.ArchiveViewer.route,
+                    arguments = listOf(navArgument("path") { type = NavType.StringType; defaultValue = "" })
+                ) {
+                    com.antigravity.filemanager.presentation.archive.ArchiveViewerScreen(
+                        onNavigateBack = { navController.popBackStack() },
+                        onOpenFile = openFileHandler
+                    )
+                }
+
 
                 composable(
                     route = Screen.ImageViewer.route,

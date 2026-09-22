@@ -445,3 +445,12 @@ data class ExtractResult(
     val extractedCount: Int = 0,
     val skippedCount: Int = 0
 )
+
+/** One entry of an archive, listed so it can be browsed without extracting everything.
+ * [path] is the entry's path inside the archive, '/'-separated, without a trailing slash. */
+data class ArchiveEntryInfo(
+    val path: String,
+    val size: Long,
+    val isDirectory: Boolean,
+    val lastModified: Long
+)

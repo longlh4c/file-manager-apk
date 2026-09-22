@@ -230,6 +230,26 @@ class FileOperationsUseCase @Inject constructor(
     fun isArchiveEncrypted(archivePath: String): Boolean =
         fileRepository.isArchiveEncrypted(archivePath)
 
+    suspend fun listArchiveEntries(archivePath: String, password: String? = null) =
+        fileRepository.listArchiveEntries(archivePath, password)
+
+    /** Extracts just the chosen entries (see FileOperationsHelper.extractArchiveEntries). */
+    suspend fun extractArchiveEntries(
+        archivePath: String,
+        selectedPaths: List<String>,
+        baseDir: String,
+        targetDir: String,
+        password: String? = null,
+        notifyMediaChange: Boolean = true
+    ): Result<List<java.io.File>> =
+        fileRepository.extractArchiveEntries(archivePath, selectedPaths, baseDir, targetDir, password).also {
+            if (notifyMediaChange && it.getOrNull()?.isNotEmpty() == true) {
+                folderCacheManager.invalidateLocal(targetDir)
+                folderCacheManager.invalidateMediaFolders()
+                mediaChangeSignal.notifyChanged()
+            }
+        }
+
     suspend fun search(query: String, rootPath: String? = null, category: CategoryType? = null): List<FileItem> =
         fileRepository.searchFiles(query, rootPath, category)
 

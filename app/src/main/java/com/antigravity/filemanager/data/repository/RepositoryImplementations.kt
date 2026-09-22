@@ -432,6 +432,18 @@ class FileRepositoryImpl @Inject constructor(
     override fun isArchiveEncrypted(archiveFilePath: String): Boolean =
         operationsHelper.isArchiveEncrypted(archiveFilePath)
 
+    override suspend fun listArchiveEntries(archiveFilePath: String, password: String?) =
+        operationsHelper.listArchiveEntries(archiveFilePath, password)
+
+    override suspend fun extractArchiveEntries(
+        archiveFilePath: String,
+        selectedPaths: List<String>,
+        baseDir: String,
+        targetDirectory: String,
+        password: String?
+    ): Result<List<java.io.File>> =
+        operationsHelper.extractArchiveEntries(archiveFilePath, selectedPaths, baseDir, targetDirectory, password)
+
     override suspend fun getFileDetails(filePath: String): FileItem? = withContext(Dispatchers.IO) {
         val f = File(filePath)
         if (!f.exists()) return@withContext null
