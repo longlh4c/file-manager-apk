@@ -96,7 +96,72 @@ class FileOperationsHelperTest {
         assertTrue("nested empty folder survives", File(out, "docs/empty").isDirectory)
 
         val conflicts = helper.getArchiveConflicts(archive.absolutePath, out.absolutePath)
-        assertEquals(listOf("docs/one.txt"), conflicts.map { it.name })
+        // One conflict for the whole top-level folder, not one per file inside it.
+        assertEquals(listOf("docs"), conflicts.map { it.name })
+        assertTrue(conflicts.single().isDirectory)
+    }
+
+    /** An archive holding FolderA/inner.txt, extracted where FolderA/inner.txt already exists. */
+    private fun folderArchiveWithExistingFolder(): Pair<File, File> {
+        val src = File(root, "src/FolderA").apply { mkdirs() }
+        File(src, "inner.txt").writeText("from-archive")
+        File(src, "sub").mkdirs()
+        val archive = File(root, "FolderA.zip")
+        runBlocking { assertTrue(helper.compressFiles(listOf(src.absolutePath), archive.absolutePath).isSuccess) }
+        val out = File(root, "out").apply { mkdirs() }
+        File(out, "FolderA").mkdirs()
+        File(out, "FolderA/inner.txt").writeText("existing")
+        return archive to out
+    }
+
+    @Test
+    fun extractKeepBothPutsTheFolderUnderANewName() = runBlocking {
+        val (archive, out) = folderArchiveWithExistingFolder()
+
+        val result = helper.extractArchive(archive.absolutePath, out.absolutePath)
+
+        assertTrue(result.isSuccess)
+        assertEquals("existing", File(out, "FolderA/inner.txt").readText())
+        assertEquals(listOf("inner.txt"), File(out, "FolderA").list()!!.toList())
+        assertEquals("from-archive", File(out, "FolderA (1)/inner.txt").readText())
+        assertTrue(File(out, "FolderA (1)/sub").isDirectory)
+    }
+
+    @Test
+    fun extractOverwriteMergesIntoTheExistingFolder() = runBlocking {
+        val (archive, out) = folderArchiveWithExistingFolder()
+
+        val result = helper.extractArchive(archive.absolutePath, out.absolutePath, overwriteNames = setOf("FolderA"))
+
+        assertTrue(result.isSuccess)
+        assertEquals("from-archive", File(out, "FolderA/inner.txt").readText())
+        assertFalse(File(out, "FolderA (1)").exists())
+    }
+
+    @Test
+    fun extractSkipLeavesTheWholeTreeOut() = runBlocking {
+        val (archive, out) = folderArchiveWithExistingFolder()
+
+        val result = helper.extractArchive(archive.absolutePath, out.absolutePath, skipNames = setOf("FolderA"))
+
+        assertTrue(result.isSuccess)
+        assertEquals("existing", File(out, "FolderA/inner.txt").readText())
+        assertFalse(File(out, "FolderA/sub").exists())
+        assertFalse(File(out, "FolderA (1)").exists())
+    }
+
+    @Test
+    fun extractKeepBothRenamesATopLevelFile() = runBlocking {
+        val plain = File(root, "note.txt").apply { writeText("new") }
+        val archive = File(root, "note.zip")
+        assertTrue(helper.compressFiles(listOf(plain.absolutePath), archive.absolutePath).isSuccess)
+        val out = File(root, "out").apply { mkdirs() }
+        File(out, "note.txt").writeText("old")
+
+        assertTrue(helper.extractArchive(archive.absolutePath, out.absolutePath).isSuccess)
+
+        assertEquals("old", File(out, "note.txt").readText())
+        assertEquals("new", File(out, "note (1).txt").readText())
     }
 
     @Test

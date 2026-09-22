@@ -678,31 +678,73 @@ class FileOperationsHelper @Inject constructor(
         // Pre-validate password first so invalid password triggers immediately without creating any conflict/extract state
         validateArchivePassword(archiveFile, password)
 
-        // (entry name, uncompressed size) for every file entry, whatever the format
-        val fileEntries: List<Pair<String, Long>> = when (archiveFile.extension.lowercase(Locale.ROOT)) {
+        // (entry name, uncompressed size, is directory) for every entry, whatever the format
+        val entries: List<Triple<String, Long, Boolean>> = when (archiveFile.extension.lowercase(Locale.ROOT)) {
             "7z" -> openSevenZ(archiveFile, password).use { archive ->
-                archive.entries.filter { !it.isDirectory }.map { it.name to it.size }
+                archive.entries.map { Triple(it.name, if (it.isDirectory) 0L else it.size, it.isDirectory) }
             }
             "rar" -> openRar(archiveFile, password).use { archive ->
-                (archive.fileHeaders ?: emptyList()).filter { !it.isDirectory }.map { it.fileName to it.unpSize }
+                (archive.fileHeaders ?: emptyList()).map { Triple(it.fileName, if (it.isDirectory) 0L else it.unpSize, it.isDirectory) }
             }
             else -> openZip(archiveFile, password).use { zipFile ->
-                zipHeaders(zipFile, archiveFile).filter { !it.isDirectory }.map { it.fileName to it.uncompressedSize }
+                zipHeaders(zipFile, archiveFile).map { Triple(it.fileName, if (it.isDirectory) 0L else it.uncompressedSize, it.isDirectory) }
             }
         }
 
+        // Conflicts are resolved per top-level item, like copy/move: an archive holding
+        // "FolderA/..." clashes once with an existing "FolderA" folder, and the user's choice
+        // (overwrite / skip / keep both as "FolderA (1)") then applies to that whole tree.
         val destDir = File(targetDir)
         val targetCanonical = destDir.canonicalPath
-        fileEntries.mapNotNull { (rawName, size) ->
-            val normName = normalizeEntryName(rawName)
-            val destFile = File(destDir, normName)
-            if (!isInsideTarget(destFile, targetCanonical) || !destFile.exists()) return@mapNotNull null
-            com.antigravity.filemanager.domain.model.OverwriteConflict(
-                name = normName,
-                existingSize = destFile.length(),
-                newSize = size,
-                isDirectory = false
-            )
+        entries
+            .map { (rawName, size, isDir) -> Triple(normalizeEntryName(rawName), size, isDir) }
+            .filter { it.first.isNotEmpty() }
+            .groupBy { ExtractTargets.topOf(it.first) }
+            .mapNotNull { (top, items) ->
+                val existing = File(destDir, top)
+                if (!isInsideTarget(existing, targetCanonical) || !existing.exists()) return@mapNotNull null
+                val isDir = items.any { it.third || it.first.length > top.length }
+                com.antigravity.filemanager.domain.model.OverwriteConflict(
+                    name = top,
+                    existingSize = directorySize(existing),
+                    newSize = items.sumOf { it.second },
+                    isDirectory = isDir || existing.isDirectory
+                )
+            }
+    }
+
+    /** Where each archive entry lands, given the per-top-level conflict choices: skipped trees
+     * return null, overwritten ones merge into the existing item, and any other top-level name
+     * that already exists is extracted under a fresh "name (1)" instead (Keep both). */
+    private class ExtractTargets(
+        private val destDir: File,
+        private val targetCanonical: String,
+        private val overwriteNames: Set<String>,
+        private val skipNames: Set<String>
+    ) {
+        private val renamedTops = HashMap<String, String>()
+
+        fun resolve(normName: String): File? {
+            val top = topOf(normName)
+            if (top in skipNames) return null
+            // Decided on the first entry of each top-level item, before anything of it is written.
+            val mappedTop = if (top in overwriteNames) top else renamedTops.getOrPut(top) {
+                if (File(destDir, top).exists()) uniqueFile(destDir, top).name else top
+            }
+            val target = File(destDir, mappedTop + normName.substring(top.length))
+            if (!isInside(target)) throw SecurityException("Zip Slip detected in archive: $normName")
+            return target
+        }
+
+        fun overwrites(normName: String) = topOf(normName) in overwriteNames
+
+        private fun isInside(file: File): Boolean {
+            val path = file.canonicalPath
+            return path == targetCanonical || path.startsWith(targetCanonical + File.separator)
+        }
+
+        companion object {
+            fun topOf(normName: String) = normName.trimEnd('/').substringBefore('/')
         }
     }
 
@@ -742,6 +784,7 @@ class FileOperationsHelper @Inject constructor(
         onProgress: ((currentEntry: String, currentIndex: Int, totalEntries: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
     ): Result<com.antigravity.filemanager.domain.model.ExtractResult> {
         val targetCanonical = targetDir.canonicalPath
+        val targets = ExtractTargets(targetDir, targetCanonical, overwriteNames, skipNames)
         val sevenZFile = openSevenZ(archiveFile, password)
 
         val createdFiles = mutableListOf<File>()
@@ -768,14 +811,15 @@ class FileOperationsHelper @Inject constructor(
                     if (!isInsideTarget(defaultDestFile, targetCanonical)) {
                         throw SecurityException("Zip Slip detected in archive: ${entry.name}")
                     }
+                    val resolvedDest = targets.resolve(normName)
 
                     if (entry.isDirectory) {
-                        if (!defaultDestFile.exists()) {
-                            defaultDestFile.mkdirs()
-                            createdFiles.add(defaultDestFile)
+                        if (resolvedDest != null && !resolvedDest.exists()) {
+                            resolvedDest.mkdirs()
+                            createdFiles.add(resolvedDest)
                         }
                     } else {
-                        if (normName in skipNames) {
+                        if (resolvedDest == null) {
                             skippedCount++
                             currentIndex++
                             bytesProcessed += entry.size
@@ -784,12 +828,12 @@ class FileOperationsHelper @Inject constructor(
                             continue
                         }
                         currentIndex++
-                        val overwriteThis = normName in overwriteNames
-                        val destFile = if (overwriteThis || !defaultDestFile.exists()) {
-                            defaultDestFile
+                        val overwriteThis = targets.overwrites(normName)
+                        val destFile = if (overwriteThis || !resolvedDest.exists()) {
+                            resolvedDest
                         } else {
-                            val parent = defaultDestFile.parentFile ?: targetDir
-                            uniqueFile(parent, defaultDestFile.name)
+                            val parent = resolvedDest.parentFile ?: targetDir
+                            uniqueFile(parent, resolvedDest.name)
                         }
 
                         if (!destFile.exists()) {
@@ -845,6 +889,7 @@ class FileOperationsHelper @Inject constructor(
         val createdFiles = mutableListOf<File>()
         try {
             val targetCanonical = targetDir.canonicalPath
+            val targets = ExtractTargets(targetDir, targetCanonical, overwriteNames, skipNames)
             openRar(archiveFile, password).use { arc ->
                 val allHeaders = arc.fileHeaders ?: emptyList()
                 val fileHeaders = allHeaders.filter { !it.isDirectory }
@@ -865,14 +910,15 @@ class FileOperationsHelper @Inject constructor(
                     if (!isInsideTarget(defaultDestFile, targetCanonical)) {
                         throw SecurityException("Zip Slip detected in archive: ${header.fileName}")
                     }
+                    val resolvedDest = targets.resolve(normName)
 
                     if (header.isDirectory) {
-                        if (!defaultDestFile.exists()) {
-                            defaultDestFile.mkdirs()
-                            createdFiles.add(defaultDestFile)
+                        if (resolvedDest != null && !resolvedDest.exists()) {
+                            resolvedDest.mkdirs()
+                            createdFiles.add(resolvedDest)
                         }
                     } else {
-                        if (normName in skipNames) {
+                        if (resolvedDest == null) {
                             skippedCount++
                             currentIndex++
                             bytesProcessed += header.unpSize
@@ -880,12 +926,12 @@ class FileOperationsHelper @Inject constructor(
                             continue
                         }
                         currentIndex++
-                        val overwriteThis = normName in overwriteNames
-                        val destFile = if (overwriteThis || !defaultDestFile.exists()) {
-                            defaultDestFile
+                        val overwriteThis = targets.overwrites(normName)
+                        val destFile = if (overwriteThis || !resolvedDest.exists()) {
+                            resolvedDest
                         } else {
-                            val parent = defaultDestFile.parentFile ?: targetDir
-                            uniqueFile(parent, defaultDestFile.name)
+                            val parent = resolvedDest.parentFile ?: targetDir
+                            uniqueFile(parent, resolvedDest.name)
                         }
                         if (!destFile.exists()) {
                             createdFiles.add(destFile)
@@ -949,6 +995,7 @@ class FileOperationsHelper @Inject constructor(
         val zipFile = openZip(archiveFile, password)
         try {
             val targetCanonical = destDir.canonicalPath
+            val targets = ExtractTargets(destDir, targetCanonical, overwriteNames, skipNames)
             val allHeaders = zipHeaders(zipFile, archiveFile)
             val fileHeaders = allHeaders.filter { !it.isDirectory }
             val totalEntries = fileHeaders.size
@@ -968,14 +1015,15 @@ class FileOperationsHelper @Inject constructor(
                 if (!isInsideTarget(defaultDestFile, targetCanonical)) {
                     throw SecurityException("Zip Slip detected in archive: ${header.fileName}")
                 }
+                val resolvedDest = targets.resolve(normName)
 
                 if (header.isDirectory) {
-                    if (!defaultDestFile.exists()) {
-                        defaultDestFile.mkdirs()
-                        createdFiles.add(defaultDestFile)
+                    if (resolvedDest != null && !resolvedDest.exists()) {
+                        resolvedDest.mkdirs()
+                        createdFiles.add(resolvedDest)
                     }
                 } else {
-                    if (normName in skipNames) {
+                    if (resolvedDest == null) {
                         skippedCount++
                         currentIndex++
                         bytesProcessed += header.uncompressedSize
@@ -983,12 +1031,12 @@ class FileOperationsHelper @Inject constructor(
                         continue
                     }
                     currentIndex++
-                    val overwriteThis = normName in overwriteNames
-                    val destFile = if (overwriteThis || !defaultDestFile.exists()) {
-                        defaultDestFile
+                    val overwriteThis = targets.overwrites(normName)
+                    val destFile = if (overwriteThis || !resolvedDest.exists()) {
+                        resolvedDest
                     } else {
-                        val parent = defaultDestFile.parentFile ?: destDir
-                        uniqueFile(parent, defaultDestFile.name)
+                        val parent = resolvedDest.parentFile ?: destDir
+                        uniqueFile(parent, resolvedDest.name)
                     }
                     if (!destFile.exists()) {
                         createdFiles.add(destFile)
