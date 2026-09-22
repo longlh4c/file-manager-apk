@@ -646,7 +646,8 @@ class CloudManager @Inject constructor(
     suspend fun renameItem(account: CloudAccount, remotePath: String, newName: String): Result<FileItem> = withContext(Dispatchers.IO) {
         com.antigravity.filemanager.data.local.storage.invalidFileNameReason(newName)?.let { return@withContext Result.failure(java.io.IOException(it)) }
         when (account.provider) {
-            CloudProvider.DROPBOX -> dropboxApi.renameFile(account, remotePath, newName).also { dropboxApi.invalidateTree(account.id) }
+            CloudProvider.DROPBOX -> dropboxApi.renameFile(account, remotePath, newName)
+                .onSuccess { item -> dropboxApi.patchTreeAfterMove(account.id, remotePath, item.path) }
             CloudProvider.GOOGLE_DRIVE -> {
                 val targetId = driveId(account, remotePath)
                 googleDriveApi.renameFile(account, targetId, newName).map { FileItem(id = targetId, name = newName, path = remotePath) }
@@ -677,8 +678,9 @@ class CloudManager @Inject constructor(
             val cache = ids(account.id)
             when (account.provider) {
                 CloudProvider.DROPBOX -> {
-                    dropboxApi.moveItem(account, sourcePath, targetDir).map { }
-                        .also { if (it.isSuccess) dropboxApi.invalidateTree(account.id) }
+                    dropboxApi.moveItem(account, sourcePath, targetDir)
+                        .onSuccess { item -> dropboxApi.patchTreeAfterMove(account.id, sourcePath, item.path) }
+                        .map { }
                 }
                 CloudProvider.MEGA -> {
                     val megaAccount = megaAccount(account)

@@ -187,6 +187,29 @@ class DropboxApiClient @Inject constructor(
         persistTreeToDisk(accountId, newCache)
     }
 
+    /** Re-paths a renamed or moved item (and everything under it, for a folder) in the cached
+     * tree. Rename/move used to [invalidateTree], so the listing right after re-downloaded the
+     * whole account and kept showing the old name for many seconds on a large Dropbox. */
+    fun patchTreeAfterMove(accountId: String, fromPath: String, toPath: String) {
+        val cached = cachedTree(accountId) ?: return
+        val from = fromPath.trimEnd('/')
+        val to = toPath.trimEnd('/')
+        val updated = cached.entries.map { e ->
+            when {
+                e.path.equals(from, ignoreCase = true) ->
+                    e.copy(path = to, parentPath = to.substringBeforeLast('/', ""), name = to.substringAfterLast('/'))
+                e.path.startsWith("$from/", ignoreCase = true) -> {
+                    val newPath = to + e.path.substring(from.length)
+                    e.copy(path = newPath, parentPath = newPath.substringBeforeLast('/', ""))
+                }
+                else -> e
+            }
+        }
+        val newCache = TreeCache(updated, System.currentTimeMillis())
+        treeCache[accountId] = newCache
+        persistTreeToDisk(accountId, newCache)
+    }
+
     /** Removes one deleted item from the cached tree in place instead of the full [invalidateTree]
      * wipe deleteItem used to always do. Overwriting an existing file deletes it first (see
      * FileUseCases.uploadFiles' conflict handling) — on a folder move/copy re-run against a
