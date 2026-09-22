@@ -763,11 +763,17 @@ class FileBrowserViewModel @Inject constructor(
                 _uiState.update { old -> old.copy(cloudFolderPickerLoading = true) }
             }
             val result = cloudStorageUseCase.getFiles(account.id, path)
-            val files = result.getOrDefault(emptyList())
-            folderCacheManager.putCloudFolder(account.id, path, files)
+            // Only a real listing is cached; a failed one used to be stored as "empty" and stayed
+            // that way (already "reconciled") for the rest of the session.
+            val files = result.getOrNull()
+            if (files != null) {
+                folderCacheManager.putCloudFolder(account.id, path, files)
+            } else {
+                _uiState.update { old -> old.copy(toastMessage = "Couldn't load folder: ${result.exceptionOrNull()?.message}") }
+            }
             _uiState.update { old -> old.copy(
                 cloudFolderPickerLoading = false,
-                cloudFolderPickerFolders = files.filter { it.isDirectory }.sortedBy { it.name.lowercase() }
+                cloudFolderPickerFolders = (files ?: emptyList()).filter { it.isDirectory }.sortedBy { it.name.lowercase() }
             ) }
         }
     }

@@ -328,9 +328,11 @@ class CloudStorageUseCase @Inject constructor(
         val existing = if (cached != null && cached.isFresh) {
             cached.files
         } else {
-            val fetched = cloudRepository.getCloudFiles(accountId, remoteDir).getOrDefault(emptyList())
-            folderCacheManager.putCloudFolder(accountId, remoteDir, fetched)
-            fetched
+            // A failed listing must not be cached as "empty" — it would stick for the whole session.
+            // uploadFiles() re-checks and refuses to upload blind if it still can't list.
+            val fetched = cloudRepository.getCloudFiles(accountId, remoteDir).getOrNull()
+            if (fetched != null) folderCacheManager.putCloudFolder(accountId, remoteDir, fetched)
+            fetched ?: emptyList()
         }
         android.util.Log.d("CloudStorageUseCase", "findConflicts: remoteDir='$remoteDir' fromCache=${cached?.isFresh == true} existing=${existing.map { it.name }} checking=${items.map { it.first }}")
         return items.mapNotNull { (name, size) ->
@@ -391,7 +393,11 @@ class CloudStorageUseCase @Inject constructor(
                 } else {
                     val listResult = cloudRepository.getCloudFiles(accountId, dir)
                     android.util.Log.d("CloudStorageUseCase", "uploadFiles: getCloudFiles('$dir') isSuccess=${listResult.isSuccess} error=${listResult.exceptionOrNull()}")
-                    val fetched = listResult.getOrDefault(emptyList())
+                    // Uploading without knowing what is already there would skip the keep-both rename,
+                    // and Dropbox (WriteMode.OVERWRITE) would silently replace a same-named file.
+                    val fetched = listResult.getOrElse {
+                        throw java.io.IOException("Couldn't check the destination folder for existing files: ${it.message}", it)
+                    }
                     folderCacheManager.putCloudFolder(accountId, dir, fetched)
                     fetched
                 }

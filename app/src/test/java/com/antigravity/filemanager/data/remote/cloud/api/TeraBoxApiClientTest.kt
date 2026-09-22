@@ -306,6 +306,53 @@ class TeraBoxApiClientTest {
     }
 
     @Test
+    fun uploadSendsFourMegabyteSlicesToTheUploadHost() = runBlocking {
+        val file = java.io.File.createTempFile("tb_upload", ".bin").apply {
+            deleteOnExit()
+            writeBytes(ByteArray(10 * 1024 * 1024) { (it % 251).toByte() })
+        }
+        val slices = mutableListOf<Pair<String, Int>>()
+        var createBlockList = ""
+        var precreateBlockList = ""
+        val tb = fakeClient { req ->
+            val path = req.url.encodedPath
+            when {
+                path == "/api/precreate" -> {
+                    precreateBlockList = formField(req, "block_list")
+                    200 to """{"errno":0,"return_type":1,"uploadid":"UP1"}""".toByteArray()
+                }
+                path == "/rest/2.0/pcs/file" && req.url.queryParameter("method") == "locateupload" ->
+                    200 to """{"host":"c-test.terabox.com"}""".toByteArray()
+                path == "/rest/2.0/pcs/superfile2" -> {
+                    val seq = req.url.queryParameter("partseq")!!.toInt()
+                    slices += req.url.host to seq
+                    200 to """{"md5":"slice$seq"}""".toByteArray()
+                }
+                path == "/api/create" -> {
+                    createBlockList = formField(req, "block_list")
+                    200 to """{"errno":0,"fs_id":99}""".toByteArray()
+                }
+                else -> 404 to ByteArray(0)
+            }
+        }
+
+        val item = tb.uploadFile(account, file, "/dir").getOrThrow()
+
+        assertEquals(listOf("c-test.terabox.com" to 0, "c-test.terabox.com" to 1, "c-test.terabox.com" to 2), slices)
+        assertEquals(3, org.json.JSONArray(precreateBlockList).length())
+        assertEquals("""["slice0","slice1","slice2"]""", createBlockList)
+        assertEquals("99", item.id)
+        assertEquals("/dir/${file.name}", item.path)
+    }
+
+    private fun formField(req: okhttp3.Request, name: String): String {
+        val buffer = okio.Buffer()
+        req.body!!.writeTo(buffer)
+        return buffer.readUtf8().split("&").map { java.net.URLDecoder.decode(it, "UTF-8") }
+            .first { it.startsWith("$name=") }.substringAfter("=")
+    }
+
+    @Test
     fun streamSourceCarriesCookieAndEncodedPath() = runBlocking {
         val tb = fakeClient { 200 to """{"errno":0}""".toByteArray() }
         val src = tb.getStreamSource(account, "/My Videos/clip 1.mp4").getOrThrow()
