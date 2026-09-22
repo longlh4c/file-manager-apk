@@ -566,21 +566,17 @@ class CategoriesViewModel @Inject constructor(
             // since pasteFromCloud only auto-renames when a name isn't in overwriteNames.
             val sources = _uiState.value.clipboardPaths
             val itemSizes = _uiState.value.clipboardItemSizes
-            val conflicts = sources.mapNotNull { remotePath ->
-                val name = File(remotePath).name
-                val destFile = File(targetDir, name)
-                if (destFile.exists()) {
-                    com.antigravity.filemanager.domain.model.OverwriteConflict(name = name, existingSize = destFile.length(), newSize = itemSizes[remotePath] ?: 0L)
-                } else null
-            }
             activeTransferJob?.cancel()
-            if (conflicts.isNotEmpty()) {
-                pendingOverwriteAction = { overwriteNames, skipNames ->
-                    pasteFromCloud(cloudAccountId, targetDir, overwriteNames, skipNames)
+            activeTransferJob = viewModelScope.launch {
+                val conflicts = cloudStorageUseCase.findLocalConflicts(sources, targetDir, itemSizes, _uiState.value.clipboardItemIsDirectory)
+                if (conflicts.isNotEmpty()) {
+                    pendingOverwriteAction = { overwriteNames, skipNames ->
+                        pasteFromCloud(cloudAccountId, targetDir, overwriteNames, skipNames)
+                    }
+                    _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
+                } else {
+                    pasteFromCloud(cloudAccountId, targetDir)
                 }
-                _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
-            } else {
-                activeTransferJob = viewModelScope.launch { pasteFromCloud(cloudAccountId, targetDir) }
             }
             return
         }

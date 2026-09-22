@@ -234,7 +234,6 @@ class DashboardViewModel @Inject constructor(
                 val sources = clip.paths
                 val isMove = clip.isCut
                 val itemSizes = clip.itemSizes
-                val targetFolder = File(target)
 
                 suspend fun doPasteCloud(overwriteNames: Set<String>, skipNames: Set<String>) {
                     try {
@@ -265,17 +264,7 @@ class DashboardViewModel @Inject constructor(
                     }
                 }
 
-                val conflicts = sources.mapNotNull { remotePath ->
-                    val name = File(remotePath).name
-                    val destFile = File(targetFolder, name)
-                    if (destFile.exists()) {
-                        com.antigravity.filemanager.domain.model.OverwriteConflict(
-                            name = name,
-                            existingSize = destFile.length(),
-                            newSize = itemSizes[remotePath] ?: 0L
-                        )
-                    } else null
-                }
+                val conflicts = cloudStorageUseCase.findLocalConflicts(sources, target, itemSizes, clip.itemIsDirectory)
 
                 if (conflicts.isNotEmpty()) {
                     pendingOverwriteAction = { overwriteNames, skipNames -> doPasteCloud(overwriteNames, skipNames) }

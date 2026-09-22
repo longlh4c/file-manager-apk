@@ -571,17 +571,7 @@ class FileBrowserViewModel @Inject constructor(
             if (cloudAccountId != null) {
                 val isMove = _uiState.value.isCutOperation
                 val itemSizes = _uiState.value.clipboardItemSizes
-                val conflicts = sources.mapNotNull { remotePath ->
-                    val name = File(remotePath).name
-                    val destFile = File(target, name)
-                    if (destFile.exists()) {
-                        com.antigravity.filemanager.domain.model.OverwriteConflict(
-                            name = name,
-                            existingSize = destFile.length(),
-                            newSize = itemSizes[remotePath] ?: 0L
-                        )
-                    } else null
-                }
+                val conflicts = cloudStorageUseCase.findLocalConflicts(sources, target, itemSizes, _uiState.value.clipboardItemIsDirectory)
                 if (conflicts.isNotEmpty()) {
                     pendingOverwriteAction = { overwriteNames, skipNames ->
                         pasteFromCloud(cloudAccountId, sources, target, isMove, overwriteNames, skipNames)

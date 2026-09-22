@@ -532,6 +532,28 @@ class CloudStorageUseCase @Inject constructor(
 
     data class CloudDownloadToLocalResult(val scannedPaths: List<String>, val failedNames: List<String>)
 
+    /** Name clashes a cloud-to-local paste into [targetDir] would hit. Shared by every screen that
+     * pastes from the cloud; they each used to size an existing folder by its directory inode
+     * (a few KB) and always label it "File already exists". */
+    suspend fun findLocalConflicts(
+        remotePaths: List<String>,
+        targetDir: String,
+        itemSizes: Map<String, Long>,
+        itemIsDirectory: Map<String, Boolean>
+    ): List<com.antigravity.filemanager.domain.model.OverwriteConflict> = withContext(Dispatchers.IO) {
+        remotePaths.mapNotNull { remotePath ->
+            val name = File(remotePath).name
+            val destFile = File(targetDir, name)
+            if (!destFile.exists()) return@mapNotNull null
+            com.antigravity.filemanager.domain.model.OverwriteConflict(
+                name = name,
+                existingSize = com.antigravity.filemanager.data.local.storage.directorySize(destFile),
+                newSize = itemSizes[remotePath] ?: 0L,
+                isDirectory = destFile.isDirectory || itemIsDirectory[remotePath] == true
+            )
+        }
+    }
+
     // Was near-identically duplicated three times (CategoriesViewModel.pasteFromCloud,
     // FileBrowserViewModel.pasteFromCloud, DashboardViewModel's doPasteCloud) — same download loop,
     // same overwrite/skip/unique-name handling, same per-item try/catch/finally hardening (a local
