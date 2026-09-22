@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import com.antigravity.filemanager.data.local.db.AppDatabase
 import com.antigravity.filemanager.data.local.db.CloudDao
+import com.antigravity.filemanager.data.local.db.DatabaseMigrations
 import com.antigravity.filemanager.data.local.db.TrashDao
 import com.antigravity.filemanager.data.repository.*
 import com.antigravity.filemanager.domain.repository.*
@@ -27,10 +28,11 @@ object DatabaseModule {
             AppDatabase::class.java,
             "file_manager.db"
         )
-            // WARNING: destructive fallback wipes the recycle-bin index (its files under
-            // .filemanager_trash can then never be restored) and every connected cloud account.
-            // Any future version bump needs a real Migration, not this fallback.
-            .fallbackToDestructiveMigration()
+            // A blanket destructive fallback used to wipe the recycle-bin index and every cloud
+            // account on any version bump. Only the pre-export versions may still be rebuilt;
+            // a missing migration for a newer version now fails loudly instead.
+            .addMigrations(*DatabaseMigrations.ALL)
+            .fallbackToDestructiveMigrationFrom(*DatabaseMigrations.LEGACY_VERSIONS)
             .build()
     }
 
