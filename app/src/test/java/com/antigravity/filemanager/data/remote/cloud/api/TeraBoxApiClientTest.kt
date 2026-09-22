@@ -346,6 +346,32 @@ class TeraBoxApiClientTest {
     }
 
     @Test
+    fun wrongClusterIsRetriedOnTheAdvertisedPrefix() = runBlocking {
+        val hosts = mutableListOf<String>()
+        val http = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                hosts += req.url.host
+                val onRightCluster = req.url.host == "jp.terabox.com"
+                val builder = okhttp3.Response.Builder()
+                    .request(req).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("test")
+                    .body(okhttp3.ResponseBody.create(
+                        "application/json".toMediaTypeOrNull(),
+                        if (onRightCluster) """{"errno":0,"list":[]}""" else """{"errno":-6}"""
+                    ))
+                if (!onRightCluster) builder.header("Url-Domain-Prefix", "jp")
+                builder.build()
+            }
+            .build()
+        val tb = TeraBoxApiClient(http)
+
+        val result = tb.listFiles(account, "/")
+
+        assertTrue(result.isSuccess)
+        assertEquals(listOf("www.terabox.com", "jp.terabox.com"), hosts)
+    }
+
+    @Test
     fun deleteRunsSynchronouslyAndReportsPerItemFailure() = runBlocking {
         var query = ""
         val tb = fakeClient { req ->

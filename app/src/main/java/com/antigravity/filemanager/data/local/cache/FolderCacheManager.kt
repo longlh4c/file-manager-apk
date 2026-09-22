@@ -675,6 +675,16 @@ class FolderCacheManager @Inject constructor(
     // invalidation and call refresh() again, which invalidates again, which emits again... an
     // infinite refresh loop with no way out short of force-quitting the app. Only an invalidate
     // coming from somewhere OTHER than the folder's own screen should notify.
+    /** A change inside [path] also changes the item count its parent listing shows for it, but
+     * that listing stayed "reconciled" for the rest of the session and kept the old count. Make
+     * the next visit to the parent re-fetch (it still paints from cache first). */
+    private fun markParentStale(accountId: String, path: String) {
+        val trimmed = path.trimEnd('/')
+        if (trimmed.isEmpty()) return
+        val parent = trimmed.substringBeforeLast('/', "").ifEmpty { "/" }
+        reconciledOnceKeys.remove(getCloudKey(accountId, parent))
+    }
+
     fun invalidateCloud(accountId: String, path: String? = null, notify: Boolean = true) {
         val prefix = if (path != null) "cloud_${accountId}_$path" else "cloud_${accountId}_"
         val keysToRemove = cacheRemoveByPrefix(prefix)
@@ -684,6 +694,7 @@ class FolderCacheManager @Inject constructor(
                 File(cacheDir, "$hashed.json").delete()
             }
         }
+        if (path != null) markParentStale(accountId, path)
         if (path != null && notify) {
             _cloudFolderEvents.tryEmit(CloudFolderEvent.Invalidated(accountId, path))
         }
@@ -700,6 +711,7 @@ class FolderCacheManager @Inject constructor(
         val newOnes = addedFiles.filter { it.name !in existingNames }
         if (newOnes.isNotEmpty()) {
             putCloudFolder(accountId, path, currentFiles + newOnes)
+            markParentStale(accountId, path)
         }
         _cloudFolderEvents.tryEmit(CloudFolderEvent.FilesAdded(accountId, path, addedFiles))
     }
@@ -715,6 +727,7 @@ class FolderCacheManager @Inject constructor(
             val remaining = cached.files.filterNot { it.path in removedRemotePaths }
             if (remaining.size != cached.files.size) {
                 putCloudFolder(accountId, path, remaining)
+                markParentStale(accountId, path)
             }
         }
         _cloudFolderEvents.tryEmit(CloudFolderEvent.FilesRemoved(accountId, path, removedRemotePaths))

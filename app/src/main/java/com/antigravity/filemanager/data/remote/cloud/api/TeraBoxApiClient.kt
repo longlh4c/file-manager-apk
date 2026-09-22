@@ -150,24 +150,30 @@ class TeraBoxApiClient @Inject constructor(
         method: String = "GET",
         body: RequestBody? = null
     ): Pair<Response, String> {
+        val usedPrefix = currentDomainPrefix
         val fullUrl = "${getBaseUrl()}$pathWithQuery"
         val req = buildAuthorizedRequest(fullUrl, cookieHeader, method, body)
         val resp = okHttpClient.newCall(req).execute()
 
         // Capture Url-Domain-Prefix header if present in any response
-        val domainPrefix = resp.header("Url-Domain-Prefix")
-        if (!domainPrefix.isNullOrBlank() && domainPrefix != currentDomainPrefix) {
+        val domainPrefix = resp.header("Url-Domain-Prefix")?.takeIf { it.isNotBlank() }
+        if (domainPrefix != null && domainPrefix != currentDomainPrefix) {
             currentDomainPrefix = domainPrefix
         }
 
         val bodyString = resp.body?.string() ?: ""
 
-        // Check if errno == -6 ("user not login" due to wrong domain cluster)
+        // Check if errno == -6 ("user not login" due to wrong domain cluster). Compare against
+        // the cluster this request actually went to: the header above has already been stored,
+        // and a concurrent request may have learned the right cluster meanwhile — comparing with
+        // currentDomainPrefix skipped the retry, so the first listing after a cold start failed.
         if (bodyString.contains("\"errno\":-6") || bodyString.contains("\"errno\": -6")) {
-            val targetPrefix = domainPrefix?.takeIf { it.isNotBlank() } ?: if (currentDomainPrefix == null) "dm" else null
-            if (targetPrefix != null && targetPrefix != currentDomainPrefix) {
+            val targetPrefix = domainPrefix
+                ?: currentDomainPrefix?.takeIf { it != usedPrefix }
+                ?: if (usedPrefix == null) "dm" else null
+            if (targetPrefix != null && targetPrefix != usedPrefix) {
                 currentDomainPrefix = targetPrefix
-                val retryUrl = "${getBaseUrl()}$pathWithQuery"
+                val retryUrl = "https://$targetPrefix.terabox.com$pathWithQuery"
                 val retryReq = buildAuthorizedRequest(retryUrl, cookieHeader, method, body)
                 val retryResp = okHttpClient.newCall(retryReq).execute()
                 val retryBody = retryResp.body?.string() ?: ""

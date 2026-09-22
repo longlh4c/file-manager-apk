@@ -138,13 +138,19 @@ class DropboxApiClient @Inject constructor(
         treeCacheFile(accountId).delete()
     }
 
+    /** The cached tree to patch: the in-memory copy, or the disk copy when the process was
+     * restarted. Patching only the in-memory copy left a stale disk tree behind that the next
+     * listing then loaded — a folder created right after reopening the app didn't show up. */
+    private fun cachedTree(accountId: String): TreeCache? =
+        treeCache[accountId] ?: loadTreeFromDisk(accountId)?.also { treeCache[accountId] = it }
+
     /** Patches a freshly uploaded file into the cached tree in place, so the folder listing that
      * follows an upload reflects it immediately without forcing a full recursive re-fetch of the
      * WHOLE account (that fetch is what made "copy to Dropbox" feel like it hung/timed out —
      * upload one file, then wait on a full-tree listFolder(recursive=true) just to redraw one
      * folder). No-ops if nothing is cached yet; the next listFolderCached() will fetch fresh anyway. */
     private fun patchTreeAfterUpload(accountId: String, metadata: FileMetadata) {
-        val cached = treeCache[accountId] ?: return
+        val cached = cachedTree(accountId) ?: return
         val path = metadata.pathDisplay ?: return
         val parent = path.substringBeforeLast('/', "")
         val entry = DropboxEntry(path, parent, metadata.name, false, metadata.size, metadata.serverModified.time, metadata.id)
@@ -167,7 +173,7 @@ class DropboxApiClient @Inject constructor(
      * recursive re-fetch again. Patching in place keeps the "build the tree once, reuse it"
      * cache actually holding across a multi-folder copy instead of restarting on every folder. */
     fun patchTreeAfterFolderCreate(accountId: String, path: String, id: String) {
-        val cached = treeCache[accountId] ?: return
+        val cached = cachedTree(accountId) ?: return
         val parent = path.trimEnd('/').substringBeforeLast('/', "")
         val name = path.trimEnd('/').substringAfterLast('/')
         // lastModified=0L to match every real folder entry (fetchTreeFromNetwork always sets 0L
@@ -188,7 +194,7 @@ class DropboxApiClient @Inject constructor(
      * every file paid for a full account-tree re-fetch just to delete the one file it was about
      * to replace anyway. Also drops any entries nested under this path, for a deleted folder. */
     fun patchTreeAfterDelete(accountId: String, path: String) {
-        val cached = treeCache[accountId] ?: run {
+        val cached = cachedTree(accountId) ?: run {
             android.util.Log.d("DropboxApiClient", "patchTreeAfterDelete: no cache yet for $accountId, nothing to patch (path='$path')")
             return
         }
@@ -218,7 +224,7 @@ class DropboxApiClient @Inject constructor(
      * No-ops (leaving the next listing to do a full fetch as usual) if nothing is cached yet —
      * patching a folder into an empty/nonexistent tree wouldn't leave anything usable behind. */
     suspend fun refreshFolderShallow(account: CloudAccount, path: String): Result<Unit> = withContext(Dispatchers.IO) {
-        val cached = treeCache[account.id] ?: return@withContext Result.success(Unit)
+        val cached = cachedTree(account.id) ?: return@withContext Result.success(Unit)
         val normalizedPath = if (path == "/" || path.isBlank()) "" else path.trimEnd('/')
         val freshItems = listFolder(account, path).getOrElse { return@withContext Result.failure(it) }
         val freshEntries = freshItems.map { item ->
