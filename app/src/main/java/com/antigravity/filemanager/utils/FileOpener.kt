@@ -15,7 +15,7 @@ object FileOpener {
 
     fun openFile(context: Context, fileItem: FileItem) {
         val file = File(fileItem.path)
-        if (!file.exists()) return
+        if (!file.exists()) return notify(context, "File no longer exists")
 
         val ext = file.extension.lowercase(Locale.getDefault())
 
@@ -79,7 +79,7 @@ object FileOpener {
 
     fun openWith(context: Context, fileItem: FileItem) {
         val file = File(fileItem.path)
-        if (!file.exists()) return
+        if (!file.exists()) return notify(context, "File no longer exists")
 
         val mimeType = getMimeType(file)
         try {
@@ -100,6 +100,7 @@ object FileOpener {
             context.startActivity(chooser)
         } catch (e: Exception) {
             e.printStackTrace()
+            notify(context, "No app can open this file")
         }
     }
 
@@ -146,7 +147,14 @@ object FileOpener {
             }
         } catch (e: Exception) {
             e.printStackTrace()
+            notify(context, "Couldn't share: ${e.message}")
         }
+    }
+
+    // Tapping a file that could not be opened (deleted meanwhile, no handler, a path the
+    // FileProvider doesn't cover) used to do nothing at all.
+    private fun notify(context: Context, message: String) {
+        android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show()
     }
 
     private fun getMimeType(file: File): String {

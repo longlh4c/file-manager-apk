@@ -31,13 +31,13 @@ object CloudViewerSession {
  * sitting in a nav back-stack argument (visible to process-death state restoration, logs, etc).
  */
 object CloudStreamHeaders {
-    private val headersByUrl = java.util.concurrent.ConcurrentHashMap<String, Map<String, String>>()
+    private val headersByUrl = boundedMap<Map<String, String>>(MAX_REMEMBERED_STREAMS)
 
     fun put(url: String, headers: Map<String, String>) {
-        if (headers.isNotEmpty()) headersByUrl[url] = headers
+        if (headers.isNotEmpty()) synchronized(headersByUrl) { headersByUrl[url] = headers }
     }
 
-    fun get(url: String): Map<String, String> = headersByUrl[url] ?: emptyMap()
+    fun get(url: String): Map<String, String> = synchronized(headersByUrl) { headersByUrl[url] } ?: emptyMap()
 }
 
 /**
@@ -48,7 +48,9 @@ object CloudStreamHeaders {
  */
 object CloudMediaDataSources {
     private const val PREFIX = "cloud-stream://"
-    private val sources = java.util.concurrent.ConcurrentHashMap<String, android.media.MediaDataSource>()
+    // Bounded: entries were never removed, and each MEGA source keeps its ~256 KB read-ahead
+    // buffer, so every video opened during a session stayed in memory.
+    private val sources = boundedMap<android.media.MediaDataSource>(MAX_REMEMBERED_STREAMS)
 
     // What ExoPlayer can play progressively; anything else keeps the download-then-open path.
     private val STREAMABLE_VIDEO_EXTENSIONS = setOf("mp4", "m4v", "mov", "3gp", "mkv", "webm", "ts", "flv")
@@ -57,11 +59,11 @@ object CloudMediaDataSources {
 
     fun register(accountId: String, nodeId: String, source: android.media.MediaDataSource): String {
         val url = "$PREFIX$accountId/$nodeId"
-        sources[url] = source
+        synchronized(sources) { sources[url] = source }
         return url
     }
 
-    fun get(url: String): android.media.MediaDataSource? = sources[url]
+    fun get(url: String): android.media.MediaDataSource? = synchronized(sources) { sources[url] }
 
     fun isRegisteredUrl(path: String): Boolean = path.startsWith(PREFIX)
 
@@ -69,3 +71,13 @@ object CloudMediaDataSources {
     fun isStreamPath(path: String): Boolean =
         path.startsWith("http://") || path.startsWith("https://") || isRegisteredUrl(path)
 }
+
+/** How many recently opened streams keep their headers/source; far more than a viewer pager
+ * has alive at once, so an entry is only dropped long after its viewer is gone. */
+private const val MAX_REMEMBERED_STREAMS = 16
+
+/** Access-ordered LRU map; callers synchronize on it. */
+private fun <V> boundedMap(max: Int): LinkedHashMap<String, V> =
+    object : LinkedHashMap<String, V>(max, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, V>?) = size > max
+    }

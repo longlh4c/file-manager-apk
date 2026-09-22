@@ -61,7 +61,11 @@ fun DuplicateFilesScreen(
                 viewModel.deleteDuplicates(selectedPaths.toList()) { selectedPaths = emptySet() }
                 showDeleteDialog = false
             },
-            onDismiss = { showDeleteDialog = false }
+            onDismiss = { showDeleteDialog = false },
+            // These screens always move to the Recycle Bin; the checkbox was shown but ignored.
+            showMoveToTrashOption = false,
+            defaultMoveToTrash = true,
+            message = "Move ${selectedPaths.size} item(s) to the Recycle Bin?"
         )
     }
 
