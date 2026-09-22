@@ -1482,31 +1482,41 @@ class MegaApiClient @Inject constructor(
                 })
             }.toString()
 
-            val createNodeBody = nodeCreationMutexFor(account.id).withLock {
+            val nodeHandle = nodeCreationMutexFor(account.id).withLock {
                 val createNodeResp = sendMegaPost(url, createNodeCommand)
                 val body = createNodeResp.getOrNull() ?: "[]"
                 android.util.Log.d("MegaApiClient", "uploadFile: 'p' response = $body")
                 if (body.startsWith("-") || body.contains("[-")) {
                     return@withContext Result.failure(Exception("MEGA node creation failed: $body"))
                 }
-                patchNodeCacheAfterFileUpload(
+                // The new node's real handle is only in this response (response[0].f[0].h). The
+                // upload completion token (fileHandleB64) used to be kept as the handle instead, so
+                // a freshly uploaded file couldn't be downloaded, viewed or thumbnailed ("g" -> -2)
+                // until the whole tree was re-fetched.
+                val realHandle = try {
+                    JSONArray(body).optJSONObject(0)?.optJSONArray("f")?.optJSONObject(0)?.optString("h").orEmpty()
+                } catch (e: Exception) { "" }
+                if (realHandle.isBlank()) {
+                    // The node exists server-side; let the next listing pick it up for real.
+                    invalidateNodeTreeCache(account.id)
+                } else patchNodeCacheAfterFileUpload(
                     accountId = account.id,
-                    handle = fileHandleB64,
+                    handle = realHandle,
                     parentHandle = resolvedParentHandle,
                     name = localFile.name,
                     size = totalBytes,
                     encodedKey = encodedKey,
                     fileAttrStr = faField ?: ""
                 )
-                body
+                realHandle
             }
             onProgress?.invoke(totalBytes, totalBytes)
 
             Result.success(
                 FileItem(
-                    id = fileHandleB64,
+                    id = nodeHandle,
                     name = localFile.name,
-                    path = fileHandleB64,
+                    path = nodeHandle,
                     size = totalBytes,
                     lastModified = System.currentTimeMillis(),
                     isDirectory = false,
