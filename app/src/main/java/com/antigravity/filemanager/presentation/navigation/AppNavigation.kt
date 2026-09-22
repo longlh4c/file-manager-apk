@@ -1,5 +1,6 @@
 package com.antigravity.filemanager.presentation.navigation
 
+import kotlinx.coroutines.flow.first
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.EnterTransition
@@ -116,14 +117,17 @@ fun AppNavigation(
     val leftNavController = rememberNavController()
     val rightNavController = rememberNavController()
 
-    // Restore the last-viewed image on cold start or after process death
-    val lastViewedImage by preferenceManager.lastViewedImageFlow.collectAsStateWithLifecycle(initialValue = null)
+    // Restore the last-viewed image on cold start or after process death. Only the value persisted
+    // at startup counts: observing the flow meant that, when nothing was saved yet, the first image
+    // opened this session (which saves itself as "last viewed") was "restored" as a second viewer
+    // stacked on top of itself, needing two Backs to leave.
     var hasRestoredLastViewed by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(lastViewedImage) {
-        val state = lastViewedImage
-        if (state != null && !hasRestoredLastViewed) {
-            hasRestoredLastViewed = true
+    LaunchedEffect(Unit) {
+        if (hasRestoredLastViewed) return@LaunchedEffect
+        hasRestoredLastViewed = true
+        val state = preferenceManager.lastViewedImageFlow.first()
+        if (state != null) {
             val isValid = if (state.cloudAccountId == null) File(state.path).exists() else true
             if (isValid) {
                 leftNavController.navigate(
