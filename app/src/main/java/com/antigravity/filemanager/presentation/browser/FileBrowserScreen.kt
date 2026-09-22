@@ -16,6 +16,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import com.antigravity.filemanager.presentation.components.dualPaneDragSource
+import com.antigravity.filemanager.presentation.components.onWindowBounds
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.ui.Alignment
@@ -608,10 +610,25 @@ fun FileBrowserScreen(
             )
 
 
+            // The folder shown here receives items dragged from the other dual-panel pane.
+            var dropBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
+            com.antigravity.filemanager.presentation.components.DualPaneDropTargetEffect(
+                folderPath = uiState.currentPath,
+                folderName = java.io.File(uiState.currentPath).name,
+                bounds = dropBounds,
+                onDrop = { paths, isMove -> viewModel.dropItems(paths, isMove) }
+            )
+            val dragSource: (FileItem) -> Modifier = { file ->
+                Modifier.dualPaneDragSource(
+                    sourceDir = uiState.currentPath,
+                    paths = { (viewModel.uiState.value.selectedPaths + file.path).toList() },
+                    onFinished = { viewModel.clearSelection() }
+                )
+            }
             // Switchable View Mode: LIST, GRID, DETAILED
             PullToRefreshWrapper(
                 onRefresh = { viewModel.refresh() },
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize().onWindowBounds { dropBounds = it }
             ) {
             if (!uiState.isLoading && !uiState.isSearching && filteredFiles.isEmpty()) {
                 EmptyFolderState()
@@ -660,6 +677,7 @@ fun FileBrowserScreen(
                         items(filteredFiles, key = { it.path }) { file ->
                             FileGridCard(
                                 file = file,
+                                modifier = dragSource(file),
                                 isSelectionMode = uiState.isSelectionMode,
                                 isSelected = uiState.selectedPaths.contains(file.path),
                                 onClick = {
@@ -685,6 +703,7 @@ fun FileBrowserScreen(
                         items(filteredFiles, key = { it.path }) { file ->
                             FileDetailedListItem(
                                 file = file,
+                                modifier = dragSource(file),
                                 isSelectionMode = uiState.isSelectionMode,
                                 isSelected = uiState.selectedPaths.contains(file.path),
                                 onClick = {
@@ -713,6 +732,7 @@ fun FileBrowserScreen(
                         items(filteredFiles, key = { it.path }) { file ->
                             FileListItem(
                                 file = file,
+                                modifier = dragSource(file),
                                 isSelectionMode = uiState.isSelectionMode,
                                 isSelected = uiState.selectedPaths.contains(file.path),
                                 onClick = {

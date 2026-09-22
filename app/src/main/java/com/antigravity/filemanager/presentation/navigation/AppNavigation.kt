@@ -23,6 +23,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.border
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -76,6 +81,7 @@ import com.antigravity.filemanager.presentation.network.AccessFromNetworkScreen
 import com.antigravity.filemanager.presentation.theme.DarkCard
 import com.antigravity.filemanager.presentation.theme.DividerDark
 import com.antigravity.filemanager.presentation.theme.TealPrimary
+import com.antigravity.filemanager.presentation.theme.TextPrimary
 import com.antigravity.filemanager.presentation.theme.TextSecondary
 import com.antigravity.filemanager.presentation.trash.RecycleBinScreen
 import com.antigravity.filemanager.presentation.viewers.ImageViewerScreen
@@ -266,6 +272,12 @@ fun AppNavigation(
         }
     } else Modifier
 
+    // Drag-and-drop of local items between the two panes (see DualPaneDrag).
+    val paneDrag = remember { com.antigravity.filemanager.presentation.components.DualPaneDragState() }
+    LaunchedEffect(isDualSplit) { if (!isDualSplit) paneDrag.cancel() }
+    var rootOffset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+
+    Box(modifier = Modifier.fillMaxSize().onGloballyPositioned { rootOffset = it.positionInWindow() }) {
     Row(modifier = Modifier.fillMaxSize()) {
         // Left Pane: Always occupies slot 0 of Row so its composition and state are 100% preserved
         Box(
@@ -283,7 +295,11 @@ fun AppNavigation(
                         scaleY = leftScale
                     }
             ) {
-                CompositionLocalProvider(LocalOnBackPressedDispatcherOwner provides leftBack) {
+                CompositionLocalProvider(
+                    LocalOnBackPressedDispatcherOwner provides leftBack,
+                    com.antigravity.filemanager.presentation.components.LocalPane provides ActivePanel.LEFT.takeIf { isDualSplit },
+                    com.antigravity.filemanager.presentation.components.LocalDualPaneDrag provides paneDrag.takeIf { isDualSplit }
+                ) {
                     LeftPaneContent(
                         navController = leftNavController,
                         openFileHandler = leftOpenFileHandler,
@@ -332,7 +348,11 @@ fun AppNavigation(
                             scaleY = rightScale
                         }
                 ) {
-                    CompositionLocalProvider(LocalOnBackPressedDispatcherOwner provides rightBack) {
+                    CompositionLocalProvider(
+                        LocalOnBackPressedDispatcherOwner provides rightBack,
+                        com.antigravity.filemanager.presentation.components.LocalPane provides ActivePanel.RIGHT.takeIf { isDualSplit },
+                        com.antigravity.filemanager.presentation.components.LocalDualPaneDrag provides paneDrag.takeIf { isDualSplit }
+                    ) {
                         RightPaneContent(
                             navController = rightNavController,
                             openFileHandler = rightOpenFileHandler,
@@ -353,6 +373,8 @@ fun AppNavigation(
                 }
             }
         }
+    }
+    DualPaneDragOverlay(paneDrag, rootOffset)
     }
 }
 
@@ -1017,4 +1039,67 @@ private class PaneBackDispatcherOwner(
     override val onBackPressedDispatcher = OnBackPressedDispatcher(null) { hasEnabledCallbacks = it }
 
     override val lifecycle: androidx.lifecycle.Lifecycle get() = lifecycleOwner.lifecycle
+}
+
+/** What a drag between the panes shows: the dragged-items chip under the finger, an outline on
+ * the pane that would receive the drop, and the Copy / Move / Cancel menu after dropping. */
+@Composable
+private fun DualPaneDragOverlay(
+    state: com.antigravity.filemanager.presentation.components.DualPaneDragState,
+    rootOffset: androidx.compose.ui.geometry.Offset
+) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val payload = state.payload
+    if (payload != null) {
+        val target = state.hoveredTarget
+        if (target != null) {
+            val topLeft = target.bounds.topLeft - rootOffset
+            Box(
+                modifier = Modifier
+                    .offset { androidx.compose.ui.unit.IntOffset(topLeft.x.toInt(), topLeft.y.toInt()) }
+                    .size(with(density) { target.bounds.width.toDp() }, with(density) { target.bounds.height.toDp() })
+                    .border(2.dp, TealPrimary, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+            )
+        }
+        val at = state.pointer - rootOffset
+        val count = payload.paths.size
+        Text(
+            text = (if (count == 1) java.io.File(payload.paths.first()).name else "$count items") +
+                (target?.let { "  →  ${it.folderName}" } ?: ""),
+            color = Color.Black,
+            fontSize = 13.sp,
+            maxLines = 1,
+            modifier = Modifier
+                .offset { androidx.compose.ui.unit.IntOffset(at.x.toInt() + 24, at.y.toInt() - 72) }
+                .background(if (target != null) TealPrimary else Color(0xFFB0B0B0), androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        )
+    }
+
+    state.pendingDrop?.let { drop ->
+        val count = drop.payload.paths.size
+        val what = if (count == 1) "\"${java.io.File(drop.payload.paths.first()).name}\"" else "$count items"
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { state.resolve(null) },
+            title = { Text("Drop $what", color = TextPrimary) },
+            text = { Text("into \"${drop.target.folderName}\"", color = TextSecondary) },
+            confirmButton = {
+                Row {
+                    androidx.compose.material3.TextButton(onClick = { state.resolve(null) }) {
+                        Text("CANCEL", color = TextSecondary)
+                    }
+                    androidx.compose.material3.TextButton(onClick = { state.resolve(isMove = true) }) {
+                        Text("MOVE", color = TealPrimary)
+                    }
+                    androidx.compose.material3.Button(
+                        onClick = { state.resolve(isMove = false) },
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = TealPrimary, contentColor = Color.Black)
+                    ) {
+                        Text("COPY")
+                    }
+                }
+            },
+            containerColor = DarkCard
+        )
+    }
 }

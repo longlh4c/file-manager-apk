@@ -596,22 +596,33 @@ class FileBrowserViewModel @Inject constructor(
                 return@launch
             }
 
-            val isMove = _uiState.value.isCutOperation
-            val conflicts = fileOperationsUseCase.findConflicts(sources, target)
-            if (conflicts.isNotEmpty()) {
-                pendingOverwriteAction = { overwriteNames, skipNames ->
-                    // Keep the clipboard after a failed paste so the user can retry without re-copying.
-                    if (runLocalCopyOrMove(sources, target, isMove, overwriteNames, skipNames).isSuccess) globalClipboardManager.clear()
-                    invalidateLocalCacheForPaste(sources, target, isMove)
-                    loadDirectory(target)
-                }
-                _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
-            } else {
-                // Keep the clipboard after a failed paste so the user can retry without re-copying.
-                if (runLocalCopyOrMove(sources, target, isMove).isSuccess) globalClipboardManager.clear()
+            // Keep the clipboard after a failed paste so the user can retry without re-copying.
+            pasteLocal(sources, target, _uiState.value.isCutOperation) { globalClipboardManager.clear() }
+        }
+    }
+
+    /** Local items dropped onto this folder from the other dual-panel pane; the same copy/move
+     * flow as paste (conflict dialog, progress, refresh), leaving the clipboard alone. */
+    fun dropItems(sources: List<String>, isMove: Boolean) {
+        val target = _uiState.value.currentPath
+        if (sources.isEmpty()) return
+        activeTransferJob?.cancel()
+        activeTransferJob = viewModelScope.launch { pasteLocal(sources, target, isMove) {} }
+    }
+
+    private suspend fun pasteLocal(sources: List<String>, target: String, isMove: Boolean, onSuccess: () -> Unit) {
+        val conflicts = fileOperationsUseCase.findConflicts(sources, target)
+        if (conflicts.isNotEmpty()) {
+            pendingOverwriteAction = { overwriteNames, skipNames ->
+                if (runLocalCopyOrMove(sources, target, isMove, overwriteNames, skipNames).isSuccess) onSuccess()
                 invalidateLocalCacheForPaste(sources, target, isMove)
                 loadDirectory(target)
             }
+            _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
+        } else {
+            if (runLocalCopyOrMove(sources, target, isMove).isSuccess) onSuccess()
+            invalidateLocalCacheForPaste(sources, target, isMove)
+            loadDirectory(target)
         }
     }
 
