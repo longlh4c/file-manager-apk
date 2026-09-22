@@ -629,6 +629,15 @@ fun CloudExplorerScreen(
                             isLoading = uiState.isLoading,
                             record = uiState.searchQuery.isBlank()
                         )
+                        val revealName = uiState.revealItemName
+                        LaunchedEffect(revealName, filteredFiles) {
+                            if (revealName == null) return@LaunchedEffect
+                            val index = filteredFiles.indexOfFirst { it.name == revealName }
+                            if (index >= 0) {
+                                listState.animateScrollToItem(index)
+                                viewModel.onItemRevealed()
+                            }
+                        }
                         LazyColumn(state = listState, modifier = Modifier.fillMaxSize().weight(1f)) {
                         items(filteredFiles, key = { it.id }) { file ->
                             FileListItem(

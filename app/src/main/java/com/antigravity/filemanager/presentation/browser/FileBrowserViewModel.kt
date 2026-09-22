@@ -90,6 +90,8 @@ data class FileBrowserUiState(
     val searchResults: List<FileItem> = emptyList(),
     val isSearching: Boolean = false,
     val toastMessage: String? = null,
+    // Name of a just-created folder the list should scroll to (see CloudExplorerUiState).
+    val revealItemName: String? = null,
     val bookmarks: List<com.antigravity.filemanager.domain.model.Bookmark> = emptyList(),
     val bookmarkConfirmationMessage: String? = null,
     val overwriteConflicts: List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList(),
@@ -986,10 +988,15 @@ class FileBrowserViewModel @Inject constructor(
         _uiState.update { old -> old.copy(toastMessage = null) }
     }
 
+    fun onItemRevealed() {
+        _uiState.update { old -> old.copy(revealItemName = null) }
+    }
+
     fun createFolder(name: String) {
         viewModelScope.launch {
             val result = fileOperationsUseCase.createFolder(_uiState.value.currentPath, name)
             _uiState.update { old -> old.copy(showNewFolderDialog = false, toastMessage = result.exceptionOrNull()?.let { it.message ?: "Could not create folder" }) }
+            result.onSuccess { item -> _uiState.update { old -> old.copy(revealItemName = item.name) } }
             folderCacheManager.invalidateLocal(_uiState.value.currentPath)
             loadDirectory(_uiState.value.currentPath)
         }

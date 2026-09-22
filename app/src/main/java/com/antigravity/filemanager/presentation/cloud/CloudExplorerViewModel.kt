@@ -54,6 +54,10 @@ data class CloudExplorerUiState(
     val searchResults: List<FileItem> = emptyList(),
     val isSearching: Boolean = false,
     val toastMessage: String? = null,
+    // Name of a just-created item the list should scroll to. A keyed LazyColumn keeps the
+    // first visible item anchored when rows are inserted above it, so a new folder sorted to
+    // the top landed just off-screen and looked like it had not been created.
+    val revealItemName: String? = null,
     val itemForProperties: FileItem? = null,
     val showPropertiesDialog: Boolean = false,
     // One or more items whose Properties dialog is open — a single tap still goes through this
@@ -1341,6 +1345,7 @@ class CloudExplorerViewModel @Inject constructor(
             _uiState.update { old -> old.copy(isLoading = true) }
             val result = cloudUseCase.createFolder(accountId, folderName.trim(), _uiState.value.currentPath)
             result.exceptionOrNull()?.let { e -> _uiState.update { old -> old.copy(toastMessage = e.message ?: "Could not create folder") } }
+            result.onSuccess { _uiState.update { old -> old.copy(revealItemName = folderName.trim()) } }
             refresh()
         }
     }
@@ -1939,6 +1944,10 @@ class CloudExplorerViewModel @Inject constructor(
 
     fun clearToast() {
         _uiState.update { old -> old.copy(toastMessage = null) }
+    }
+
+    fun onItemRevealed() {
+        _uiState.update { old -> old.copy(revealItemName = null) }
     }
 }
 

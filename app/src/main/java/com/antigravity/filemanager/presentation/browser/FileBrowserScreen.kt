@@ -632,6 +632,15 @@ fun FileBrowserScreen(
                 isLoading = uiState.isLoading,
                 record = recordScroll && viewMode == ViewMode.GRID
             )
+            val revealName = uiState.revealItemName
+            LaunchedEffect(revealName, filteredFiles, viewMode) {
+                if (revealName == null) return@LaunchedEffect
+                val index = filteredFiles.indexOfFirst { it.name == revealName }
+                if (index >= 0) {
+                    if (viewMode == ViewMode.GRID) gridState.animateScrollToItem(index) else listState.animateScrollToItem(index)
+                    viewModel.onItemRevealed()
+                }
+            }
             when (viewMode) {
                 ViewMode.GRID -> {
                     LazyVerticalGrid(
