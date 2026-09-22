@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -25,7 +26,13 @@ data class NetworkAccessUiState(
     val portInput: String = "1524",
     val httpPortInput: String = "8080",
     val password: String = "",
-    val copiedMessage: String? = null
+    val copiedMessage: String? = null,
+    // While running: the ports the servers actually bound (the fields above may be edited or
+    // adjusted, e.g. a Web port equal to the FTP port is moved) and which of them came up.
+    val runningPort: Int = 1524,
+    val runningHttpPort: Int = 8080,
+    val ftpRunning: Boolean = false,
+    val httpRunning: Boolean = false
 ) {
     val ftpAccessUrl: String
         get() = if (ipAddress != null) "ftp://$ipAddress:$port" else ""
@@ -47,34 +54,43 @@ class NetworkAccessViewModel @Inject constructor(
     val uiState: StateFlow<NetworkAccessUiState> = _uiState.asStateFlow()
 
     init {
+        // Saved settings are read once. Collecting them continuously echoed every keystroke's
+        // (asynchronous) save back into the field being typed in, so typing quickly dropped
+        // characters: "owl123" ended up as "o12".
         viewModelScope.launch {
-            preferenceManager.ftpPortFlow.collectLatest { port ->
-                _uiState.update { old -> old.copy(
-                    port = port,
-                    portInput = port.toString()
-                ) }
-            }
+            val port = preferenceManager.ftpPortFlow.first()
+            val httpPort = preferenceManager.httpPortFlow.first()
+            val pass = preferenceManager.ftpPasswordFlow.first().take(8)
+            _uiState.update { old -> old.copy(
+                port = port,
+                portInput = port.toString(),
+                httpPort = httpPort,
+                httpPortInput = httpPort.toString(),
+                password = pass
+            ) }
         }
         viewModelScope.launch {
-            preferenceManager.httpPortFlow.collectLatest { httpPort ->
-                _uiState.update { old -> old.copy(
-                    httpPort = httpPort,
-                    httpPortInput = httpPort.toString()
-                ) }
-            }
-        }
-        viewModelScope.launch {
-            preferenceManager.ftpPasswordFlow.collectLatest { pass ->
-                val trimmedPass = pass.take(8)
-                _uiState.update { old -> old.copy(password = trimmedPass) }
-            }
-        }
-        viewModelScope.launch {
+            // An error that was already there when this screen opened was shown before.
+            var shownErrorId = ftpServerUseCase.getState().errorId
             ftpServerUseCase.observeState().collectLatest { state ->
+                val newError = state.error?.takeIf { state.errorId != shownErrorId }
+                shownErrorId = state.errorId
                 _uiState.update { old -> old.copy(
                     isRunning = state.isRunning,
-                    ipAddress = state.ipAddress
+                    ipAddress = state.ipAddress,
+                    runningPort = state.port,
+                    runningHttpPort = state.httpPort,
+                    ftpRunning = state.ftpRunning,
+                    httpRunning = state.httpRunning,
+                    copiedMessage = newError ?: old.copiedMessage
                 ) }
+                if (newError != null) {
+                    // Cleared again so the same error can show on the next failed start.
+                    launch {
+                        delay(4000)
+                        _uiState.update { old -> if (old.copiedMessage == newError) old.copy(copiedMessage = null) else old }
+                    }
+                }
             }
         }
     }

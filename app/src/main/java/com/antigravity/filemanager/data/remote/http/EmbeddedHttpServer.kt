@@ -331,7 +331,7 @@ class EmbeddedHttpServer @Inject constructor(
                     "application/zip",
                     pis
                 )
-                response.addHeader("Content-Disposition", "attachment; filename=\"$zipName\"")
+                response.addHeader("Content-Disposition", contentDisposition("attachment", zipName))
                 return finalizeResponse(response)
             }
 
@@ -378,7 +378,7 @@ class EmbeddedHttpServer @Inject constructor(
                 )
                 response.addHeader("Content-Range", "bytes $rangeStart-$rangeEnd/$fileLen")
                 response.addHeader("Accept-Ranges", "bytes")
-                response.addHeader("Content-Disposition", "inline; filename=\"${targetFile.name}\"")
+                response.addHeader("Content-Disposition", contentDisposition("inline", targetFile.name))
                 return finalizeResponse(response)
             } else {
                 val fis = FileInputStream(targetFile)
@@ -389,7 +389,7 @@ class EmbeddedHttpServer @Inject constructor(
                     fileLen
                 )
                 response.addHeader("Accept-Ranges", "bytes")
-                response.addHeader("Content-Disposition", "inline; filename=\"${targetFile.name}\"")
+                response.addHeader("Content-Disposition", contentDisposition("inline", targetFile.name))
                 return finalizeResponse(response)
             }
         }
@@ -437,16 +437,24 @@ class EmbeddedHttpServer @Inject constructor(
                     File(tempFilePath).delete()
                     continue
                 }
-                val destFile = File(targetDir, safeFileName)
+                // A same-named file used to be overwritten without warning, destroying the file
+                // already on the device; keep both instead, like the app's own paste does.
+                val destFile = com.antigravity.filemanager.data.local.storage.uniqueFile(targetDir, safeFileName)
 
                 val tempFile = File(tempFilePath)
                 if (tempFile.exists()) {
-                    FileInputStream(tempFile).use { input ->
-                        FileOutputStream(destFile).use { output ->
-                            input.copyTo(output)
+                    try {
+                        FileInputStream(tempFile).use { input ->
+                            FileOutputStream(destFile).use { output ->
+                                input.copyTo(output)
+                            }
                         }
+                    } catch (e: Exception) {
+                        destFile.delete() // don't leave a truncated file behind
+                        throw e
+                    } finally {
+                        tempFile.delete()
                     }
-                    tempFile.delete()
                     uploadedPaths.add(destFile.absolutePath)
                 }
             }
@@ -472,11 +480,11 @@ class EmbeddedHttpServer @Inject constructor(
             val relPath = session.parms["path"] ?: ""
             val folderName = session.parms["name"]?.trim() ?: ""
 
-            if (folderName.isEmpty() || folderName.contains("/") || folderName.contains("\\")) {
+            com.antigravity.filemanager.data.local.storage.invalidFileNameReason(folderName)?.let { reason ->
                 return finalizeResponse(newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
-                    "{\"error\":\"Invalid folder name\"}"
+                    JSONObject().put("error", reason).toString()
                 ))
             }
 
@@ -528,6 +536,15 @@ class EmbeddedHttpServer @Inject constructor(
                 "application/json",
                 "{\"success\":$deleted}"
             ))
+        }
+
+        /** Headers are written as ASCII, so a raw non-ASCII name (e.g. Vietnamese) reached the
+         * browser as "?" and a quote in the name broke the header. RFC 6266: an ASCII fallback
+         * plus the exact UTF-8 name in filename*. */
+        private fun contentDisposition(type: String, fileName: String): String {
+            val fallback = fileName.map { if (it.code in 0x20..0x7e && it != '"' && it != '\\') it else '_' }.joinToString("")
+            val encoded = java.net.URLEncoder.encode(fileName, "UTF-8").replace("+", "%20")
+            return "$type; filename=\"$fallback\"; filename*=UTF-8''$encoded"
         }
 
         // The web UI is served from this same origin, so no CORS headers are sent: a wildcard

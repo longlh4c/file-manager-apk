@@ -83,5 +83,7 @@ class CustomFtpUserManager(
 
     override fun getAdminName(): String = "admin"
 
-    override fun isAdmin(username: String?): Boolean = true
+    // Every login used to be an admin, which unlocks admin-only SITE commands (e.g. SITE WHO,
+    // listing every connected client's address) for anyone on the LAN.
+    override fun isAdmin(username: String?): Boolean = false
 }

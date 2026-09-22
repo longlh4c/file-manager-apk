@@ -328,7 +328,14 @@ data class FtpServerState(
     val port: Int = 1524,
     val httpPort: Int = 8080,
     val password: String = "",
-    val isRandomPassword: Boolean = false
+    val isRandomPassword: Boolean = false,
+    // Why the last start failed or only half worked (e.g. a port already in use); errorId changes
+    // with every new error so the same message can be shown again.
+    val error: String? = null,
+    val errorId: Long = 0L,
+    // Which of the two servers actually came up (one can fail while the other runs).
+    val ftpRunning: Boolean = false,
+    val httpRunning: Boolean = false
 ) {
     val accessUrl: String
         get() = if (ipAddress != null) "ftp://$ipAddress:$port" else ""

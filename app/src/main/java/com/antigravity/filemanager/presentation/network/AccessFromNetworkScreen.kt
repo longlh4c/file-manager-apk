@@ -282,27 +282,34 @@ fun AccessFromNetworkScreen(
                         horizontalAlignment = Alignment.Start,
                         modifier = Modifier.wrapContentWidth()
                     ) {
-                        AlignedUrlItem(
-                            icon = Icons.Default.Language,
-                            iconDescription = "Web Browser",
-                            scheme = "http",
-                            address = "$ip:${uiState.httpPort}",
-                            onClick = {
-                                viewModel.copyToClipboard(context, "http://$ip:${uiState.httpPort}", "Web address")
-                            }
-                        )
+                        // Only the servers that actually came up, on the ports they bound.
+                        if (uiState.httpRunning) {
+                            AlignedUrlItem(
+                                icon = Icons.Default.Language,
+                                iconDescription = "Web Browser",
+                                scheme = "http",
+                                address = "$ip:${uiState.runningHttpPort}",
+                                onClick = {
+                                    viewModel.copyToClipboard(context, "http://$ip:${uiState.runningHttpPort}", "Web address")
+                                }
+                            )
+                        }
 
-                        Spacer(modifier = Modifier.height(8.dp))
+                        if (uiState.httpRunning && uiState.ftpRunning) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
 
-                        AlignedUrlItem(
-                            icon = Icons.Default.Devices,
-                            iconDescription = "FTP Client",
-                            scheme = "ftp",
-                            address = "$ip:${uiState.port}",
-                            onClick = {
-                                viewModel.copyToClipboard(context, "ftp://$ip:${uiState.port}", "FTP address")
-                            }
-                        )
+                        if (uiState.ftpRunning) {
+                            AlignedUrlItem(
+                                icon = Icons.Default.Devices,
+                                iconDescription = "FTP Client",
+                                scheme = "ftp",
+                                address = "$ip:${uiState.runningPort}",
+                                onClick = {
+                                    viewModel.copyToClipboard(context, "ftp://$ip:${uiState.runningPort}", "FTP address")
+                                }
+                            )
+                        }
                     }
                 }
             } else {

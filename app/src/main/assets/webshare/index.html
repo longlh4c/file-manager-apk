@@ -562,7 +562,7 @@
       displayedItems = [...cachedItems];
       renderItems(displayedItems);
     } catch (e) {
-      tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="color:var(--danger)">Error loading directory: ' + e.message + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="color:var(--danger)">Error loading directory: ' + escapeHtml(String(e.message)) + '</td></tr>';
     }
   }
 
@@ -607,7 +607,7 @@
 
     items.forEach(item => {
       const itemPath = item.path || (currentPath ? currentPath + '/' + item.name : item.name);
-      const downloadUrl = '/api/download?path=' + encodeURIComponent(itemPath);
+      const downloadUrl = downloadUrlFor(itemPath);
       const isMedia = isPreviewable(item.name);
       const isSubfolderItem = isSearching && item.path && item.path.includes('/') && item.path !== (currentPath ? currentPath + '/' + item.name : item.name);
 
@@ -624,7 +624,7 @@
           <td>${formatDate(item.lastModified)}</td>
           <td>
             <div class="row-actions">
-              <a class="icon-btn" href="${downloadUrl}" download title="${item.isDir ? 'Download folder as ZIP' : 'Download file'}" onclick="event.stopPropagation()">
+              <a class="icon-btn" href="${escapeHtml(downloadUrl)}" download title="${item.isDir ? 'Download folder as ZIP' : 'Download file'}" onclick="event.stopPropagation()">
                 <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
               </a>
               ${(!item.isDir && isMedia) ? `
@@ -649,7 +649,7 @@
   }
 
   function downloadFile(path) {
-    window.location.href = '/api/download?path=' + encodeURIComponent(path);
+    window.location.href = downloadUrlFor(path);
   }
 
   function downloadCurrentFolder() {
@@ -672,7 +672,7 @@
       if (isLast) {
         html += `<span class="crumb current">${escapeHtml(p)}</span>`;
       } else {
-        html += `<span class="crumb" onclick="navigateTo('${currentAccum}')">${escapeHtml(p)}</span>`;
+        html += `<span class="crumb" onclick="navigateTo('${escapeJs(currentAccum)}')">${escapeHtml(p)}</span>`;
       }
     });
     container.innerHTML = html;
@@ -717,12 +717,20 @@
       displayedItems = (data.items || []).filter(item => !isSystemOrHiddenItem(item));
       renderItems(displayedItems);
     } catch (e) {
-      tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="color:var(--danger)">Error searching: ' + e.message + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="color:var(--danger)">Error searching: ' + escapeHtml(String(e.message)) + '</td></tr>';
     }
   }
 
+  // With a password set, plain links (download, preview, folder ZIP) carried no credentials and
+  // got 401; the server also accepts the password as the "auth" query parameter.
+  function downloadUrlFor(path) {
+    return '/api/download?path=' + encodeURIComponent(path) + (authToken ? '&auth=' + encodeURIComponent(authToken) : '');
+  }
+
+  // Used inside double-quoted onclick attributes: the HTML parser decodes entities before the
+  // JS runs, so & and " must be entity-encoded or a name containing them resolves to another path.
   function escapeJs(str) {
-    return (str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    return (str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/&/g, '&amp;').replace(/"/g, '&quot;');
   }
 
   function isPreviewable(fileName) {
@@ -734,14 +742,14 @@
     const ext = name.split('.').pop().toLowerCase();
     const container = document.getElementById('mediaPreviewContainer');
     document.getElementById('previewTitle').innerText = name;
-    const url = '/api/download?path=' + encodeURIComponent(path);
+    const url = downloadUrlFor(path);
 
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) {
-      container.innerHTML = `<img src="${url}" alt="${escapeHtml(name)}">`;
+      container.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(name)}">`;
     } else if (['mp4', 'webm'].includes(ext)) {
-      container.innerHTML = `<video src="${url}" controls autoplay></video>`;
+      container.innerHTML = `<video src="${escapeHtml(url)}" controls autoplay></video>`;
     } else if (['mp3', 'wav', 'ogg'].includes(ext)) {
-      container.innerHTML = `<audio src="${url}" controls autoplay style="width: 100%; margin: 20px 0;"></audio>`;
+      container.innerHTML = `<audio src="${escapeHtml(url)}" controls autoplay style="width: 100%; margin: 20px 0;"></audio>`;
     }
 
     openModal('previewModal');

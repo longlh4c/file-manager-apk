@@ -67,6 +67,8 @@ class FtpServerService : Service() {
         super.onCreate()
         createNotificationChannel()
         powerLocks = FtpPowerLocks(this)
+        (getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager)
+            ?.registerDefaultNetworkCallback(networkCallback)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -102,7 +104,12 @@ class FtpServerService : Service() {
     }
 
     private fun startServer(port: Int, httpPort: Int, pass: String, random: Boolean) {
-        launchLocked {
+        launchLocked { startLocked(port, httpPort, pass, random) }
+    }
+
+    /** Must run under [lifecycleMutex] (see [launchLocked]). */
+    private suspend fun startLocked(port: Int, httpPort: Int, pass: String, random: Boolean) {
+        run {
             // start() on an already-running server is a no-op that keeps the OLD port/password,
             // while the state below would advertise the new ones — restart so they match.
             if (ftpServer.isRunning) ftpServer.stop()
@@ -115,8 +122,18 @@ class FtpServerService : Service() {
             val ip = resolveLocalIpAddress(this@FtpServerService)
             val ftpSuccess = ftpServer.start(effectivePort, pass, externalIpAddress = ip)
             val httpSuccess = httpServer.start(effectiveHttpPort, pass)
+            // A failed start used to just stop the service: the button flipped back to START with
+            // no hint why (typically another app holding the port).
+            val error = when {
+                !ftpSuccess && !httpSuccess -> "Couldn't start: ports $effectivePort and $effectiveHttpPort may be in use by another app"
+                !ftpSuccess -> "FTP couldn't start: port $effectivePort may be in use by another app"
+                !httpSuccess -> "Web access couldn't start: port $effectiveHttpPort may be in use by another app"
+                else -> null
+            }
+            val errorId = if (error != null) System.currentTimeMillis() else _ftpState.value.errorId
 
             if (ftpSuccess || httpSuccess) {
+                runningConfig = RunningConfig(port, httpPort, pass, random)
                 powerLocks.acquire()
                 _ftpState.value = FtpServerState(
                     isRunning = true,
@@ -124,17 +141,49 @@ class FtpServerService : Service() {
                     port = effectivePort,
                     httpPort = effectiveHttpPort,
                     password = pass,
-                    isRandomPassword = random
+                    isRandomPassword = random,
+                    error = error,
+                    errorId = errorId,
+                    ftpRunning = ftpSuccess,
+                    httpRunning = httpSuccess
                 )
                 preferenceManager.setFtpWasRunning(true)
-                val notificationText = "Web: http://$ip:$effectiveHttpPort\nFTP: ftp://$ip:$effectivePort"
-                startForegroundNotification(notificationText)
+                val lines = listOfNotNull(
+                    "Web: http://$ip:$effectiveHttpPort".takeIf { httpSuccess },
+                    "FTP: ftp://$ip:$effectivePort".takeIf { ftpSuccess }
+                )
+                startForegroundNotification(lines.joinToString("\n"))
             } else {
+                runningConfig = null
                 powerLocks.release()
-                _ftpState.value = _ftpState.value.copy(isRunning = false)
+                _ftpState.value = _ftpState.value.copy(isRunning = false, error = error, errorId = errorId)
                 preferenceManager.setFtpWasRunning(false)
                 stopSelf()
             }
+        }
+    }
+
+    private data class RunningConfig(val port: Int, val httpPort: Int, val password: String, val random: Boolean)
+    @Volatile private var runningConfig: RunningConfig? = null
+
+    // The LAN address is resolved once at start and pinned into FTP's passive-mode replies; after
+    // switching WiFi networks (new IP) every FTP transfer dialed the old address and timed out,
+    // and the shown URLs were stale. Restart on the new address when it changes.
+    private val networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+        override fun onLinkPropertiesChanged(network: android.net.Network, linkProperties: android.net.LinkProperties) = checkAddress()
+        override fun onLost(network: android.net.Network) = checkAddress()
+    }
+
+    private fun checkAddress() {
+        if (runningConfig == null) return
+        // Re-checked under the lock: one network change fires several callbacks in a row, and
+        // each would otherwise queue its own restart.
+        launchLocked {
+            val config = runningConfig ?: return@launchLocked
+            val newIp = resolveLocalIpAddress(this@FtpServerService)
+            if (newIp == "127.0.0.1" || newIp == _ftpState.value.ipAddress) return@launchLocked
+            android.util.Log.i("FtpServerService", "LAN address changed to $newIp — restarting servers")
+            startLocked(config.port, config.httpPort, config.password, config.random)
         }
     }
 
@@ -144,6 +193,7 @@ class FtpServerService : Service() {
 
     private fun stopServer() {
         launchLocked {
+            runningConfig = null
             ftpServer.stop()
             httpServer.stop()
             preferenceManager.setFtpWasRunning(false)
@@ -192,6 +242,13 @@ class FtpServerService : Service() {
     }
 
     override fun onDestroy() {
+        try {
+            (getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager)
+                ?.unregisterNetworkCallback(networkCallback)
+        } catch (e: IllegalArgumentException) {
+            // was never registered
+        }
+        runningConfig = null
         ftpServer.stop()
         httpServer.stop()
         powerLocks.release()
