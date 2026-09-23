@@ -872,7 +872,9 @@ class CategoriesViewModel @Inject constructor(
         transferToCloud(account, destPath)
     }
 
-    fun transferToCloud(account: CloudAccount, destPath: String = "/") {
+    fun transferToCloud(account: CloudAccount, requestedDestPath: String = "/") {
+        // Google Drive's root is a virtual menu; what is sent there lands in My Drive.
+        val destPath = com.antigravity.filemanager.domain.usecase.cloudWriteDir(account.provider, requestedDestPath)
         val selected = _uiState.value.selectedPaths.toList()
         val isMove = _uiState.value.isCloudMoveOperation
         val count = selected.size
@@ -882,7 +884,8 @@ class CategoriesViewModel @Inject constructor(
             _uiState.update { old -> old.copy(showCloudDestinationDialog = false) }
 
             val progressThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
-            suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>) {
+            // keptBoth: some clash was resolved "Keep both", so an upload went up under a new name.
+            suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>, keptBoth: Boolean = false) {
                 try {
                     val result = cloudStorageUseCase.uploadFiles(
                         accountId = account.id,
@@ -926,7 +929,7 @@ class CategoriesViewModel @Inject constructor(
                     // in live instead of paying for a refetch. Anything less certain (a folder in
                     // the selection, or an overwrite that deleted+replaced a remote item) falls
                     // back to the generic invalidate, which only triggers a real refresh().
-                    if (overwriteNames.isEmpty() && selected.none { File(it).isDirectory }) {
+                    if (overwriteNames.isEmpty() && !keptBoth && selected.none { File(it).isDirectory }) {
                         val addedFiles = folderCacheManager.buildUploadedFileItems(selected, skipNames, destPath)
                         folderCacheManager.notifyCloudFilesAdded(account.id, destPath, addedFiles)
                     } else {
@@ -960,7 +963,9 @@ class CategoriesViewModel @Inject constructor(
             val items = selected.map { java.io.File(it).name to java.io.File(it).length() }
             val conflicts = cloudStorageUseCase.findConflicts(account.id, destPath, items)
             if (conflicts.isNotEmpty()) {
-                pendingOverwriteAction = { overwriteNames, skipNames -> doTransfer(overwriteNames, skipNames) }
+                pendingOverwriteAction = { overwriteNames, skipNames ->
+                    doTransfer(overwriteNames, skipNames, keptBoth = conflicts.any { it.name !in overwriteNames && it.name !in skipNames })
+                }
                 _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
             } else {
                 doTransfer(emptySet(), emptySet())
@@ -1036,6 +1041,11 @@ class CategoriesViewModel @Inject constructor(
         val archivePath = "$targetDir/$name"
         val sources = _uiState.value.selectedPaths.toList()
         _uiState.update { old -> old.copy(showCompressDialog = false) }
+        // Checked before the overwrite prompt, whose confirmation deletes the existing file.
+        com.antigravity.filemanager.data.local.storage.archiveTargetConflictReason(archivePath, sources)?.let { reason ->
+            _uiState.update { old -> old.copy(toastMessage = reason) }
+            return
+        }
         if (File(archivePath).exists()) {
             pendingCompressSources = sources
             _uiState.update { old -> old.copy(pendingOverwriteZipPath = archivePath) }

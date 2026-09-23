@@ -64,6 +64,9 @@ class FileOperationsHelper @Inject constructor(
     ): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val targetFolder = File(targetDir)
+            unsafeDestination(sourcePaths, targetFolder, overwriteNames, skipNames, "copy")?.let {
+                return@withContext Result.failure(it)
+            }
             if (!targetFolder.exists()) targetFolder.mkdirs()
 
             // overwrite is decided once per top-level source (matching the pre-existing conflict
@@ -74,9 +77,6 @@ class FileOperationsHelper @Inject constructor(
             for (path in sourcePaths) {
                 val source = File(path)
                 if (!source.exists() || source.name in skipNames) continue
-                if (source.isDirectory && isSameOrDescendant(targetFolder, source)) {
-                    return@withContext Result.failure(IOException("Cannot copy a folder into itself: ${source.name}"))
-                }
                 val dest = resolveDestination(targetFolder, source, overwriteNames)
                 // Copying a file onto itself (same-folder paste with overwrite chosen) is a
                 // no-op: doing it for real would truncate the source before it's read.
@@ -106,7 +106,11 @@ class FileOperationsHelper @Inject constructor(
     ): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val targetFolder = File(targetDir)
+            unsafeDestination(sourcePaths, targetFolder, overwriteNames, skipNames, "move")?.let {
+                return@withContext Result.failure(it)
+            }
             if (!targetFolder.exists()) targetFolder.mkdirs()
+            val targetCanonical = targetFolder.canonicalFile
             val scannedPaths = mutableListOf<String>()
 
             // Phase 1: renameTo() is atomic and effectively instant for a same-filesystem move —
@@ -119,14 +123,10 @@ class FileOperationsHelper @Inject constructor(
                 currentCoroutineContext().ensureActive()
                 val source = File(path)
                 if (!source.exists() || source.name in skipNames) continue
-                // renameTo() into its own subtree fails, and phase 2's copy-then-delete fallback
-                // would then delete the freshly made copy together with the source.
-                if (source.isDirectory && isSameOrDescendant(targetFolder, source)) {
-                    return@withContext Result.failure(IOException("Cannot move a folder into itself: ${source.name}"))
-                }
+                // Already in the target folder: nothing to move. It used to be renamed to
+                // "name (1)" by the keep-both naming below.
+                if (source.canonicalFile.parentFile == targetCanonical) continue
                 val dest = resolveDestination(targetFolder, source, overwriteNames)
-                // Moving a file onto itself is a no-op.
-                if (dest.absolutePath == source.absolutePath) continue
                 if (dest.exists()) {
                     if (dest.isDirectory) dest.deleteRecursively() else dest.delete()
                 }
@@ -212,6 +212,39 @@ class FileOperationsHelper @Inject constructor(
             }
         }
         return CopyOutcome(copiedPaths, failedSources)
+    }
+
+    /**
+     * Why copying/moving [sourcePaths] into [targetFolder] would destroy data, or null when it's
+     * safe. Checked for every item before any of them is touched, so a rejected batch leaves
+     * everything as it was:
+     * - a folder into itself or its own subtree: renameTo() fails there, and move's copy-then-
+     *   delete fallback would then delete the fresh copy together with the source;
+     * - overwriting a folder that contains the source (moving "Photos/Photos" up onto "Photos"):
+     *   deleting the overwritten folder deleted the source with it.
+     */
+    private fun unsafeDestination(
+        sourcePaths: List<String>,
+        targetFolder: File,
+        overwriteNames: Set<String>,
+        skipNames: Set<String>,
+        verb: String
+    ): IOException? {
+        for (path in sourcePaths) {
+            val source = File(path)
+            if (!source.exists() || source.name in skipNames) continue
+            if (source.isDirectory && isSameOrDescendant(targetFolder, source)) {
+                return IOException("Cannot $verb a folder into itself: ${source.name}")
+            }
+            if (source.name in overwriteNames) {
+                val dest = File(targetFolder, source.name)
+                if (dest.isDirectory && dest.canonicalPath != source.canonicalPath && isSameOrDescendant(source, dest)) {
+                    val participle = if (verb == "move") "moved" else "copied"
+                    return IOException("Cannot overwrite \"${dest.name}\": it contains the item being $participle")
+                }
+            }
+        }
+        return null
     }
 
     private fun resolveDestination(targetFolder: File, source: File, overwriteNames: Set<String>): File =
@@ -305,6 +338,9 @@ class FileOperationsHelper @Inject constructor(
         onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)? = null
     ): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
+            archiveTargetConflictReason(targetArchivePath, sourcePaths)?.let {
+                return@withContext Result.failure(IOException(it))
+            }
             if (targetArchivePath.endsWith(".7z", ignoreCase = true)) {
                 compress7z(sourcePaths, targetArchivePath, onProgress)
             } else {

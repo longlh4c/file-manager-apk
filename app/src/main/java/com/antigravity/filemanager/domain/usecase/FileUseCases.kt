@@ -299,6 +299,32 @@ class FtpServerUseCase @Inject constructor(
         ftpRepository.updateConfig(port, pass, random, httpPort)
 }
 
+/** A cloud folder's display path in one spelling: root is "/", no trailing slash. */
+private fun normalizeCloudDir(path: String): String = path.trimEnd('/').ifEmpty { "/" }
+
+/** True when the cloud item at [path] sits directly inside the cloud folder [dir]. */
+fun isInCloudFolder(path: String, dir: String): Boolean =
+    normalizeCloudDir(path.substringBeforeLast('/', "")) == normalizeCloudDir(dir)
+
+/** True when the cloud folder [dir] is [folder] itself or anywhere below it. */
+fun isCloudFolderOrInside(dir: String, folder: String): Boolean {
+    val d = normalizeCloudDir(dir)
+    val f = normalizeCloudDir(folder)
+    return d == f || d.startsWith("$f/")
+}
+
+/** Google Drive's real top-level folder, listed under the account's virtual root menu. */
+const val GOOGLE_DRIVE_MY_DRIVE = "/My Drive"
+
+/**
+ * Where a write aimed at the cloud folder [dir] really lands. A Google Drive account's root is a
+ * virtual menu (My Drive, Starred, Shared with me, ...) while uploads and new folders there go
+ * into My Drive, so name clashes were checked against the menu entries instead of the files
+ * actually sitting there, and same-named uploads were silently duplicated.
+ */
+fun cloudWriteDir(provider: CloudProvider?, dir: String): String =
+    if (provider == CloudProvider.GOOGLE_DRIVE && (dir == "/" || dir.isBlank())) GOOGLE_DRIVE_MY_DRIVE else dir
+
 class CloudStorageUseCase @Inject constructor(
     private val cloudRepository: ICloudRepository,
     private val transferGuard: com.antigravity.filemanager.data.service.TransferGuard,
@@ -316,6 +342,13 @@ class CloudStorageUseCase @Inject constructor(
     suspend fun createFolder(accountId: String, folderName: String, parentPath: String): Result<FileItem> =
         cloudRepository.createFolder(accountId, folderName, parentPath)
 
+    /** [cloudWriteDir] for an account known only by id. */
+    suspend fun resolveWriteDir(accountId: String, dir: String): String {
+        if (dir != "/" && dir.isNotBlank()) return dir
+        val provider = cloudRepository.getConnectedAccounts().find { it.id == accountId }?.provider
+        return cloudWriteDir(provider, dir)
+    }
+
     /** Result of [copyBetweenClouds]. */
     data class CloudCopyResult(val transferred: Int, val failures: Int, val lastError: String?)
 
@@ -330,12 +363,20 @@ class CloudStorageUseCase @Inject constructor(
         sources: List<String>,
         isDirectoryByPath: Map<String, Boolean>,
         accountId: String,
-        targetPath: String,
+        targetDir: String,
         isMove: Boolean,
         overwriteNames: Set<String>,
         skipNames: Set<String>,
         onProgress: (CloudTransferProgress) -> Unit
     ): CloudCopyResult {
+        val targetPath = resolveWriteDir(accountId, targetDir)
+        // Copying a folder into itself kept finding the copy it had just made inside the source
+        // and descending into it: /X/X, /X/X/X, ... without end.
+        if (sourceCloudAccountId == accountId) {
+            sources.firstOrNull { isCloudFolderOrInside(targetPath, it) }?.let {
+                return CloudCopyResult(0, 1, "Cannot ${if (isMove) "move" else "copy"} a folder into itself: ${File(it).name}")
+            }
+        }
         var failures = 0
         var lastErrorMessage: String? = null
         var transferredCount = 0
@@ -578,7 +619,8 @@ class CloudStorageUseCase @Inject constructor(
     // trip for data already sitting in cache from seconds earlier. Now it reuses that cache first
     // — same reconcile-once contract as everywhere else this cache is read — and only falls back
     // to a live fetch when there's nothing cached yet for this folder.
-    suspend fun findConflicts(accountId: String, remoteDir: String, items: List<Pair<String, Long>>): List<com.antigravity.filemanager.domain.model.OverwriteConflict> {
+    suspend fun findConflicts(accountId: String, targetDir: String, items: List<Pair<String, Long>>): List<com.antigravity.filemanager.domain.model.OverwriteConflict> {
+        val remoteDir = resolveWriteDir(accountId, targetDir)
         val cached = folderCacheManager.getCloudFolder(accountId, remoteDir)
         val existing = if (cached != null && cached.isFresh) {
             cached.files
@@ -620,20 +662,7 @@ class CloudStorageUseCase @Inject constructor(
             // Conflict choices only ever resolve top-level names (same as local copy/move): a
             // skipped folder is left out entirely, and every file inside an overwritten folder
             // overwrites its remote counterpart.
-            val flatFiles = mutableListOf<UploadItem>()
-            for (path in localPaths) {
-                val entry = File(path)
-                if (entry.name in skipNames) continue
-                val overwrite = entry.name in overwriteNames
-                if (entry.isDirectory) {
-                    val nested = mutableListOf<Pair<File, String>>()
-                    flattenDirectoryForUpload(accountId, entry, remoteDir, nested)
-                    nested.mapTo(flatFiles) { (file, dir) -> UploadItem(file, dir, overwrite) }
-                } else if (entry.isFile) {
-                    flatFiles.add(UploadItem(entry, remoteDir, overwrite))
-                }
-            }
-
+            val targetRoot = resolveWriteDir(accountId, remoteDir)
             val existingByDir = mutableMapOf<String, MutableSet<String>>()
             val existingItemsByDir = mutableMapOf<String, List<com.antigravity.filemanager.domain.model.FileItem>>()
             // Was an unconditional live getCloudFiles() call per target dir, every single upload —
@@ -658,6 +687,26 @@ class CloudStorageUseCase @Inject constructor(
                 }
                 existingItemsByDir[dir] = items
                 items.map { it.name }.toMutableSet()
+            }
+
+            val flatFiles = mutableListOf<UploadItem>()
+            for (path in localPaths) {
+                val entry = File(path)
+                if (entry.name in skipNames) continue
+                val overwrite = entry.name in overwriteNames
+                if (entry.isDirectory) {
+                    // "Keep both" for a folder uploads it as "Name (1)", like a local copy does;
+                    // it used to be merged into the existing folder, with "(1)" copies of any
+                    // clashing files scattered inside it.
+                    val topNames = existingNamesFor(targetRoot)
+                    val folderName = if (!overwrite && entry.name in topNames) uniqueCloudName(topNames, entry.name) else entry.name
+                    topNames.add(folderName)
+                    val nested = mutableListOf<Pair<File, String>>()
+                    flattenDirectoryForUpload(accountId, entry, targetRoot, nested, folderName)
+                    nested.mapTo(flatFiles) { (file, dir) -> UploadItem(file, dir, overwrite) }
+                } else if (entry.isFile) {
+                    flatFiles.add(UploadItem(entry, targetRoot, overwrite))
+                }
             }
 
             val totalFiles = flatFiles.size
@@ -727,16 +776,18 @@ class CloudStorageUseCase @Inject constructor(
         accountId: String,
         dir: File,
         parentRemoteDir: String,
-        out: MutableList<Pair<File, String>>
+        out: MutableList<Pair<File, String>>,
+        /** The folder's name at the destination; a top-level "Keep both" passes a new one. */
+        remoteName: String = dir.name
     ) {
         val existing = cloudRepository.getCloudFiles(accountId, parentRemoteDir).getOrDefault(emptyList())
-        val existingFolder = existing.find { it.isDirectory && it.name == dir.name }
+        val existingFolder = existing.find { it.isDirectory && it.name == remoteName }
         val targetDir = if (existingFolder != null) {
             existingFolder.path
         } else {
-            val created = cloudRepository.createFolder(accountId, dir.name, parentRemoteDir)
+            val created = cloudRepository.createFolder(accountId, remoteName, parentRemoteDir)
             created.getOrNull()?.path
-                ?: throw (created.exceptionOrNull() ?: Exception("Failed to create remote folder '${dir.name}'"))
+                ?: throw (created.exceptionOrNull() ?: Exception("Failed to create remote folder '$remoteName'"))
         }
 
         dir.listFiles()?.sortedBy { it.name }?.forEach { child ->

@@ -169,6 +169,11 @@ class StorageAnalysisViewModel @Inject constructor(
             "$archiveName.zip"
         }
         val targetArchive = "$targetDir/$name"
+        // Checked before the overwrite prompt, whose confirmation deletes the existing file.
+        com.antigravity.filemanager.data.local.storage.archiveTargetConflictReason(targetArchive, paths)?.let { reason ->
+            _uiState.update { old -> old.copy(toastMessage = reason) }
+            return
+        }
         if (File(targetArchive).exists()) {
             pendingCompress = Triple(paths, targetArchive, onComplete)
             _uiState.update { old -> old.copy(pendingOverwriteZipPath = targetArchive) }

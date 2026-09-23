@@ -50,6 +50,18 @@ fun directorySize(dir: File): Long = try {
     0L
 }
 
+/** Why an archive can't be written to [targetArchivePath] from [sourcePaths], or null when it
+ * can. Compressing a single "backup.zip" offers "backup.zip" as the archive name; confirming the
+ * overwrite prompt deleted the source and produced an empty archive in its place. */
+fun archiveTargetConflictReason(targetArchivePath: String, sourcePaths: List<String>): String? {
+    val target = File(targetArchivePath).canonicalFile
+    val clash = sourcePaths.map { File(it).canonicalFile }.firstOrNull { source ->
+        target == source || target.path.startsWith(source.path + File.separator)
+    } ?: return null
+    return if (clash == target) "\"${target.name}\" is one of the items being compressed. Choose another name."
+    else "The archive can't be saved inside \"${clash.name}\", which is being compressed."
+}
+
 /** Why [name] can't be used as a single file/folder name, or null when it's fine. */
 fun invalidFileNameReason(name: String): String? = when {
     name.isBlank() -> "Name cannot be empty"

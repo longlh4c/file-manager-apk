@@ -9,6 +9,8 @@ import com.antigravity.filemanager.domain.model.OverwriteConflict
 import com.antigravity.filemanager.domain.usecase.CloudStorageUseCase
 import com.antigravity.filemanager.domain.usecase.FileOperationsUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardState
+import com.antigravity.filemanager.domain.usecase.isCloudFolderOrInside
+import com.antigravity.filemanager.domain.usecase.isInCloudFolder
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -58,11 +60,32 @@ class DualPaneDropViewModel @Inject constructor(
         return Destination(rest.substring(0, split), rest.substring(split + 1))
     }
 
-    fun dropInto(location: String, items: GlobalClipboardState) {
-        if (items.paths.isEmpty()) return
-        val dest = parse(location)
+    fun dropInto(location: String, dropped: GlobalClipboardState) {
+        if (dropped.paths.isEmpty()) return
+        val requested = parse(location)
         job?.cancel()
         job = viewModelScope.launch {
+            // A Google Drive account's root is a virtual menu; a drop there lands in My Drive.
+            val dest = requested.accountId
+                ?.let { requested.copy(path = cloudUseCase.resolveWriteDir(it, requested.path)) }
+                ?: requested
+            // Same guards as a paste in the cloud explorer: never into a dragged folder itself,
+            // and items of this account already in the destination clash only with themselves
+            // (a move leaves them be, a copy lands under a new name, neither offers "Overwrite").
+            val sameAccount = dest.accountId != null && dest.accountId == dropped.sourceCloudAccountId
+            if (sameAccount) {
+                dropped.paths.firstOrNull { isCloudFolderOrInside(dest.path, it) }?.let {
+                    _uiState.update { s -> s.copy(message = "Cannot ${if (dropped.isCut) "move" else "copy"} a folder into itself: ${File(it).name}") }
+                    return@launch
+                }
+            }
+            val alreadyHere = if (sameAccount) dropped.paths.filter { isInCloudFolder(it, dest.path) } else emptyList()
+            val alreadyHereNames = alreadyHere.map { File(it).name }.toSet()
+            val items = if (dropped.isCut && alreadyHere.isNotEmpty()) dropped.copy(paths = dropped.paths - alreadyHere.toSet()) else dropped
+            if (items.paths.isEmpty()) {
+                _uiState.update { it.copy(message = "Already in this folder") }
+                return@launch
+            }
             val source = items.sourceCloudAccountId
             val conflicts = when {
                 dest.accountId != null -> cloudUseCase.findConflicts(
@@ -71,7 +94,7 @@ class DualPaneDropViewModel @Inject constructor(
                 )
                 source == null -> fileOperationsUseCase.findConflicts(items.paths, dest.path)
                 else -> cloudUseCase.findLocalConflicts(items.paths, dest.path, items.itemSizes, items.itemIsDirectory)
-            }
+            }.filterNot { it.name in alreadyHereNames }
             if (conflicts.isEmpty()) {
                 transfer(dest, items, emptySet(), emptySet())
             } else {

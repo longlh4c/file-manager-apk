@@ -283,6 +283,10 @@ class FileBrowserViewModel @Inject constructor(
         // (see FileBrowserScreen), so coming back from an image or video opened out of the results
         // used to drop the user's search entirely instead of returning to the result list.
         val isNavigation = path != _uiState.value.currentPath
+        // Reloading the folder on screen (every resume, every MediaStore change anywhere on the
+        // device) used to wipe a selection the user was still building. Only navigation clears
+        // it; a reload just drops selected items that no longer exist.
+        val keepSelection = !isNavigation
         if (isNavigation) searchJob?.cancel()
         if (isNavigation && (_uiState.value.isSearchActive || _uiState.value.searchQuery.isNotEmpty())) {
             _uiState.update { old -> old.copy(
@@ -307,8 +311,8 @@ class FileBrowserViewModel @Inject constructor(
                     isLoading = false,
                     currentPath = path,
                     files = cached.files,
-                    selectedPaths = emptySet(),
-                    isSelectionMode = false,
+                    selectedPaths = if (keepSelection) old.selectedPaths else emptySet(),
+                    isSelectionMode = keepSelection && old.isSelectionMode,
                     sortOption = savedSort,
                     showHiddenFiles = savedHidden,
                     viewMode = savedViewMode
@@ -317,8 +321,8 @@ class FileBrowserViewModel @Inject constructor(
                 _uiState.update { old -> old.copy(
                     isLoading = true,
                     currentPath = path,
-                    selectedPaths = emptySet(),
-                    isSelectionMode = false,
+                    selectedPaths = if (keepSelection) old.selectedPaths else emptySet(),
+                    isSelectionMode = keepSelection && old.isSelectionMode,
                     sortOption = savedSort,
                     showHiddenFiles = savedHidden,
                     viewMode = savedViewMode
@@ -337,11 +341,25 @@ class FileBrowserViewModel @Inject constructor(
             // Save to cache for next time
             folderCacheManager.putLocalFolder(path, savedSort, savedHidden, files)
 
+            // Checked on disk, not against `files`: a selection made in recursive search results
+            // holds paths from subfolders too.
+            val selectedBefore = _uiState.value.selectedPaths
+            val stillThere = if (keepSelection && selectedBefore.isNotEmpty()) {
+                withContext(Dispatchers.IO) { selectedBefore.filterTo(mutableSetOf()) { File(it).exists() } }
+            } else null
+
             if (_uiState.value.currentPath == path) {
-                _uiState.update { old -> old.copy(
-                    isLoading = false,
-                    files = files
-                ) }
+                _uiState.update { old ->
+                    // Only prune what was checked; anything selected since then stays.
+                    val selected = if (stillThere == null) old.selectedPaths
+                    else old.selectedPaths.filterTo(mutableSetOf()) { it in stillThere || it !in selectedBefore }
+                    old.copy(
+                        isLoading = false,
+                        files = files,
+                        selectedPaths = selected,
+                        isSelectionMode = old.isSelectionMode && selected.isNotEmpty()
+                    )
+                }
             }
         }
     }
@@ -923,7 +941,9 @@ class FileBrowserViewModel @Inject constructor(
         }
     }
 
-    fun transferToCloud(account: CloudAccount, destPath: String = "/") {
+    fun transferToCloud(account: CloudAccount, requestedDestPath: String = "/") {
+        // Google Drive's root is a virtual menu; what is sent there lands in My Drive.
+        val destPath = com.antigravity.filemanager.domain.usecase.cloudWriteDir(account.provider, requestedDestPath)
         val selected = _uiState.value.selectedPaths.toList()
         val isMove = _uiState.value.isCloudMoveOperation
         val count = selected.size
@@ -932,7 +952,8 @@ class FileBrowserViewModel @Inject constructor(
             _uiState.update { old -> old.copy(showCloudDestinationDialog = false) }
 
             val progressThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
-            suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>) {
+            // keptBoth: some clash was resolved "Keep both", so an upload went up under a new name.
+            suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>, keptBoth: Boolean = false) {
                 try {
                     val result = cloudStorageUseCase.uploadFiles(
                         accountId = account.id,
@@ -986,7 +1007,7 @@ class FileBrowserViewModel @Inject constructor(
                     // in live instead of paying for a refetch. Anything less certain (a folder in
                     // the selection, or an overwrite that deleted+replaced a remote item) falls
                     // back to the generic invalidate, which only triggers a real refresh().
-                    if (overwriteNames.isEmpty() && selected.none { File(it).isDirectory }) {
+                    if (overwriteNames.isEmpty() && !keptBoth && selected.none { File(it).isDirectory }) {
                         val addedFiles = folderCacheManager.buildUploadedFileItems(selected, skipNames, destPath)
                         folderCacheManager.notifyCloudFilesAdded(account.id, destPath, addedFiles)
                     } else {
@@ -1017,7 +1038,9 @@ class FileBrowserViewModel @Inject constructor(
             val items = selected.map { File(it).name to File(it).length() }
             val conflicts = cloudStorageUseCase.findConflicts(account.id, destPath, items)
             if (conflicts.isNotEmpty()) {
-                pendingOverwriteAction = { overwriteNames, skipNames -> doTransfer(overwriteNames, skipNames) }
+                pendingOverwriteAction = { overwriteNames, skipNames ->
+                    doTransfer(overwriteNames, skipNames, keptBoth = conflicts.any { it.name !in overwriteNames && it.name !in skipNames })
+                }
                 _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
             } else {
                 doTransfer(emptySet(), emptySet())
@@ -1105,6 +1128,11 @@ class FileBrowserViewModel @Inject constructor(
         val targetArchive = File(_uiState.value.currentPath, name).absolutePath
         val sources = _uiState.value.selectedPaths.toList()
         _uiState.update { old -> old.copy(showCompressDialog = false) }
+        // Checked before the overwrite prompt, whose confirmation deletes the existing file.
+        com.antigravity.filemanager.data.local.storage.archiveTargetConflictReason(targetArchive, sources)?.let { reason ->
+            _uiState.update { old -> old.copy(toastMessage = reason) }
+            return
+        }
         if (File(targetArchive).exists()) {
             pendingCompressSources = sources
             _uiState.update { old -> old.copy(pendingOverwriteZipPath = targetArchive) }

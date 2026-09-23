@@ -14,6 +14,9 @@ import com.antigravity.filemanager.domain.usecase.CloudStorageUseCase
 import com.antigravity.filemanager.domain.usecase.FileOperationsUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardManager
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardState
+import com.antigravity.filemanager.domain.usecase.cloudWriteDir
+import com.antigravity.filemanager.domain.usecase.isCloudFolderOrInside
+import com.antigravity.filemanager.domain.usecase.isInCloudFolder
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -1557,18 +1560,38 @@ class CloudExplorerViewModel @Inject constructor(
     /** Items dropped onto this folder from the other dual-panel pane (local or cloud); the same
      * flow as paste, leaving the clipboard alone. */
     fun dropItems(items: GlobalClipboardState, targetPath: String = _uiState.value.currentPath) =
-        pasteItems(items, fromClipboard = false, targetPath = targetPath)
+        pasteItems(items, fromClipboard = false, requestedTarget = targetPath)
 
-    private fun pasteItems(clip: GlobalClipboardState, fromClipboard: Boolean, targetPath: String = _uiState.value.currentPath) {
-        val sources = clip.paths
+    private fun pasteItems(clip: GlobalClipboardState, fromClipboard: Boolean, requestedTarget: String = _uiState.value.currentPath) {
         // The loading guard stops a double-tapped Paste; a drop is one deliberate action.
-        if (sources.isEmpty() || (fromClipboard && _uiState.value.isLoading)) return
+        if (clip.paths.isEmpty() || (fromClipboard && _uiState.value.isLoading)) return
+        // Google Drive's root is a virtual menu; what is pasted there lands in My Drive.
+        val targetPath = cloudWriteDir(_uiState.value.account?.provider, requestedTarget)
         val sourceCloudAccountId = clip.sourceCloudAccountId
         val isMove = clip.isCut
+        val sameAccount = sourceCloudAccountId == accountId
+        if (sameAccount) {
+            clip.paths.firstOrNull { isCloudFolderOrInside(targetPath, it) }?.let {
+                _uiState.update { old -> old.copy(toastMessage = "Cannot ${if (isMove) "move" else "copy"} a folder into itself: ${File(it).name}") }
+                return
+            }
+        }
+        // Items of this account already in the target folder clash with nothing but themselves:
+        // "Overwrite" there deleted the item before moving/re-uploading it. A move leaves them
+        // where they are; a copy lands next to them under a new name.
+        val alreadyHere = if (sameAccount) clip.paths.filter { isInCloudFolder(it, targetPath) } else emptyList()
+        val alreadyHereNames = alreadyHere.map { File(it).name }.toSet()
+        val sources = if (isMove) clip.paths - alreadyHere.toSet() else clip.paths
+        if (sources.isEmpty()) {
+            if (fromClipboard) globalClipboardManager.clear()
+            _uiState.update { old -> old.copy(toastMessage = "Already in this folder") }
+            return
+        }
         // A drop onto a folder row targets that folder rather than the one on screen.
         val targetIsShown = targetPath == _uiState.value.currentPath
 
-        suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>) {
+        // keptBoth: some clash was resolved "Keep both", so an upload went up under a new name.
+        suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>, keptBoth: Boolean = false) {
             try {
                 _uiState.update { old -> old.copy(isLoading = true) }
                 var failures = 0
@@ -1605,7 +1628,7 @@ class CloudExplorerViewModel @Inject constructor(
                         // skipNames, so "Skip" on every conflict still said "Pasted N item(s)"
                         // for zero real uploads.
                         transferredCount = result.getOrDefault(0)
-                        if (targetIsShown && overwriteNames.isEmpty() && sources.none { File(it).isDirectory }) {
+                        if (targetIsShown && overwriteNames.isEmpty() && !keptBoth && sources.none { File(it).isDirectory }) {
                             // The common case: a flat set of plain local files, no name clash to
                             // resolve, nothing renamed/merged by uploadFiles(). We already know
                             // exactly what landed where, so patch the current listing + cache in
@@ -1709,8 +1732,11 @@ class CloudExplorerViewModel @Inject constructor(
                 name to size
             }
             val conflicts = cloudUseCase.findConflicts(accountId, targetPath, items)
+                .filterNot { it.name in alreadyHereNames }
             if (conflicts.isNotEmpty()) {
-                pendingOverwriteAction = { overwriteNames, skipNames -> doPaste(overwriteNames, skipNames) }
+                pendingOverwriteAction = { overwriteNames, skipNames ->
+                    doPaste(overwriteNames, skipNames, keptBoth = conflicts.any { it.name !in overwriteNames && it.name !in skipNames })
+                }
                 _uiState.update { old -> old.copy(isLoading = false, overwriteConflicts = conflicts) }
             } else {
                 doPaste(emptySet(), emptySet())

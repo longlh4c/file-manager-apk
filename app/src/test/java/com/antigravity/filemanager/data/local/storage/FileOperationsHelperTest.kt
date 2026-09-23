@@ -271,4 +271,74 @@ class FileOperationsHelperTest {
         assertEquals("T", File(out, "top (1).txt").readText())
         assertEquals(listOf("top (1).txt"), result.getOrThrow().map { it.name })
     }
+
+    @Test
+    fun moveUpOntoTheFolderContainingItWithOverwriteIsRejectedAndKeepsData() = runBlocking {
+        val outer = File(root, "Photos").apply { mkdirs() }
+        File(outer, "outer.jpg").writeText("outer")
+        val inner = File(outer, "Photos").apply { mkdirs() }
+        File(inner, "inner.jpg").writeText("inner")
+
+        val result = helper.move(listOf(inner.absolutePath), root.absolutePath, overwriteNames = setOf("Photos"))
+
+        assertTrue(result.isFailure)
+        assertEquals("outer", File(outer, "outer.jpg").readText())
+        assertEquals("inner", File(inner, "inner.jpg").readText())
+    }
+
+    @Test
+    fun copyUpOntoTheFolderContainingItWithOverwriteIsRejected() = runBlocking {
+        val outer = File(root, "Photos").apply { mkdirs() }
+        val inner = File(outer, "Photos").apply { mkdirs() }
+        File(inner, "inner.jpg").writeText("inner")
+
+        val result = helper.copy(listOf(inner.absolutePath), root.absolutePath, overwriteNames = setOf("Photos"))
+
+        assertTrue(result.isFailure)
+        assertEquals("inner", File(inner, "inner.jpg").readText())
+    }
+
+    @Test
+    fun rejectedBatchLeavesEarlierItemsUntouched() = runBlocking {
+        val loose = File(root, "loose.txt").apply { writeText("x") }
+        val folder = File(root, "A").apply { mkdirs() }
+        val sub = File(folder, "sub").apply { mkdirs() }
+
+        val result = helper.move(listOf(loose.absolutePath, folder.absolutePath), sub.absolutePath)
+
+        assertTrue(result.isFailure)
+        assertTrue(loose.exists())
+        assertFalse(File(sub, "loose.txt").exists())
+    }
+
+    @Test
+    fun moveIntoTheFolderItIsAlreadyInKeepsItsName() = runBlocking {
+        val file = File(root, "note.txt").apply { writeText("n") }
+
+        val result = helper.move(listOf(file.absolutePath), root.absolutePath)
+
+        assertTrue(result.isSuccess)
+        assertEquals("n", file.readText())
+        assertFalse(File(root, "note (1).txt").exists())
+    }
+
+    @Test
+    fun compressOntoOneOfItsOwnSourcesIsRejectedAndKeepsTheSource() = runBlocking {
+        val zip = File(root, "backup.zip").apply { writeText("original") }
+
+        val result = helper.compressFiles(listOf(zip.absolutePath), zip.absolutePath)
+
+        assertTrue(result.isFailure)
+        assertEquals("original", zip.readText())
+    }
+
+    @Test
+    fun archiveTargetConflictReasonFlagsTheSourceItselfAndPathsInsideASourceFolder() {
+        val zip = File(root, "backup.zip").absolutePath
+        val folder = File(root, "Docs").absolutePath
+
+        assertTrue(archiveTargetConflictReason(zip, listOf(zip)) != null)
+        assertTrue(archiveTargetConflictReason(File(folder, "Docs.zip").absolutePath, listOf(folder)) != null)
+        assertEquals(null, archiveTargetConflictReason(File(root, "Docs.zip").absolutePath, listOf(folder)))
+    }
 }
