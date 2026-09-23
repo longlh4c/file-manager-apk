@@ -32,7 +32,9 @@ class EmbeddedHttpServer @Inject constructor(
         val validPort = if (port in 1024..65535) port else 8080
         return try {
             val s = InternalServer(validPort, password, context)
-            s.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            // 60s instead of the 5s default: an upload is read straight off this socket, and a
+            // phone that stalls for a few seconds mid-transfer shouldn't drop a multi-GB file.
+            s.start(60_000, false)
             server = s
             isRunning = true
             android.util.Log.i("EmbeddedHttpServer", "HTTP Web Share server started on port $validPort")
@@ -420,6 +422,42 @@ class EmbeddedHttpServer @Inject constructor(
             // multipart regex bug where filenames containing single quotes are truncated (e.g. "Sid Meier's" -> "Sid Meier")
             val explicitFileName = session.headers["x-file-name"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
                 ?: session.parms["filename"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
+
+            // The web UI posts the file as the raw body (see webshare/index.html): written
+            // straight to its destination, so an upload is limited only by free space. The
+            // multipart branch below stays for other clients (curl -F, a plain HTML form).
+            val contentType = session.headers["content-type"].orEmpty()
+            if (!contentType.startsWith("multipart/", ignoreCase = true)) {
+                val length = session.headers["content-length"]?.toLongOrNull()
+                    ?: return finalizeResponse(newFixedLengthResponse(
+                        Response.Status.LENGTH_REQUIRED, "application/json", "{\"error\":\"Content-Length required\"}"
+                    ))
+                val name = File(explicitFileName ?: "upload_${System.currentTimeMillis()}").name
+                if (isSystemOrHiddenName(name, isDirectory = false)) {
+                    return finalizeResponse(newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json", "{\"error\":\"That name is not allowed\"}"
+                    ))
+                }
+                return try {
+                    val written = writeUploadStream(targetDir, name, session.inputStream, length)
+                    MediaScannerConnection.scanFile(appContext, arrayOf(written.absolutePath), null, null)
+                    finalizeResponse(newFixedLengthResponse(
+                        Response.Status.OK, "application/json",
+                        JSONObject().put("success", true).put("count", 1).put("name", written.name).toString()
+                    ))
+                } catch (e: NotEnoughSpaceException) {
+                    finalizeResponse(newFixedLengthResponse(
+                        Response.Status.INTERNAL_ERROR, "application/json",
+                        JSONObject().put("error", "Not enough space: ${e.message}").toString()
+                    ))
+                } catch (e: Exception) {
+                    android.util.Log.e("EmbeddedHttpServer", "Upload of $name failed", e)
+                    finalizeResponse(newFixedLengthResponse(
+                        Response.Status.INTERNAL_ERROR, "application/json",
+                        JSONObject().put("error", e.message ?: "Upload failed").toString()
+                    ))
+                }
+            }
 
             val files = HashMap<String, String>()
             session.parseBody(files)

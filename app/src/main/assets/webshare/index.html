@@ -838,9 +838,11 @@
 
         xhr.onerror = () => reject(new Error('Network error during upload'));
 
-        const formData = new FormData();
-        formData.append('file', file, file.name);
-        xhr.send(formData);
+        // Sent as the raw body, not multipart: the server writes it straight to disk, so the
+        // size is limited only by free space. A multipart body was buffered and memory-mapped
+        // server-side, which capped an upload at 2 GB and silently stalled anything larger.
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        xhr.send(file);
       });
     }
 
