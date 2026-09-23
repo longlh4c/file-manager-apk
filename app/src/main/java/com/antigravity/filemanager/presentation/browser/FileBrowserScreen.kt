@@ -17,7 +17,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import com.antigravity.filemanager.presentation.components.dualPaneDragSource
-import com.antigravity.filemanager.presentation.components.onWindowBounds
+import com.antigravity.filemanager.presentation.components.dualPaneDropZone
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.ui.Alignment
@@ -611,13 +611,6 @@ fun FileBrowserScreen(
 
 
             // The folder shown here receives items dragged from the other dual-panel pane.
-            var dropBounds by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
-            com.antigravity.filemanager.presentation.components.DualPaneDropTargetEffect(
-                location = uiState.currentPath,
-                folderName = java.io.File(uiState.currentPath).name,
-                bounds = dropBounds,
-                onDrop = { items -> viewModel.dropItems(items) }
-            )
             val dragSource: (FileItem) -> Modifier = { file ->
                 Modifier.dualPaneDragSource(
                     sourceLocation = uiState.currentPath,
@@ -629,12 +622,21 @@ fun FileBrowserScreen(
                         )
                     },
                     onFinished = { viewModel.clearSelection() }
+                ).then(
+                    // A folder row takes drops itself, without opening it first.
+                    if (file.isDirectory) Modifier.dualPaneDropZone(location = file.path, name = file.name) { items ->
+                        viewModel.dropItems(items, target = file.path)
+                    } else Modifier
                 )
             }
             // Switchable View Mode: LIST, GRID, DETAILED
             PullToRefreshWrapper(
                 onRefresh = { viewModel.refresh() },
-                modifier = Modifier.fillMaxSize().onWindowBounds { dropBounds = it }
+                modifier = Modifier.fillMaxSize().dualPaneDropZone(
+                    location = uiState.currentPath,
+                    name = java.io.File(uiState.currentPath).name,
+                    isPaneBackground = true
+                ) { items -> viewModel.dropItems(items) }
             ) {
             if (!uiState.isLoading && !uiState.isSearching && filteredFiles.isEmpty()) {
                 EmptyFolderState()

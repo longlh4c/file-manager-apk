@@ -274,6 +274,31 @@ fun AppNavigation(
 
     // Drag-and-drop of local items between the two panes (see DualPaneDrag).
     val paneDrag = remember { com.antigravity.filemanager.presentation.components.DualPaneDragState() }
+    // Drops whose destination isn't a folder a pane is showing (a dashboard card, a cloud
+    // account, the Recycle Bin) run here instead, without opening that destination.
+    val dropViewModel: DualPaneDropViewModel = hiltViewModel()
+    val dropState by dropViewModel.uiState.collectAsStateWithLifecycle()
+    paneDrag.onTrash = { dropViewModel.trash(it) }
+    paneDrag.onDropInto = { location, items -> dropViewModel.dropInto(location, items) }
+    LaunchedEffect(dropState.message) {
+        dropState.message?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+            dropViewModel.clearMessage()
+        }
+    }
+    if (dropState.conflicts.isNotEmpty()) {
+        com.antigravity.filemanager.presentation.components.OverwriteConflictDialog(
+            conflicts = dropState.conflicts,
+            onConfirm = { overwriteNames, skipNames -> dropViewModel.resolveConflicts(overwriteNames, skipNames) },
+            onCancel = { dropViewModel.cancelConflicts() }
+        )
+    }
+    dropState.progress?.let { progress ->
+        com.antigravity.filemanager.presentation.components.CloudDownloadProgressDialog(
+            progress = progress,
+            onCancel = { dropViewModel.cancelTransfer() }
+        )
+    }
     LaunchedEffect(isDualSplit) { if (!isDualSplit) paneDrag.cancel() }
     var rootOffset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
 
@@ -1065,7 +1090,7 @@ private fun DualPaneDragOverlay(
         val count = payload.paths.size
         Text(
             text = (if (count == 1) java.io.File(payload.paths.first()).name else "$count items") +
-                (target?.let { "  →  ${it.folderName}" } ?: ""),
+                (target?.let { "  →  ${it.name}" } ?: ""),
             color = Color.Black,
             fontSize = 13.sp,
             maxLines = 1,
@@ -1079,10 +1104,38 @@ private fun DualPaneDragOverlay(
     state.pendingDrop?.let { drop ->
         val count = drop.payload.paths.size
         val what = if (count == 1) "\"${java.io.File(drop.payload.paths.first()).name}\"" else "$count items"
+        if (drop.target.kind == com.antigravity.filemanager.presentation.components.DropZoneKind.TRASH) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { state.resolve(null) },
+                title = { Text("Move $what to trash?", color = TextPrimary) },
+                text = {
+                    Text(
+                        if (drop.payload.items.sourceCloudAccountId == null) "They can be restored from the Recycle Bin."
+                        else "They go to this cloud account's own trash.",
+                        color = TextSecondary
+                    )
+                },
+                confirmButton = {
+                    Row {
+                        androidx.compose.material3.TextButton(onClick = { state.resolve(null) }) {
+                            Text("CANCEL", color = TextSecondary)
+                        }
+                        androidx.compose.material3.Button(
+                            onClick = { state.resolve(isMove = true) },
+                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = com.antigravity.filemanager.presentation.theme.PastelCoral, contentColor = Color.Black)
+                        ) {
+                            Text("MOVE TO TRASH")
+                        }
+                    }
+                },
+                containerColor = DarkCard
+            )
+            return
+        }
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { state.resolve(null) },
             title = { Text("Drop $what", color = TextPrimary) },
-            text = { Text("into \"${drop.target.folderName}\"", color = TextSecondary) },
+            text = { Text("into \"${drop.target.name}\"", color = TextSecondary) },
             confirmButton = {
                 Row {
                     androidx.compose.material3.TextButton(onClick = { state.resolve(null) }) {

@@ -2,11 +2,10 @@ package com.antigravity.filemanager.presentation.components
 
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -16,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInWindow
@@ -40,26 +40,47 @@ class DualPaneDragPayload(
     val onFinished: () -> Unit
 ) {
     val paths: List<String> get() = items.paths
+
+    /** Each dragged item's own location, in the same form as a zone's. */
+    val itemLocations: List<String>
+        get() = items.sourceCloudAccountId?.let { account -> paths.map { cloudLocation(account, it) } } ?: paths
 }
 
-class DualPaneDropTarget(
-    /** Same form as [DualPaneDragPayload.sourceLocation]. */
-    val location: String,
-    val folderName: String,
-    val bounds: Rect,
+enum class DropZoneKind {
+    /** Copy/move into the folder at [DualPaneDropZone.location]. */
+    FOLDER,
+    /** Move the items to the (app or cloud) trash. */
+    TRASH
+}
+
+/**
+ * Somewhere items can be dropped: a whole folder view, one folder row, a dashboard card, a cloud
+ * account. Its fields are refreshed on every recomposition and [bounds] on every layout, without
+ * recomposing anything, so rows can register cheaply while a list scrolls.
+ */
+class DualPaneDropZone(
+    val pane: ActivePanel,
+    var location: String,
+    var name: String,
+    var kind: DropZoneKind,
+    /** True for a zone covering a whole folder view; a smaller zone inside it wins. */
+    var isPaneBackground: Boolean,
     /** Receives the dropped items with [GlobalClipboardState.isCut] set to the user's choice. */
-    val onDrop: (items: GlobalClipboardState) -> Unit
-)
+    var onDrop: (items: GlobalClipboardState) -> Unit
+) {
+    var bounds: Rect = Rect.Zero
+}
 
 /** The drag-and-drop location of a folder in a cloud account. */
 fun cloudLocation(accountId: String, path: String): String = "cloud:$accountId:$path"
 
-class PendingDualPaneDrop(val payload: DualPaneDragPayload, val target: DualPaneDropTarget)
+/** A dropped-but-not-yet-confirmed drag, waiting on the Copy / Move / Cancel menu. */
+class PendingDualPaneDrop(val payload: DualPaneDragPayload, val target: DualPaneDropZone)
 
 /**
  * In-app drag between the panes: a long press on an item followed by a move starts it, an
- * overlay follows the finger, and releasing over a folder shown in the other pane asks
- * Copy / Move / Cancel ([pendingDrop]). Positions are in window coordinates.
+ * overlay follows the finger, and releasing over a drop zone asks what to do ([pendingDrop]).
+ * Positions are in window coordinates.
  */
 class DualPaneDragState {
     var payload by mutableStateOf<DualPaneDragPayload?>(null)
@@ -69,15 +90,31 @@ class DualPaneDragState {
     var pendingDrop by mutableStateOf<PendingDualPaneDrop?>(null)
         private set
 
-    private val targets = mutableStateMapOf<ActivePanel, DualPaneDropTarget>()
+    private val zones = mutableStateListOf<DualPaneDropZone>()
 
-    /** The pane that would receive a drop at the current pointer position, if any. */
-    val hoveredTarget: DualPaneDropTarget?
+    /** What a [DropZoneKind.TRASH] zone does with the dropped items (set by the app shell). */
+    var onTrash: (GlobalClipboardState) -> Unit = {}
+
+    /** Runs a drop into a destination no pane is showing — a dashboard card, a cloud account —
+     * so it happens where it was dropped instead of opening that destination first. */
+    var onDropInto: (location: String, items: GlobalClipboardState) -> Unit = { _, _ -> }
+
+
+    /** The zone that would receive a drop at the current pointer position, if any. */
+    val hoveredTarget: DualPaneDropZone?
         get() {
             val p = payload ?: return null
-            return targets.entries.firstOrNull { (pane, target) ->
-                pane != p.sourcePane && target.bounds.contains(pointer) && target.location != p.sourceLocation
-            }?.value
+            val itemLocations = p.itemLocations
+            return zones
+                .filter { zone ->
+                    zone.bounds.contains(pointer) &&
+                        // A whole folder view only takes drops from the other pane.
+                        !(zone.isPaneBackground && zone.pane == p.sourcePane) &&
+                        zone.location != p.sourceLocation &&
+                        // Never into one of the dragged folders or anywhere inside them.
+                        itemLocations.none { zone.location == it || zone.location.startsWith("$it/") }
+                }
+                .minByOrNull { it.bounds.width * it.bounds.height }
         }
 
     fun start(payload: DualPaneDragPayload, at: Offset) {
@@ -100,23 +137,53 @@ class DualPaneDragState {
         payload = null
     }
 
-    /** The user's answer to the drop menu: true = move, false = copy, null = cancel. */
+    /** The user's answer to the drop menu: true = move, false = copy, null = cancel. A trash
+     * drop is always a move. */
     fun resolve(isMove: Boolean?) {
         val drop = pendingDrop ?: return
         pendingDrop = null
         if (isMove != null) {
-            drop.target.onDrop(drop.payload.items.copy(isCut = isMove))
+            drop.target.onDrop(drop.payload.items.copy(isCut = isMove || drop.target.kind == DropZoneKind.TRASH))
             drop.payload.onFinished()
         }
     }
 
-    fun register(pane: ActivePanel, target: DualPaneDropTarget) {
-        targets[pane] = target
+    fun register(zone: DualPaneDropZone) {
+        if (zones.none { it === zone }) zones.add(zone)
     }
 
-    fun unregister(pane: ActivePanel, target: DualPaneDropTarget) {
-        if (targets[pane] === target) targets.remove(pane)
+    fun unregister(zone: DualPaneDropZone) {
+        zones.removeAll { it === zone }
     }
+}
+
+/**
+ * Makes this element a drop zone for items dragged in dual-panel mode (a no-op otherwise).
+ * Use [isPaneBackground] for the area showing a whole folder, so folder rows inside it win.
+ */
+fun Modifier.dualPaneDropZone(
+    location: String,
+    name: String,
+    kind: DropZoneKind = DropZoneKind.FOLDER,
+    isPaneBackground: Boolean = false,
+    onDrop: (items: GlobalClipboardState) -> Unit
+): Modifier = composed {
+    val state = LocalDualPaneDrag.current
+    val pane = LocalPane.current
+    if (state == null || pane == null) return@composed this
+    val zone = remember(pane) { DualPaneDropZone(pane, location, name, kind, isPaneBackground, onDrop) }
+    SideEffect {
+        zone.location = location
+        zone.name = name
+        zone.kind = kind
+        zone.isPaneBackground = isPaneBackground
+        zone.onDrop = onDrop
+    }
+    DisposableEffect(state, zone) {
+        state.register(zone)
+        onDispose { state.unregister(zone) }
+    }
+    onGloballyPositioned { zone.bounds = it.boundsInWindow() }
 }
 
 /**
@@ -180,25 +247,3 @@ fun Modifier.dualPaneDragSource(sourceLocation: String, items: () -> GlobalClipb
         }
 }
 
-/** Registers the folder a screen shows (local or cloud) as a drop target for the other pane. */
-@Composable
-fun DualPaneDropTargetEffect(
-    location: String,
-    folderName: String,
-    bounds: Rect?,
-    onDrop: (items: GlobalClipboardState) -> Unit
-) {
-    val state = LocalDualPaneDrag.current ?: return
-    val pane = LocalPane.current ?: return
-    if (bounds == null) return
-    val currentOnDrop by rememberUpdatedState(onDrop)
-    DisposableEffect(state, pane, location, bounds) {
-        val target = DualPaneDropTarget(location, folderName, bounds) { currentOnDrop(it) }
-        state.register(pane, target)
-        onDispose { state.unregister(pane, target) }
-    }
-}
-
-/** Window bounds of the element, for [DualPaneDropTargetEffect]. */
-fun Modifier.onWindowBounds(onBounds: (Rect) -> Unit): Modifier =
-    onGloballyPositioned { onBounds(it.boundsInWindow()) }

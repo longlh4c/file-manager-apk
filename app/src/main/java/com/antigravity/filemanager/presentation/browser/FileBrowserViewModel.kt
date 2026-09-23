@@ -272,14 +272,19 @@ class FileBrowserViewModel @Inject constructor(
         // like Downloads that's opened straight from the dashboard with nothing pre-rendered yet.
         _uiState.update { old -> old.copy(isLoading = true) }
 
-        // Navigating anywhere (including tapping a folder found via recursive search) must leave
-        // search mode — otherwise this correctly loads the target folder's real contents into
-        // `files`, but the screen keeps rendering the stale `searchResults` list on top of it
+        // Navigating to another folder (including tapping one found via recursive search) must
+        // leave search mode — otherwise this correctly loads the target folder's real contents
+        // into `files`, but the screen keeps rendering the stale `searchResults` list on top of it
         // (filteredFiles prefers searchResults whenever searchQuery is non-blank), so opening a
         // search result folder looked like it did nothing. See the matching fix in
         // CloudExplorerViewModel.openFolder.
-        searchJob?.cancel()
-        if (_uiState.value.isSearchActive || _uiState.value.searchQuery.isNotEmpty()) {
+        //
+        // Re-loading the folder already open is not navigation though: it happens on every resume
+        // (see FileBrowserScreen), so coming back from an image or video opened out of the results
+        // used to drop the user's search entirely instead of returning to the result list.
+        val isNavigation = path != _uiState.value.currentPath
+        if (isNavigation) searchJob?.cancel()
+        if (isNavigation && (_uiState.value.isSearchActive || _uiState.value.searchQuery.isNotEmpty())) {
             _uiState.update { old -> old.copy(
                 isSearchActive = false,
                 searchQuery = "",
@@ -583,12 +588,15 @@ class FileBrowserViewModel @Inject constructor(
 
     /** Items dropped onto this folder from the other dual-panel pane (local or cloud); the same
      * flow as paste (conflict dialog, progress, refresh), leaving the clipboard alone. */
-    fun dropItems(items: com.antigravity.filemanager.domain.usecase.GlobalClipboardState) =
-        pasteItems(items, fromClipboard = false)
+    fun dropItems(items: com.antigravity.filemanager.domain.usecase.GlobalClipboardState, target: String = _uiState.value.currentPath) =
+        pasteItems(items, fromClipboard = false, target = target)
 
-    private fun pasteItems(clip: com.antigravity.filemanager.domain.usecase.GlobalClipboardState, fromClipboard: Boolean) {
+    private fun pasteItems(
+        clip: com.antigravity.filemanager.domain.usecase.GlobalClipboardState,
+        fromClipboard: Boolean,
+        target: String = _uiState.value.currentPath
+    ) {
         val sources = clip.paths
-        val target = _uiState.value.currentPath
         val cloudAccountId = clip.sourceCloudAccountId
         val isMove = clip.isCut
         if (sources.isEmpty()) return
@@ -603,14 +611,14 @@ class FileBrowserViewModel @Inject constructor(
                         pasteFromCloud(cloudAccountId, sources, target, isMove, clip, overwriteNames, skipNames)
                         clearClipboard()
                         folderCacheManager.invalidateLocal(target)
-                        loadDirectory(target)
+                        loadDirectory(_uiState.value.currentPath)
                     }
                     _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
                 } else {
                     pasteFromCloud(cloudAccountId, sources, target, isMove, clip)
                     clearClipboard()
                     folderCacheManager.invalidateLocal(target)
-                    loadDirectory(target)
+                    loadDirectory(_uiState.value.currentPath)
                 }
                 return@launch
             }
@@ -626,13 +634,13 @@ class FileBrowserViewModel @Inject constructor(
             pendingOverwriteAction = { overwriteNames, skipNames ->
                 if (runLocalCopyOrMove(sources, target, isMove, overwriteNames, skipNames).isSuccess) onSuccess()
                 invalidateLocalCacheForPaste(sources, target, isMove)
-                loadDirectory(target)
+                loadDirectory(_uiState.value.currentPath)
             }
             _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
         } else {
             if (runLocalCopyOrMove(sources, target, isMove).isSuccess) onSuccess()
             invalidateLocalCacheForPaste(sources, target, isMove)
-            loadDirectory(target)
+            loadDirectory(_uiState.value.currentPath)
         }
     }
 

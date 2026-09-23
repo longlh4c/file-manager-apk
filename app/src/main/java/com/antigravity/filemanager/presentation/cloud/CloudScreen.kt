@@ -43,6 +43,7 @@ import kotlinx.coroutines.Job
 import com.antigravity.filemanager.domain.model.CloudAccount
 import com.antigravity.filemanager.domain.model.CloudProvider
 import com.antigravity.filemanager.presentation.components.AddCloudDialog
+import com.antigravity.filemanager.presentation.components.dualPaneDropZone
 import com.antigravity.filemanager.presentation.theme.*
 import kotlinx.coroutines.launch
 
@@ -192,6 +193,7 @@ fun CloudScreen(
         },
         containerColor = DarkBackground
     ) { paddingValues ->
+        val dragState = com.antigravity.filemanager.presentation.components.LocalDualPaneDrag.current
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -243,6 +245,16 @@ fun CloudScreen(
                                 itemHeightPx = coordinates.size.height.toFloat()
                             }
                         }
+                        // Dropping on an account opens it in this pane and copies/moves into its root.
+                        .then(
+                            if (uiState.isReorderMode) Modifier
+                            else Modifier.dualPaneDropZone(
+                                location = com.antigravity.filemanager.presentation.components.cloudLocation(account.id, "/"),
+                                name = account.accountName
+                            ) { items ->
+                                dragState?.onDropInto?.invoke(com.antigravity.filemanager.presentation.components.cloudLocation(account.id, "/"), items)
+                            }
+                        )
                 ) {
                     CloudAccountRow(
                         account = account,
