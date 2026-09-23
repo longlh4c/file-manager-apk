@@ -118,8 +118,16 @@ class MainActivity : ComponentActivity() {
                 val cacheDir = File(cacheDir, "shared_incoming").apply { mkdirs() }
                 for (uri in uris) {
                     try {
-                        val fileName = getFileNameFromUri(uri) ?: "shared_${System.currentTimeMillis()}"
-                        val targetFile = File(cacheDir, fileName)
+                        // The sending app controls both the URI and the display name. A file://
+                        // URI into this app's own private data would be copied out to shared
+                        // storage on paste, and a name like "../databases/x" would write outside
+                        // this cache folder — both are rejected.
+                        if (isOwnPrivateFileUri(uri)) continue
+                        val fileName = getFileNameFromUri(uri)
+                            ?.let { File(it).name }
+                            ?.takeIf { it.isNotBlank() && it != "." && it != ".." }
+                            ?: "shared_${System.currentTimeMillis()}"
+                        val targetFile = com.antigravity.filemanager.data.local.storage.uniqueFile(cacheDir, fileName)
                         contentResolver.openInputStream(uri)?.use { input ->
                             targetFile.outputStream().use { output ->
                                 input.copyTo(output)
@@ -144,6 +152,21 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    private fun isOwnPrivateFileUri(uri: Uri): Boolean {
+        // This app's own FileProvider maps the whole filesystem (root-path), private data included.
+        if (uri.scheme == "content") return uri.authority == "${packageName}.fileprovider"
+        if (uri.scheme != "file") return false
+        val path = uri.path ?: return true
+        return try {
+            val canonical = File(path).canonicalPath
+            val privateRoots = listOfNotNull(applicationInfo.dataDir, filesDir.parent, applicationContext.dataDir?.path)
+                .map { File(it).canonicalPath }
+            privateRoots.any { canonical == it || canonical.startsWith(it + File.separator) }
+        } catch (e: Exception) {
+            true
         }
     }
 

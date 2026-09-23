@@ -7,8 +7,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import java.io.File
 
+// CLOSE_WRITE rather than MODIFY: a file being written fires MODIFY every few milliseconds, which
+// kept a debounced listener from ever settling until the whole write finished.
 private const val WATCH_MASK =
-    FileObserver.CREATE or FileObserver.DELETE or FileObserver.MOVED_FROM or FileObserver.MOVED_TO or FileObserver.MODIFY
+    FileObserver.CREATE or FileObserver.DELETE or FileObserver.MOVED_FROM or FileObserver.MOVED_TO or FileObserver.CLOSE_WRITE
 
 /**
  * Emits whenever a file is added, removed, renamed, or modified directly inside [path] — not

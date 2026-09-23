@@ -147,7 +147,10 @@ data class CategorySummary(
     val title: String,
     val totalSizeBytes: Long = 0L,
     val itemCount: Int = 0,
-    val subtitle: String = ""
+    val subtitle: String = "",
+    // Tells apart several cards of one type (a USB drive's root path): two drives with the same
+    // name produced duplicate list keys, crashing the dashboard, and opened the same drive.
+    val id: String = ""
 ) {
     val formattedDisplay: String
         get() = when (type) {
@@ -328,7 +331,14 @@ data class FtpServerState(
     val port: Int = 1524,
     val httpPort: Int = 8080,
     val password: String = "",
-    val isRandomPassword: Boolean = false
+    val isRandomPassword: Boolean = false,
+    // Why the last start failed or only half worked (e.g. a port already in use); errorId changes
+    // with every new error so the same message can be shown again.
+    val error: String? = null,
+    val errorId: Long = 0L,
+    // Which of the two servers actually came up (one can fail while the other runs).
+    val ftpRunning: Boolean = false,
+    val httpRunning: Boolean = false
 ) {
     val accessUrl: String
         get() = if (ipAddress != null) "ftp://$ipAddress:$port" else ""
@@ -434,4 +444,13 @@ data class ExtractResult(
     val totalFiles: Int = 0,
     val extractedCount: Int = 0,
     val skippedCount: Int = 0
+)
+
+/** One entry of an archive, listed so it can be browsed without extracting everything.
+ * [path] is the entry's path inside the archive, '/'-separated, without a trailing slash. */
+data class ArchiveEntryInfo(
+    val path: String,
+    val size: Long,
+    val isDirectory: Boolean,
+    val lastModified: Long
 )

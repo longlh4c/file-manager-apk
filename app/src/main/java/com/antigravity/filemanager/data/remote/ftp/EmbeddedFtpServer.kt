@@ -35,7 +35,7 @@ class EmbeddedFtpServer @Inject constructor() {
 
     private var previousUncaughtExceptionHandler: Thread.UncaughtExceptionHandler? = null
 
-    // Kept as a second line of defense even with maxThreads=1 eliminating the encoder race itself
+    // Kept as a second line of defense even with the ThreadLocal FtpResponseEncoder eliminating the encoder race itself
     // (see MAX_WORKER_THREADS) — this library still has other ways to throw from a worker thread
     // that aren't that specific bug, and this at least keeps THOSE from taking the whole app down.
     // It is NOT sufficient on its own against the encoder race specifically: logs from an actual
@@ -84,7 +84,8 @@ class EmbeddedFtpServer @Inject constructor() {
                     maxLogins = 100
                     maxAnonymousLogins = 100
                     maxLoginFailures = 100
-                    loginFailureDelay = 0
+                    // Slows password guessing down when a password is set; no cost otherwise.
+                    loginFailureDelay = if (password.isBlank()) 0 else 1000
                     maxThreads = MAX_WORKER_THREADS
                     isAnonymousLoginEnabled = true
                 }.createConnectionConfig()

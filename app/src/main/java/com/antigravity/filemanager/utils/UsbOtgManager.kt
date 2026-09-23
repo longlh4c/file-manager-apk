@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -32,6 +33,15 @@ class UsbOtgManager @Inject constructor(
 
     private val _connectedUsbDrives = MutableStateFlow<List<UsbOtgVolumeInfo>>(emptyList())
     val connectedUsbDrives: StateFlow<List<UsbOtgVolumeInfo>> = _connectedUsbDrives.asStateFlow()
+
+    // False until the first scan has finished: before that the empty list above means "not known
+    // yet", not "no drive", and a browser restored inside a drive must not treat it as unplugged.
+    private val _scanned = MutableStateFlow(false)
+    val scanned: StateFlow<Boolean> = _scanned.asStateFlow()
+
+    // One mount/unplug fires several refreshes; run as unordered parallel scans, an older scan
+    // finishing last could bring back a drive that was already removed (or hide a new one).
+    private val scanLock = kotlinx.coroutines.sync.Mutex()
 
     private val storageReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -72,7 +82,9 @@ class UsbOtgManager @Inject constructor(
             }
             ContextCompat.registerReceiver(context, storageReceiver, usbFilter, exportFlag)
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            // StorageVolumeCallback is API 30. The old N (24) guard let Android 8-10 reach it and
+            // die with NoSuchMethodError, an Error the catch below never sees.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 storageManager?.registerStorageVolumeCallback(context.mainExecutor, object : StorageManager.StorageVolumeCallback() {
                     override fun onStateChanged(volume: android.os.storage.StorageVolume) {
                         refresh()
@@ -86,8 +98,10 @@ class UsbOtgManager @Inject constructor(
 
     fun refresh() {
         scope.launch {
-            val list = scanMountedUsbDrives()
-            _connectedUsbDrives.value = list
+            scanLock.withLock {
+                _connectedUsbDrives.value = scanMountedUsbDrives()
+                _scanned.value = true
+            }
         }
     }
 
@@ -98,8 +112,9 @@ class UsbOtgManager @Inject constructor(
         try {
             val volumes = sm.storageVolumes
             for (volume in volumes) {
-                // We want removable, non-primary volumes that are mounted
-                if (volume.isRemovable && !volume.isPrimary && volume.state == Environment.MEDIA_MOUNTED) {
+                // We want removable, non-primary volumes that are mounted (read-only too: NTFS
+                // drives are often mounted that way and used to be listed only by the fallback)
+                if (volume.isRemovable && !volume.isPrimary && volume.state.let { it == Environment.MEDIA_MOUNTED || it == Environment.MEDIA_MOUNTED_READ_ONLY }) {
                     val rootDir: File? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         volume.directory
                     } else {

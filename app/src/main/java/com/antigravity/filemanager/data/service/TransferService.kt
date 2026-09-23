@@ -73,10 +73,15 @@ class TransferService : Service() {
                 }
             }
             ACTION_STOP -> {
-                progressCollectJob?.cancel()
-                if (wakeLock?.isHeld == true) wakeLock?.release()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                // stopSelf() without an id also stopped the service when a newer START (a transfer
+                // begun right after the last one ended) was already queued behind this STOP — the
+                // race behind ForegroundServiceDidNotStartInTimeException. Only stop if this STOP
+                // is the latest command; otherwise the queued START keeps it in the foreground.
+                if (stopSelfResult(startId)) {
+                    progressCollectJob?.cancel()
+                    if (wakeLock?.isHeld == true) wakeLock?.release()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                }
             }
         }
         return START_NOT_STICKY

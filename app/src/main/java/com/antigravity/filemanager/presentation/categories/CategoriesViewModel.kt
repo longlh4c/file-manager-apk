@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.presentation.categories
 
 import androidx.lifecycle.SavedStateHandle
+import kotlinx.coroutines.flow.update
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.antigravity.filemanager.domain.model.CategoryType
@@ -154,7 +155,7 @@ class CategoriesViewModel @Inject constructor(
                     val filtered = filterFilesForCategory(allFiles)
                     folderCacheManager.putCategorySubfolder(categoryType, subfolderPath, sort, hidden, filtered)
                     if (_uiState.value.currentSubfolderPath == subfolderPath) {
-                        _uiState.value = _uiState.value.copy(subfolderFiles = filtered)
+                        _uiState.update { old -> old.copy(subfolderFiles = filtered) }
                     }
                 } else {
                     val rawFolders = mediaUseCase.getFolders(categoryType, sort)
@@ -163,7 +164,7 @@ class CategoriesViewModel @Inject constructor(
                     } else rawFolders
                     folderCacheManager.putMediaFolders(categoryType, sort, folders)
                     if (_uiState.value.currentSubfolderPath == null) {
-                        _uiState.value = _uiState.value.copy(folders = folders)
+                        _uiState.update { old -> old.copy(folders = folders) }
                     }
                 }
             }
@@ -173,13 +174,13 @@ class CategoriesViewModel @Inject constructor(
     private fun observeGlobalClipboard() {
         viewModelScope.launch {
             globalClipboardManager.state.collect { clip ->
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     clipboardPaths = clip.paths,
                     isCutOperation = clip.isCut,
                     clipboardSourceCloudAccountId = clip.sourceCloudAccountId,
                     clipboardItemSizes = clip.itemSizes,
                     clipboardItemIsDirectory = clip.itemIsDirectory
-                )
+                ) }
             }
         }
     }
@@ -187,7 +188,7 @@ class CategoriesViewModel @Inject constructor(
     private fun loadCloudAccounts() {
         viewModelScope.launch {
             cloudStorageUseCase.observeAccounts().collect { accounts ->
-                _uiState.value = _uiState.value.copy(cloudAccounts = accounts)
+                _uiState.update { old -> old.copy(cloudAccounts = accounts) }
             }
         }
     }
@@ -203,14 +204,23 @@ class CategoriesViewModel @Inject constructor(
         }
     }
 
+    private var navigationJob: kotlinx.coroutines.Job? = null
+
+    // Loading the root grid, opening a subfolder and going back all replace what is on screen;
+    // only the latest may land, or a slower earlier load pulls the user back to where they left.
+    private fun launchNavigation(block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit) {
+        navigationJob?.cancel()
+        navigationJob = viewModelScope.launch(block = block)
+    }
+
     fun loadFolders() {
         val rootKey = "category_${categoryType.name}"
-        viewModelScope.launch {
+        launchNavigation {
             val savedSort = folderPreferencesRepository.getSortOption(rootKey)
             val savedHidden = folderPreferencesRepository.getShowHidden(rootKey)
             val savedViewMode = folderPreferencesRepository.getViewMode(rootKey)
 
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 folderHistory = emptyList(),
                 subfolderFiles = emptyList(),
                 selectedPaths = emptySet(),
@@ -218,17 +228,17 @@ class CategoriesViewModel @Inject constructor(
                 sortOption = savedSort,
                 showHiddenFiles = savedHidden,
                 viewMode = savedViewMode
-            )
+            ) }
             val cached = folderCacheManager.getMediaFolders(categoryType, savedSort)
             val filteredCached = if (categoryType == CategoryType.DOCUMENTS) {
                 cached?.folders?.filterNot { it.name.startsWith(".") || isInsideHiddenOrSystemFolder(it.path, isFolder = true) }
             } else cached?.folders
 
             if (filteredCached != null) {
-                _uiState.value = _uiState.value.copy(isLoading = false, folders = filteredCached)
-                if (cached?.isFresh == true) return@launch
+                _uiState.update { old -> old.copy(isLoading = false, folders = filteredCached) }
+                if (cached?.isFresh == true) return@launchNavigation
             } else {
-                _uiState.value = _uiState.value.copy(isLoading = true)
+                _uiState.update { old -> old.copy(isLoading = true) }
             }
             val rawFolders = folderCacheManager.reconcileMediaFolders(categoryType, savedSort) {
                 mediaUseCase.getFolders(categoryType, savedSort)
@@ -236,15 +246,15 @@ class CategoriesViewModel @Inject constructor(
             val folders = if (categoryType == CategoryType.DOCUMENTS) {
                 rawFolders.filterNot { it.name.startsWith(".") || isInsideHiddenOrSystemFolder(it.path, isFolder = true) }
             } else rawFolders
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 isLoading = false,
                 folders = folders
-            )
+            ) }
         }
     }
 
     fun openSubfolder(folderPath: String, folderName: String) {
-        viewModelScope.launch {
+        launchNavigation {
             val savedSort = folderPreferencesRepository.getSortOption(folderPath)
             val savedHidden = folderPreferencesRepository.getShowHidden(folderPath)
             val savedViewMode = folderPreferencesRepository.getViewMode(folderPath)
@@ -273,7 +283,7 @@ class CategoriesViewModel @Inject constructor(
             // list is ready, same as the stale-while-revalidate pattern already used when a cache
             val isSameFolder = _uiState.value.currentSubfolderPath == folderPath
             val fallbackFiles = if (isSameFolder) _uiState.value.subfolderFiles else emptyList()
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 isLoading = cached == null,
                 folderHistory = history,
                 selectedPaths = emptySet(),
@@ -282,8 +292,8 @@ class CategoriesViewModel @Inject constructor(
                 showHiddenFiles = savedHidden,
                 viewMode = savedViewMode,
                 subfolderFiles = cached?.files ?: fallbackFiles
-            )
-            if (cached != null && cached.isFresh) return@launch
+            ) }
+            if (cached != null && cached.isFresh) return@launchNavigation
 
             val allFiles = fileOperationsUseCase.getFiles(
                 folderPath,
@@ -292,10 +302,10 @@ class CategoriesViewModel @Inject constructor(
             )
             val filteredFiles = filterFilesForCategory(allFiles)
             folderCacheManager.putCategorySubfolder(categoryType, folderPath, savedSort, savedHidden, filteredFiles)
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 isLoading = false,
                 subfolderFiles = filteredFiles
-            )
+            ) }
         }
     }
 
@@ -353,11 +363,11 @@ class CategoriesViewModel @Inject constructor(
         if (history.size > 1) {
             val newHistory = history.dropLast(1)
             val prev = newHistory.last()
-            viewModelScope.launch {
+            launchNavigation {
                 val savedSort = folderPreferencesRepository.getSortOption(prev.first)
                 val savedHidden = folderPreferencesRepository.getShowHidden(prev.first)
                 val savedViewMode = folderPreferencesRepository.getViewMode(prev.first)
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     isLoading = true,
                     folderHistory = newHistory,
                     selectedPaths = emptySet(),
@@ -365,16 +375,16 @@ class CategoriesViewModel @Inject constructor(
                     sortOption = savedSort,
                     showHiddenFiles = savedHidden,
                     viewMode = savedViewMode
-                )
+                ) }
                 val files = fileOperationsUseCase.getFiles(
                     prev.first,
                     savedSort,
                     showHidden = savedHidden
                 )
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     isLoading = false,
                     subfolderFiles = filterFilesForCategory(files)
-                )
+                ) }
             }
             return true
         } else if (history.size == 1) {
@@ -396,7 +406,7 @@ class CategoriesViewModel @Inject constructor(
         val targetKey = currentPath ?: "category_${categoryType.name}"
         viewModelScope.launch {
             folderPreferencesRepository.saveSortOption(targetKey, sort, applyToAll)
-            _uiState.value = _uiState.value.copy(sortOption = sort)
+            _uiState.update { old -> old.copy(sortOption = sort) }
             if (currentPath != null) {
                 openSubfolder(currentPath, _uiState.value.currentSubfolderName)
             } else {
@@ -410,7 +420,7 @@ class CategoriesViewModel @Inject constructor(
         val targetKey = currentPath ?: "category_${categoryType.name}"
         viewModelScope.launch {
             folderPreferencesRepository.saveViewMode(targetKey, mode, applyToAll)
-            _uiState.value = _uiState.value.copy(viewMode = mode)
+            _uiState.update { old -> old.copy(viewMode = mode) }
         }
     }
 
@@ -419,7 +429,7 @@ class CategoriesViewModel @Inject constructor(
         val targetKey = currentPath ?: "category_${categoryType.name}"
         viewModelScope.launch {
             folderPreferencesRepository.saveShowHidden(targetKey, show, applyToAll)
-            _uiState.value = _uiState.value.copy(showHiddenFiles = show)
+            _uiState.update { old -> old.copy(showHiddenFiles = show) }
             if (currentPath != null) {
                 openSubfolder(currentPath, _uiState.value.currentSubfolderName)
             } else {
@@ -431,16 +441,16 @@ class CategoriesViewModel @Inject constructor(
     private var searchJob: kotlinx.coroutines.Job? = null
 
     fun onSearchQueryChanged(query: String) {
-        _uiState.value = _uiState.value.copy(searchQuery = query)
+        _uiState.update { old -> old.copy(searchQuery = query) }
         searchJob?.cancel()
         if (query.isBlank()) {
-            _uiState.value = _uiState.value.copy(searchResults = emptyList(), isSearching = false)
+            _uiState.update { old -> old.copy(searchResults = emptyList(), isSearching = false) }
             return
         }
         searchJob = viewModelScope.launch {
             // Debounce so fast typing doesn't kick off a new device-wide walk per keystroke.
             delay(350)
-            _uiState.value = _uiState.value.copy(searchResults = emptyList(), isSearching = true)
+            _uiState.update { old -> old.copy(searchResults = emptyList(), isSearching = true) }
             try {
                 // fileOperationsUseCase.search() itself already existed (bounded: 500 results,
                 // depth 12) but nothing in the app ever actually called it — search here just
@@ -454,10 +464,10 @@ class CategoriesViewModel @Inject constructor(
                 val allMatches = fileOperationsUseCase.search(query, rootPath = currentFolder, category = categoryType)
                 val filtered = filterFilesForCategory(allMatches.filterNot { it.isDirectory })
                     .sortedByDescending { it.lastModified }
-                _uiState.value = _uiState.value.copy(searchResults = filtered)
+                _uiState.update { old -> old.copy(searchResults = filtered) }
             } finally {
                 if (searchJob === kotlinx.coroutines.currentCoroutineContext().job) {
-                    _uiState.value = _uiState.value.copy(isSearching = false)
+                    _uiState.update { old -> old.copy(isSearching = false) }
                 }
             }
         }
@@ -465,24 +475,25 @@ class CategoriesViewModel @Inject constructor(
 
     fun setSearchActive(active: Boolean) {
         searchJob?.cancel()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             isSearchActive = active,
             searchQuery = if (!active) "" else _uiState.value.searchQuery,
             searchResults = emptyList(),
             isSearching = false
-        )
+        ) }
     }
 
     fun createFolder(name: String) {
         val currentDir = _uiState.value.currentSubfolderPath ?: return
         viewModelScope.launch {
-            fileOperationsUseCase.createFolder(currentDir, name)
+            val result = fileOperationsUseCase.createFolder(currentDir, name)
+            result.exceptionOrNull()?.let { e -> _uiState.update { old -> old.copy(toastMessage = e.message ?: "Could not create folder") } }
             // getCategorySubfolder's reconcile-once cache doesn't know anything changed on its
             // own — without this, openSubfolder() below just re-painted the same
             // already-"reconciled" cached list, and the new folder never appeared until something
             // else happened to invalidate it (e.g. the app process restarting).
             folderCacheManager.invalidateCategorySubfolder(categoryType, currentDir)
-            _uiState.value = _uiState.value.copy(showNewFolderDialog = false)
+            _uiState.update { old -> old.copy(showNewFolderDialog = false) }
             openSubfolder(currentDir, _uiState.value.currentSubfolderName)
         }
     }
@@ -490,35 +501,35 @@ class CategoriesViewModel @Inject constructor(
     fun toggleFileSelection(path: String) {
         val current = _uiState.value.selectedPaths.toMutableSet()
         if (current.contains(path)) current.remove(path) else current.add(path)
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = current,
             isSelectionMode = current.isNotEmpty()
-        )
+        ) }
     }
 
     fun selectAll() {
         val all = _uiState.value.subfolderFiles.map { it.path }.toSet()
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = all,
             isSelectionMode = true
-        )
+        ) }
     }
 
     fun invertSelection() {
         val all = _uiState.value.subfolderFiles.map { it.path }.toSet()
         val current = _uiState.value.selectedPaths
         val inverted = all - current
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = inverted,
             isSelectionMode = inverted.isNotEmpty()
-        )
+        ) }
     }
 
     fun clearSelection() {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = emptySet(),
             isSelectionMode = false
-        )
+        ) }
     }
 
     fun clearClipboard() {
@@ -528,19 +539,19 @@ class CategoriesViewModel @Inject constructor(
     fun copySelected() {
         val selected = _uiState.value.selectedPaths.toList()
         globalClipboardManager.copy(selected, selected.associateWith { java.io.File(it).length() })
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = emptySet(),
             isSelectionMode = false
-        )
+        ) }
     }
 
     fun cutSelected() {
         val selected = _uiState.value.selectedPaths.toList()
         globalClipboardManager.cut(selected, selected.associateWith { java.io.File(it).length() })
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             selectedPaths = emptySet(),
             isSelectionMode = false
-        )
+        ) }
     }
 
     private var pendingOverwriteAction: (suspend (overwriteNames: Set<String>, skipNames: Set<String>) -> Unit)? = null
@@ -555,31 +566,28 @@ class CategoriesViewModel @Inject constructor(
             // since pasteFromCloud only auto-renames when a name isn't in overwriteNames.
             val sources = _uiState.value.clipboardPaths
             val itemSizes = _uiState.value.clipboardItemSizes
-            val conflicts = sources.mapNotNull { remotePath ->
-                val name = File(remotePath).name
-                val destFile = File(targetDir, name)
-                if (destFile.exists()) {
-                    com.antigravity.filemanager.domain.model.OverwriteConflict(name = name, existingSize = destFile.length(), newSize = itemSizes[remotePath] ?: 0L)
-                } else null
-            }
             activeTransferJob?.cancel()
-            if (conflicts.isNotEmpty()) {
-                pendingOverwriteAction = { overwriteNames, skipNames ->
-                    pasteFromCloud(cloudAccountId, targetDir, overwriteNames, skipNames)
+            activeTransferJob = viewModelScope.launch {
+                val conflicts = cloudStorageUseCase.findLocalConflicts(sources, targetDir, itemSizes, _uiState.value.clipboardItemIsDirectory)
+                if (conflicts.isNotEmpty()) {
+                    pendingOverwriteAction = { overwriteNames, skipNames ->
+                        pasteFromCloud(cloudAccountId, targetDir, overwriteNames, skipNames)
+                    }
+                    _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
+                } else {
+                    pasteFromCloud(cloudAccountId, targetDir)
                 }
-                _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
-            } else {
-                activeTransferJob = viewModelScope.launch { pasteFromCloud(cloudAccountId, targetDir) }
             }
             return
         }
-        viewModelScope.launch {
+        activeTransferJob?.cancel()
+        activeTransferJob = viewModelScope.launch {
             val sources = _uiState.value.clipboardPaths
             val isMove = _uiState.value.isCutOperation
 
             suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>) {
-                runLocalCopyOrMove(sources, targetDir, isMove, overwriteNames, skipNames)
-                globalClipboardManager.clear()
+                // Keep the clipboard after a failed paste so the user can retry without re-copying.
+                if (runLocalCopyOrMove(sources, targetDir, isMove, overwriteNames, skipNames).isSuccess) globalClipboardManager.clear()
                 val currentName = _uiState.value.currentSubfolderName
                 openSubfolder(targetDir, currentName)
             }
@@ -587,7 +595,7 @@ class CategoriesViewModel @Inject constructor(
             val conflicts = fileOperationsUseCase.findConflicts(sources, targetDir)
             if (conflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames -> doPaste(overwriteNames, skipNames) }
-                _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
+                _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
             } else {
                 doPaste(emptySet(), emptySet())
             }
@@ -619,24 +627,24 @@ class CategoriesViewModel @Inject constructor(
                 overwriteNames = overwriteNames,
                 skipNames = skipNames,
                 itemIsDirectory = _uiState.value.clipboardItemIsDirectory
-            ) { progress -> _uiState.value = _uiState.value.copy(downloadProgress = progress) }
+            ) { progress -> _uiState.update { old -> old.copy(downloadProgress = progress) } }
 
             globalClipboardManager.clear()
             // result.scannedPaths.size is how many actually got written — was always "Pasted
             // ${sources.size}" regardless of skipNames, so skipping every conflict still reported
             // success for files that never actually landed.
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 downloadProgress = null,
                 toastMessage = when {
                     result.failedNames.isNotEmpty() -> "Pasted with ${result.failedNames.size} failure(s)"
                     result.scannedPaths.isEmpty() -> "No files pasted (all skipped)"
                     else -> "Pasted ${result.scannedPaths.size} item(s)"
                 }
-            )
+            ) }
             val currentName = _uiState.value.currentSubfolderName
             openSubfolder(targetDir, currentName)
         } catch (e: kotlinx.coroutines.CancellationException) {
-            _uiState.value = _uiState.value.copy(downloadProgress = null, toastMessage = "Transfer cancelled")
+            _uiState.update { old -> old.copy(downloadProgress = null, toastMessage = "Transfer cancelled") }
         }
     }
 
@@ -649,19 +657,23 @@ class CategoriesViewModel @Inject constructor(
         isMove: Boolean,
         overwriteNames: Set<String> = emptySet(),
         skipNames: Set<String> = emptySet()
-    ) {
+    ): Result<Unit> {
         val operationLabel = if (isMove) "Moving" else "Copying"
         val onProgress: (String, Int, Int) -> Unit = { currentFile, currentIndex, totalFiles ->
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 downloadProgress = CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = operationLabel)
-            )
+            ) }
         }
-        if (isMove) {
+        val result = if (isMove) {
             fileOperationsUseCase.move(sources, target, overwriteNames, skipNames, onProgress)
         } else {
             fileOperationsUseCase.copy(sources, target, overwriteNames, skipNames, onProgress)
         }
-        _uiState.value = _uiState.value.copy(downloadProgress = null)
+        _uiState.update { old -> old.copy(
+            downloadProgress = null,
+            toastMessage = result.exceptionOrNull()?.let { "Error during $operationLabel: ${it.message}" } ?: old.toastMessage
+        ) }
+        return result
     }
 
     private var activeTransferJob: kotlinx.coroutines.Job? = null
@@ -672,11 +684,11 @@ class CategoriesViewModel @Inject constructor(
             "Extracting" -> "Extract cancelled"
             else -> "Transfer cancelled"
         }
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             downloadProgress = null,
             toastMessage = toastMessage,
             transferCancelledByUser = true
-        )
+        ) }
         activeTransferJob?.cancel()
         activeTransferJob = null
     }
@@ -684,7 +696,7 @@ class CategoriesViewModel @Inject constructor(
     fun resolveOverwriteConflict(overwriteNames: Set<String>, skipNames: Set<String>) {
         val action = pendingOverwriteAction
         pendingOverwriteAction = null
-        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+        _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
         if (action != null) {
             activeTransferJob?.cancel()
             activeTransferJob = viewModelScope.launch { action(overwriteNames, skipNames) }
@@ -693,49 +705,49 @@ class CategoriesViewModel @Inject constructor(
 
     fun cancelOverwriteConflict() {
         pendingOverwriteAction = null
-        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+        _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
     }
 
     fun openCopyToCloudDialog(isMove: Boolean = false) {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showCloudDestinationDialog = true,
             isCloudMoveOperation = isMove
-        )
+        ) }
     }
 
     fun dismissCloudDestinationDialog() {
-        _uiState.value = _uiState.value.copy(showCloudDestinationDialog = false)
+        _uiState.update { old -> old.copy(showCloudDestinationDialog = false) }
     }
 
     fun onSelectLocalDestination() {
         val root = android.os.Environment.getExternalStorageDirectory().absolutePath
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showCloudDestinationDialog = false,
             showLocalFolderPicker = true,
             localFolderPickerPath = root,
             localFolderPickerSegments = listOf("Root"),
             localFolderPickerFolders = emptyList()
-        )
+        ) }
         loadLocalFolderPickerFolders(root)
     }
 
     fun dismissLocalFolderPicker() {
-        _uiState.value = _uiState.value.copy(showLocalFolderPicker = false)
+        _uiState.update { old -> old.copy(showLocalFolderPicker = false) }
     }
 
     private fun loadLocalFolderPickerFolders(path: String) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(localFolderPickerLoading = true, localFolderPickerPath = path)
+            _uiState.update { old -> old.copy(localFolderPickerLoading = true, localFolderPickerPath = path) }
             val folders = fileOperationsUseCase.getFiles(path, FileSortOption.BY_NAME_ASC, showHidden = false)
                 .filter { it.isDirectory }
-            _uiState.value = _uiState.value.copy(localFolderPickerLoading = false, localFolderPickerFolders = folders)
+            _uiState.update { old -> old.copy(localFolderPickerLoading = false, localFolderPickerFolders = folders) }
         }
     }
 
     fun openLocalFolderPickerFolder(folder: FileItem) {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             localFolderPickerSegments = _uiState.value.localFolderPickerSegments + folder.name
-        )
+        ) }
         loadLocalFolderPickerFolders(folder.path)
     }
 
@@ -745,36 +757,36 @@ class CategoriesViewModel @Inject constructor(
         val root = android.os.Environment.getExternalStorageDirectory().absolutePath
         val newSegments = segments.subList(0, index + 1)
         val newPath = if (index == 0) root else "$root/" + segments.subList(1, index + 1).joinToString("/")
-        _uiState.value = _uiState.value.copy(localFolderPickerSegments = newSegments)
+        _uiState.update { old -> old.copy(localFolderPickerSegments = newSegments) }
         loadLocalFolderPickerFolders(newPath)
     }
 
     fun confirmLocalFolderPickerDestination() {
         val destPath = _uiState.value.localFolderPickerPath
-        _uiState.value = _uiState.value.copy(showLocalFolderPicker = false)
+        _uiState.update { old -> old.copy(showLocalFolderPicker = false) }
         val selected = _uiState.value.selectedPaths.toList()
         val isMove = _uiState.value.isCloudMoveOperation
         val count = selected.size
         val currentDir = _uiState.value.currentSubfolderPath
         viewModelScope.launch {
             suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>) {
-                runLocalCopyOrMove(selected, destPath, isMove, overwriteNames, skipNames)
+                val result = runLocalCopyOrMove(selected, destPath, isMove, overwriteNames, skipNames)
                 if (currentDir != null) {
                     openSubfolder(currentDir, _uiState.value.currentSubfolderName)
                 } else {
                     loadFolders()
                 }
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     selectedPaths = emptySet(),
                     isSelectionMode = false,
-                    toastMessage = "Transferred $count file(s) successfully!"
-                )
+                    toastMessage = if (result.isSuccess) "Transferred $count file(s) successfully!" else old.toastMessage
+                ) }
             }
 
             val conflicts = fileOperationsUseCase.findConflicts(selected, destPath)
             if (conflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames -> doTransfer(overwriteNames, skipNames) }
-                _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
+                _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
             } else {
                 doTransfer(emptySet(), emptySet())
             }
@@ -783,24 +795,24 @@ class CategoriesViewModel @Inject constructor(
 
     /** User picked which cloud account; now let them pick a destination folder inside it. */
     fun onSelectCloudAccountForTransfer(account: CloudAccount) {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showCloudDestinationDialog = false,
             cloudFolderPickerAccount = account,
             cloudFolderPickerPath = "/",
             cloudFolderPickerSegments = listOf("Root"),
             cloudFolderPickerFolders = emptyList()
-        )
+        ) }
         loadCloudFolderPickerFolders("/")
     }
 
     fun dismissCloudFolderPicker() {
-        _uiState.value = _uiState.value.copy(cloudFolderPickerAccount = null)
+        _uiState.update { old -> old.copy(cloudFolderPickerAccount = null) }
     }
 
     private fun loadCloudFolderPickerFolders(path: String) {
         val account = _uiState.value.cloudFolderPickerAccount ?: return
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(cloudFolderPickerPath = path)
+            _uiState.update { old -> old.copy(cloudFolderPickerPath = path) }
             // Was always a live network round-trip (for MEGA in particular, a full account-tree
             // fetch+decrypt) on every folder tapped in this "pick a destination" picker, even
             // though the Cloud tab right next to it (CloudExplorerViewModel) already caches the
@@ -812,29 +824,35 @@ class CategoriesViewModel @Inject constructor(
             // session stays instant on the other for the rest of it.
             val cached = folderCacheManager.getCloudFolder(account.id, path)
             if (cached != null) {
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     cloudFolderPickerLoading = false,
                     cloudFolderPickerFolders = cached.files.filter { it.isDirectory }.sortedBy { it.name.lowercase() }
-                )
+                ) }
                 if (cached.isFresh) return@launch
             } else {
-                _uiState.value = _uiState.value.copy(cloudFolderPickerLoading = true)
+                _uiState.update { old -> old.copy(cloudFolderPickerLoading = true) }
             }
             val result = cloudStorageUseCase.getFiles(account.id, path)
-            val files = result.getOrDefault(emptyList())
-            folderCacheManager.putCloudFolder(account.id, path, files)
-            _uiState.value = _uiState.value.copy(
+            // Only a real listing is cached; a failed one used to be stored as "empty" and stayed
+            // that way (already "reconciled") for the rest of the session.
+            val files = result.getOrNull()
+            if (files != null) {
+                folderCacheManager.putCloudFolder(account.id, path, files)
+            } else {
+                _uiState.update { old -> old.copy(toastMessage = "Couldn't load folder: ${result.exceptionOrNull()?.message}") }
+            }
+            _uiState.update { old -> old.copy(
                 cloudFolderPickerLoading = false,
-                cloudFolderPickerFolders = files.filter { it.isDirectory }.sortedBy { it.name.lowercase() }
-            )
+                cloudFolderPickerFolders = (files ?: emptyList()).filter { it.isDirectory }.sortedBy { it.name.lowercase() }
+            ) }
         }
     }
 
     fun openCloudFolderPickerFolder(folder: FileItem) {
         val newPath = folder.path
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             cloudFolderPickerSegments = _uiState.value.cloudFolderPickerSegments + folder.name
-        )
+        ) }
         loadCloudFolderPickerFolders(newPath)
     }
 
@@ -843,14 +861,14 @@ class CategoriesViewModel @Inject constructor(
         if (index >= segments.size - 1) return
         val newSegments = segments.subList(0, index + 1)
         val newPath = if (index == 0) "/" else "/" + segments.subList(1, index + 1).joinToString("/")
-        _uiState.value = _uiState.value.copy(cloudFolderPickerSegments = newSegments)
+        _uiState.update { old -> old.copy(cloudFolderPickerSegments = newSegments) }
         loadCloudFolderPickerFolders(newPath)
     }
 
     fun confirmCloudFolderPickerDestination() {
         val account = _uiState.value.cloudFolderPickerAccount ?: return
         val destPath = _uiState.value.cloudFolderPickerPath
-        _uiState.value = _uiState.value.copy(cloudFolderPickerAccount = null)
+        _uiState.update { old -> old.copy(cloudFolderPickerAccount = null) }
         transferToCloud(account, destPath)
     }
 
@@ -861,7 +879,7 @@ class CategoriesViewModel @Inject constructor(
         val currentDir = _uiState.value.currentSubfolderPath
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(showCloudDestinationDialog = false)
+            _uiState.update { old -> old.copy(showCloudDestinationDialog = false) }
 
             val progressThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
             suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>) {
@@ -874,7 +892,7 @@ class CategoriesViewModel @Inject constructor(
                         skipNames = skipNames
                     ) { currentFile, currentIndex, totalFiles, bytesSent, totalBytes ->
                         if (progressThrottler.shouldEmit(bytesSent, totalBytes)) {
-                            _uiState.value = _uiState.value.copy(
+                            _uiState.update { old -> old.copy(
                                 downloadProgress = CloudTransferProgress(
                                     currentFileName = currentFile,
                                     currentIndex = currentIndex,
@@ -884,16 +902,16 @@ class CategoriesViewModel @Inject constructor(
                                     isIndeterminate = totalBytes <= 0,
                                     isUpload = true
                                 )
-                            )
+                            ) }
                         }
                     }
-                    _uiState.value = _uiState.value.copy(downloadProgress = null)
+                    _uiState.update { old -> old.copy(downloadProgress = null) }
                     if (result.isFailure) {
-                        _uiState.value = _uiState.value.copy(
+                        _uiState.update { old -> old.copy(
                             selectedPaths = emptySet(),
                             isSelectionMode = false,
                             toastMessage = "Upload to ${account.accountName} failed: ${result.exceptionOrNull()?.message ?: "unknown error"}"
-                        )
+                        ) }
                         return
                     }
                     // uploadFiles() now returns how many files actually went out — was always
@@ -925,7 +943,7 @@ class CategoriesViewModel @Inject constructor(
                             loadFolders()
                         }
                     }
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         selectedPaths = emptySet(),
                         isSelectionMode = false,
                         toastMessage = if (uploadedCount > 0) {
@@ -933,9 +951,9 @@ class CategoriesViewModel @Inject constructor(
                         } else {
                             "No files transferred (all skipped)"
                         }
-                    )
+                    ) }
                 } catch (e: kotlinx.coroutines.CancellationException) {
-                    _uiState.value = _uiState.value.copy(downloadProgress = null, toastMessage = "Transfer cancelled")
+                    _uiState.update { old -> old.copy(downloadProgress = null, toastMessage = "Transfer cancelled") }
                 }
             }
 
@@ -943,7 +961,7 @@ class CategoriesViewModel @Inject constructor(
             val conflicts = cloudStorageUseCase.findConflicts(account.id, destPath, items)
             if (conflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames -> doTransfer(overwriteNames, skipNames) }
-                _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
+                _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
             } else {
                 doTransfer(emptySet(), emptySet())
             }
@@ -951,14 +969,14 @@ class CategoriesViewModel @Inject constructor(
     }
 
     fun clearToast() {
-        _uiState.value = _uiState.value.copy(toastMessage = null)
+        _uiState.update { old -> old.copy(toastMessage = null) }
     }
 
     fun renameFile(newName: String) {
         val item = _uiState.value.itemForRename ?: return
         viewModelScope.launch {
-            fileOperationsUseCase.rename(item.path, newName)
-            _uiState.value = _uiState.value.copy(showRenameDialog = false, itemForRename = null)
+            val result = fileOperationsUseCase.rename(item.path, newName)
+            _uiState.update { old -> old.copy(showRenameDialog = false, itemForRename = null, toastMessage = result.exceptionOrNull()?.let { it.message ?: "Rename failed" }) }
             val folderPath = _uiState.value.currentSubfolderPath
             if (folderPath != null) {
                 openSubfolder(folderPath, _uiState.value.currentSubfolderName)
@@ -976,22 +994,27 @@ class CategoriesViewModel @Inject constructor(
             // delete() even starts, since a quick per-item renameTo() with no progress ticks in
             // between can still take a moment for several items with nothing on screen at all,
             // which read as the app hanging.
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 downloadProgress = CloudTransferProgress(
                     isUpload = false,
                     isIndeterminate = true,
                     operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
                 )
-            )
-            fileOperationsUseCase.delete(paths, moveToRecycleBin) { currentName, currentIndex, total ->
-                _uiState.value = _uiState.value.copy(
+            ) }
+            val deleteResult = fileOperationsUseCase.delete(paths, moveToRecycleBin) { currentName, currentIndex, total ->
+                _uiState.update { old -> old.copy(
                     downloadProgress = CloudTransferProgress.forItemCount(
                         currentName, currentIndex, total, isUpload = false,
                         operationLabel = if (moveToRecycleBin) "Deleting" else "Deleting permanently"
                     )
-                )
+                ) }
             }
-            _uiState.value = _uiState.value.copy(downloadProgress = null)
+            val deletedCount = deleteResult.getOrNull()
+            if (deletedCount == null || deletedCount < paths.size) {
+                _uiState.update { old -> old.copy(toastMessage = deleteResult.exceptionOrNull()?.let { "Delete failed: ${it.message}" }
+                    ?: "$deletedCount of ${paths.size} item(s) deleted") }
+            }
+            _uiState.update { old -> old.copy(downloadProgress = null) }
             val folderPath = _uiState.value.currentSubfolderPath
             if (folderPath != null) {
                 openSubfolder(folderPath, _uiState.value.currentSubfolderName)
@@ -1012,10 +1035,10 @@ class CategoriesViewModel @Inject constructor(
         }
         val archivePath = "$targetDir/$name"
         val sources = _uiState.value.selectedPaths.toList()
-        _uiState.value = _uiState.value.copy(showCompressDialog = false)
+        _uiState.update { old -> old.copy(showCompressDialog = false) }
         if (File(archivePath).exists()) {
             pendingCompressSources = sources
-            _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = archivePath)
+            _uiState.update { old -> old.copy(pendingOverwriteZipPath = archivePath) }
             return
         }
         runCompress(sources, archivePath, targetDir)
@@ -1026,14 +1049,14 @@ class CategoriesViewModel @Inject constructor(
         val archivePath = _uiState.value.pendingOverwriteZipPath ?: return
         val sources = pendingCompressSources ?: return
         pendingCompressSources = null
-        _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = null)
+        _uiState.update { old -> old.copy(pendingOverwriteZipPath = null) }
         File(archivePath).delete()
         runCompress(sources, archivePath, targetDir)
     }
 
     fun cancelCompressOverwrite() {
         pendingCompressSources = null
-        _uiState.value = _uiState.value.copy(pendingOverwriteZipPath = null)
+        _uiState.update { old -> old.copy(pendingOverwriteZipPath = null) }
     }
 
     private fun runCompress(sources: List<String>, archivePath: String, targetDir: String) {
@@ -1047,7 +1070,7 @@ class CategoriesViewModel @Inject constructor(
                     } else if (totalFiles > 0) {
                         ((currentIndex.toFloat() / totalFiles.toFloat()) * 100).toInt().coerceIn(0, 100)
                     } else 0
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         downloadProgress = CloudTransferProgress(
                             currentFileName = currentFile.ifEmpty { File(archivePath).name },
                             currentIndex = currentIndex,
@@ -1059,14 +1082,16 @@ class CategoriesViewModel @Inject constructor(
                             operationLabel = "Compressing",
                             percent = p
                         )
-                    )
+                    ) }
+                }.onFailure { e ->
+                    _uiState.update { old -> old.copy(toastMessage = "Compress failed: ${e.message}") }
                 }
             } finally {
                 withContext(NonCancellable) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         downloadProgress = null,
                         transferCancelledByUser = false
-                    )
+                    ) }
                     openSubfolder(targetDir, _uiState.value.currentSubfolderName)
                 }
             }
@@ -1079,10 +1104,10 @@ class CategoriesViewModel @Inject constructor(
         if (selected.isEmpty()) return
 
         if (selected.size == 1 && fileOperationsUseCase.isArchiveEncrypted(selected[0])) {
-            _uiState.value = _uiState.value.copy(
+            _uiState.update { old -> old.copy(
                 pendingPasswordArchive = selected[0],
                 passwordError = null
-            )
+            ) }
             return
         }
 
@@ -1102,29 +1127,29 @@ class CategoriesViewModel @Inject constructor(
                     val conflicts = fileOperationsUseCase.getArchiveConflicts(path, targetDir, password)
                     allConflicts.addAll(conflicts)
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         isLoading = false,
                         downloadProgress = null,
                         pendingPasswordArchive = path,
                         passwordError = null
-                    )
+                    ) }
                     return@launch
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         isLoading = false,
                         downloadProgress = null,
                         pendingPasswordArchive = path,
                         passwordError = "Incorrect password. Please try again."
-                    )
+                    ) }
                     return@launch
                 } catch (e: Exception) {
                     val errorMsg = e.localizedMessage?.takeIf { it.isNotBlank() }
                         ?: e.message?.takeIf { it.isNotBlank() }
                         ?: e.javaClass.simpleName
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         isLoading = false,
                         toastMessage = "Failed to inspect archive: $errorMsg"
-                    )
+                    ) }
                     return@launch
                 }
             }
@@ -1133,7 +1158,7 @@ class CategoriesViewModel @Inject constructor(
                 pendingOverwriteAction = { overwriteNames, skipNames ->
                     runExtract(selected, targetDir, password, overwriteNames, skipNames)
                 }
-                _uiState.value = _uiState.value.copy(overwriteConflicts = allConflicts)
+                _uiState.update { old -> old.copy(overwriteConflicts = allConflicts) }
             } else {
                 runExtract(selected, targetDir, password)
             }
@@ -1150,14 +1175,14 @@ class CategoriesViewModel @Inject constructor(
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
             try {
-                _uiState.value = _uiState.value.copy(isLoading = true)
+                _uiState.update { old -> old.copy(isLoading = true) }
                 var totalExtracted = 0
                 var totalSkipped = 0
                 var successfulArchives = 0
                 for ((index, path) in selected.withIndex()) {
                     if (!isActive || _uiState.value.transferCancelledByUser) break
                     val archiveName = File(path).name
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         downloadProgress = CloudTransferProgress(
                             currentFileName = archiveName,
                             currentIndex = index + 1,
@@ -1167,7 +1192,7 @@ class CategoriesViewModel @Inject constructor(
                             operationLabel = if (selected.size > 1) "Extracting (${index + 1}/${selected.size})" else "Extracting",
                             percent = 0
                         )
-                    )
+                    ) }
                     val res = fileOperationsUseCase.extract(
                         archivePath = path,
                         targetDir = targetDir,
@@ -1181,7 +1206,7 @@ class CategoriesViewModel @Inject constructor(
                         } else if (totalEntries > 0) {
                             ((currentIndex.toFloat() / totalEntries.toFloat()) * 100).toInt().coerceIn(0, 100)
                         } else 0
-                        _uiState.value = _uiState.value.copy(
+                        _uiState.update { old -> old.copy(
                             downloadProgress = CloudTransferProgress(
                                 currentFileName = currentEntry.ifEmpty { archiveName },
                                 currentIndex = currentIndex,
@@ -1193,7 +1218,7 @@ class CategoriesViewModel @Inject constructor(
                                 operationLabel = if (selected.size > 1) "Extracting (${index + 1}/${selected.size})" else "Extracting",
                                 percent = p
                             )
-                        )
+                        ) }
                     }
                     if (res.isSuccess) {
                         successfulArchives++
@@ -1208,27 +1233,27 @@ class CategoriesViewModel @Inject constructor(
                             break
                         }
                         if (ex is com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
-                            _uiState.value = _uiState.value.copy(
+                            _uiState.update { old -> old.copy(
                                 isLoading = false,
                                 downloadProgress = null,
                                 pendingPasswordArchive = path,
                                 passwordError = null
-                            )
+                            ) }
                             return@launch
                         } else if (ex is com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
-                            _uiState.value = _uiState.value.copy(
+                            _uiState.update { old -> old.copy(
                                 isLoading = false,
                                 downloadProgress = null,
                                 pendingPasswordArchive = path,
                                 passwordError = "Incorrect password. Please try again."
-                            )
+                            ) }
                             return@launch
                         } else {
-                            _uiState.value = _uiState.value.copy(
+                            _uiState.update { old -> old.copy(
                                 isLoading = false,
                                 downloadProgress = null,
                                 toastMessage = "Extraction failed: ${ex?.message ?: "Unknown error"}"
-                            )
+                            ) }
                             return@launch
                         }
                     }
@@ -1241,19 +1266,19 @@ class CategoriesViewModel @Inject constructor(
                         successfulArchives > 0 -> "Extracted $successfulArchives archive(s)"
                         else -> null
                     }
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         selectedPaths = emptySet(),
                         isSelectionMode = false,
                         toastMessage = toastMessage
-                    )
+                    ) }
                 }
             } finally {
                 withContext(NonCancellable) {
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         downloadProgress = null,
                         isLoading = false,
                         transferCancelledByUser = false
-                    )
+                    ) }
                     openSubfolder(targetDir, _uiState.value.currentSubfolderName)
                 }
             }
@@ -1264,19 +1289,19 @@ class CategoriesViewModel @Inject constructor(
         val archivePath = _uiState.value.pendingPasswordArchive ?: return
         val targetDir = _uiState.value.currentSubfolderPath ?: return
         // Dismiss password dialog immediately
-        _uiState.value = _uiState.value.copy(pendingPasswordArchive = null, passwordError = null)
+        _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
         checkExtractConflictsAndRun(listOf(archivePath), targetDir, password)
     }
 
     fun dismissPasswordDialog() {
-        _uiState.value = _uiState.value.copy(pendingPasswordArchive = null, passwordError = null)
+        _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
     }
 
     fun showProperties(item: FileItem?) {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showPropertiesDialog = item != null,
             itemForProperties = item
-        )
+        ) }
     }
 
     // Entry point for the selection bar's Properties action — one or many items. Was only ever
@@ -1284,37 +1309,37 @@ class CategoriesViewModel @Inject constructor(
     // the rest of a multi-selection and never summing their sizes.
     fun showPropertiesForSelection(items: List<FileItem>) {
         if (items.isEmpty()) return
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showPropertiesDialog = true,
             propertiesItems = items,
             propertiesTotalSize = items.sumOf { it.size }
-        )
+        ) }
     }
 
     fun dismissPropertiesDialog() {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showPropertiesDialog = false,
             propertiesItems = emptyList(),
             propertiesTotalSize = 0L
-        )
+        ) }
     }
 
     fun setShowRenameDialog(item: FileItem?) {
-        _uiState.value = _uiState.value.copy(
+        _uiState.update { old -> old.copy(
             showRenameDialog = item != null,
             itemForRename = item
-        )
+        ) }
     }
 
     fun setShowNewFolderDialog(show: Boolean) {
-        _uiState.value = _uiState.value.copy(showNewFolderDialog = show)
+        _uiState.update { old -> old.copy(showNewFolderDialog = show) }
     }
 
     fun setShowCompressDialog(show: Boolean) {
-        _uiState.value = _uiState.value.copy(showCompressDialog = show)
+        _uiState.update { old -> old.copy(showCompressDialog = show) }
     }
 
     fun setShowDeleteDialog(show: Boolean) {
-        _uiState.value = _uiState.value.copy(showDeleteDialog = show)
+        _uiState.update { old -> old.copy(showDeleteDialog = show) }
     }
 }

@@ -127,7 +127,8 @@ fun CompressDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    val rawText = textFieldValue.text.trim().ifEmpty { "Archive" }
+                    // A "/" would put the archive in some other (possibly missing) folder.
+                    val rawText = textFieldValue.text.trim().replace('/', '_').ifEmpty { "Archive" }
                     // Strip existing extension if user accidentally typed it
                     val cleanBase = rawText.removeSuffix(".zip").removeSuffix(".ZIP")
                         .removeSuffix(".7z").removeSuffix(".7Z")

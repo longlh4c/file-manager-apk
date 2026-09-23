@@ -94,7 +94,14 @@ class TransferGuard @Inject constructor(
             val intent = Intent(context, TransferService::class.java).apply {
                 action = TransferService.ACTION_START
             }
-            ContextCompat.startForegroundService(context, intent)
+            try {
+                ContextCompat.startForegroundService(context, intent)
+            } catch (e: IllegalStateException) {
+                // Android 12+ refuses to start a foreground service while the app is in the
+                // background (ForegroundServiceStartNotAllowedException). The transfer itself can
+                // still run; it just isn't protected by the service — better than crashing it.
+                android.util.Log.w("TransferGuard", "Couldn't start the transfer service", e)
+            }
         }
     }
 

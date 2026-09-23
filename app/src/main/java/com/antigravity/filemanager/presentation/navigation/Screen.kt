@@ -47,6 +47,10 @@ sealed class Screen(val route: String) {
         }
     }
 
+    object ArchiveViewer : Screen("archive_viewer?path={path}") {
+        fun createRoute(path: String): String = "archive_viewer?path=${Uri.encode(path)}"
+    }
+
     object CloudBrowser : Screen("cloud_browser?accountId={accountId}&title={title}") {
         fun createRoute(accountId: String, title: String = ""): String {
             val encodedId = Uri.encode(accountId)

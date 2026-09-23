@@ -435,7 +435,7 @@ class LocalFileScanner @Inject constructor(
                 val sizeCol = it.getColumnIndex(MediaStore.Images.Media.SIZE)
                 val dateCol = it.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
                 while (it.moveToNext()) {
-                    val path = if (dataCol >= 0) it.getString(dataCol) else null ?: continue
+                    val path = (if (dataCol >= 0) it.getString(dataCol) else null) ?: continue
                     rows.add(Row(path, if (sizeCol >= 0) it.getLong(sizeCol) else 0L, if (dateCol >= 0) it.getLong(dateCol) else 0L))
                 }
             }
@@ -525,7 +525,7 @@ class LocalFileScanner @Inject constructor(
                 val sizeCol = it.getColumnIndex(MediaStore.Audio.Media.SIZE)
                 val dateCol = it.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
                 while (it.moveToNext()) {
-                    val path = if (dataCol >= 0) it.getString(dataCol) else null ?: continue
+                    val path = (if (dataCol >= 0) it.getString(dataCol) else null) ?: continue
                     rows.add(Row(path, if (sizeCol >= 0) it.getLong(sizeCol) else 0L, if (dateCol >= 0) it.getLong(dateCol) else 0L))
                 }
             }
@@ -645,7 +645,7 @@ class LocalFileScanner @Inject constructor(
                 val sizeCol = it.getColumnIndex(MediaStore.Video.Media.SIZE)
                 val dateCol = it.getColumnIndex(MediaStore.Video.Media.DATE_MODIFIED)
                 while (it.moveToNext()) {
-                    val path = if (dataCol >= 0) it.getString(dataCol) else null ?: continue
+                    val path = (if (dataCol >= 0) it.getString(dataCol) else null) ?: continue
                     rows.add(Row(path, if (sizeCol >= 0) it.getLong(sizeCol) else 0L, if (dateCol >= 0) it.getLong(dateCol) else 0L))
                 }
             }
@@ -797,7 +797,7 @@ class LocalFileScanner @Inject constructor(
                 val sizeIdx = it.getColumnIndex(sizeCol)
                 val dateIdx = it.getColumnIndex(dateCol)
                 while (it.moveToNext() && results.size < maxResults) {
-                    val path = if (dataIdx >= 0) it.getString(dataIdx) else null ?: continue
+                    val path = (if (dataIdx >= 0) it.getString(dataIdx) else null) ?: continue
                     val name = (if (nameIdx >= 0) it.getString(nameIdx) else null) ?: path.substringAfterLast('/')
                     if (name.startsWith(".") || isInsideHiddenOrSystemFolder(path, isFolder = false)) continue
                     val size = if (sizeIdx >= 0) it.getLong(sizeIdx) else 0L
@@ -896,7 +896,7 @@ class LocalFileScanner @Inject constructor(
                 val mimeCol = it.getColumnIndex(MediaStore.Files.FileColumns.MIME_TYPE)
 
                 while (it.moveToNext()) {
-                    val path = if (dataCol >= 0) it.getString(dataCol) else null ?: continue
+                    val path = (if (dataCol >= 0) it.getString(dataCol) else null) ?: continue
                     rows.add(
                         Row(
                             path,
@@ -1066,7 +1066,7 @@ class LocalFileScanner @Inject constructor(
                 val sizeCol = it.getColumnIndex(MediaStore.Files.FileColumns.SIZE)
                 val dateCol = it.getColumnIndex(MediaStore.Files.FileColumns.DATE_MODIFIED)
                 while (it.moveToNext()) {
-                    val path = if (dataCol >= 0) it.getString(dataCol) else null ?: continue
+                    val path = (if (dataCol >= 0) it.getString(dataCol) else null) ?: continue
                     rows.add(Row(path, if (sizeCol >= 0) it.getLong(sizeCol) else 0L, if (dateCol >= 0) it.getLong(dateCol) else 0L))
                 }
             }

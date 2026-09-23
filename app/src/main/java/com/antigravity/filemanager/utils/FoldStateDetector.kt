@@ -45,10 +45,14 @@ fun rememberFoldablePosture(): FoldablePosture {
     // Dual-layer detection:
     // 1) Hardware hinge state: FoldingFeature is FLAT or HALF_OPENED
     // 2) Display width: screenWidthDp >= 600dp (on foldables like Vivo X Fold, inner display is ~770dp wide, outer display is ~390-410dp)
-    val isHingeUnfolded = foldingFeature != null && (
-        foldingFeature.state == FoldingFeature.State.FLAT ||
-        foldingFeature.state == FoldingFeature.State.HALF_OPENED
-    )
+    // Only a VERTICAL hinge splits the screen into side-by-side halves. A clamshell flip phone
+    // reports its horizontal hinge as FLAT/HALF_OPENED too whenever it is open, which made a
+    // ~400dp-wide phone count as "unfolded" and allowed two panels on it.
+    val isHingeUnfolded = foldingFeature != null &&
+        foldingFeature.orientation == FoldingFeature.Orientation.VERTICAL && (
+            foldingFeature.state == FoldingFeature.State.FLAT ||
+            foldingFeature.state == FoldingFeature.State.HALF_OPENED
+        )
     val isWideScreen = configuration.screenWidthDp >= 600
 
     val isUnfolded = isHingeUnfolded || isWideScreen

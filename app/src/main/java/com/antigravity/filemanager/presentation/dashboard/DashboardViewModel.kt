@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.presentation.dashboard
 
 import android.content.Context
+import kotlinx.coroutines.flow.update
 import android.os.Environment
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -81,7 +82,7 @@ class DashboardViewModel @Inject constructor(
         // same loadData() but must NOT set this back to true, since a manual pull-to-refresh
         // already shows its own spinner (PullToRefreshContainer in DashboardScreen) and having
         // both on screen at once would look like two competing loading indicators.
-        _uiState.value = _uiState.value.copy(isLoading = true)
+        _uiState.update { old -> old.copy(isLoading = true) }
         loadData()
         observeClipboard()
         observeBookmarks()
@@ -155,13 +156,13 @@ class DashboardViewModel @Inject constructor(
     private fun observeBookmarks() {
         viewModelScope.launch {
             bookmarkUseCase.observeBookmarks().collect { bookmarks ->
-                _uiState.value = _uiState.value.copy(bookmarks = bookmarks)
+                _uiState.update { old -> old.copy(bookmarks = bookmarks) }
             }
         }
     }
 
     fun setShowBookmarksDialog(show: Boolean) {
-        _uiState.value = _uiState.value.copy(showBookmarksDialog = show)
+        _uiState.update { old -> old.copy(showBookmarksDialog = show) }
     }
 
     fun removeBookmark(path: String) {
@@ -173,7 +174,7 @@ class DashboardViewModel @Inject constructor(
     private fun observeClipboard() {
         viewModelScope.launch {
             globalClipboardManager.state.collect { clip ->
-                _uiState.value = _uiState.value.copy(clipboardState = clip)
+                _uiState.update { old -> old.copy(clipboardState = clip) }
             }
         }
     }
@@ -195,10 +196,10 @@ class DashboardViewModel @Inject constructor(
             folderCacheManager.putDashboardSummaries(fresh)
             withContext(Dispatchers.Main) {
                 baseCategories = fresh
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     isLoading = false,
                     storageVolume = volume
-                )
+                ) }
                 applyCategoriesWithUsb(_uiState.value.usbDrives)
             }
         }
@@ -211,11 +212,11 @@ class DashboardViewModel @Inject constructor(
     fun cancelTransfer() {
         activeTransferJob?.cancel()
         activeTransferJob = null
-        _uiState.value = _uiState.value.copy(downloadProgress = null)
+        _uiState.update { old -> old.copy(downloadProgress = null) }
     }
 
     fun clearToast() {
-        _uiState.value = _uiState.value.copy(toastMessage = null)
+        _uiState.update { old -> old.copy(toastMessage = null) }
     }
 
     private var pendingOverwriteAction: (suspend (overwriteNames: Set<String>, skipNames: Set<String>) -> Unit)? = null
@@ -233,7 +234,6 @@ class DashboardViewModel @Inject constructor(
                 val sources = clip.paths
                 val isMove = clip.isCut
                 val itemSizes = clip.itemSizes
-                val targetFolder = File(target)
 
                 suspend fun doPasteCloud(overwriteNames: Set<String>, skipNames: Set<String>) {
                     try {
@@ -247,38 +247,28 @@ class DashboardViewModel @Inject constructor(
                             overwriteNames = overwriteNames,
                             skipNames = skipNames,
                             itemIsDirectory = clip.itemIsDirectory
-                        ) { progress -> _uiState.value = _uiState.value.copy(downloadProgress = progress) }
+                        ) { progress -> _uiState.update { old -> old.copy(downloadProgress = progress) } }
 
-                        _uiState.value = _uiState.value.copy(
+                        _uiState.update { old -> old.copy(
                             downloadProgress = null,
                             toastMessage = when {
                                 result.failedNames.isEmpty() -> _uiState.value.toastMessage
                                 result.failedNames.size == 1 -> "Failed to copy \"${result.failedNames.first()}\""
                                 else -> "Failed to copy ${result.failedNames.size} file(s)"
                             }
-                        )
+                        ) }
                         globalClipboardManager.clear()
                         refresh()
                     } catch (e: kotlinx.coroutines.CancellationException) {
-                        _uiState.value = _uiState.value.copy(downloadProgress = null)
+                        _uiState.update { old -> old.copy(downloadProgress = null) }
                     }
                 }
 
-                val conflicts = sources.mapNotNull { remotePath ->
-                    val name = File(remotePath).name
-                    val destFile = File(targetFolder, name)
-                    if (destFile.exists()) {
-                        com.antigravity.filemanager.domain.model.OverwriteConflict(
-                            name = name,
-                            existingSize = destFile.length(),
-                            newSize = itemSizes[remotePath] ?: 0L
-                        )
-                    } else null
-                }
+                val conflicts = cloudStorageUseCase.findLocalConflicts(sources, target, itemSizes, clip.itemIsDirectory)
 
                 if (conflicts.isNotEmpty()) {
                     pendingOverwriteAction = { overwriteNames, skipNames -> doPasteCloud(overwriteNames, skipNames) }
-                    _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
+                    _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
                 } else {
                     doPasteCloud(emptySet(), emptySet())
                 }
@@ -288,24 +278,27 @@ class DashboardViewModel @Inject constructor(
             suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>) {
                 val operationLabel = if (clip.isCut) "Moving" else "Copying"
                 val onProgress: (String, Int, Int) -> Unit = { currentFile, currentIndex, totalFiles ->
-                    _uiState.value = _uiState.value.copy(
+                    _uiState.update { old -> old.copy(
                         downloadProgress = com.antigravity.filemanager.domain.model.CloudTransferProgress.forItemCount(currentFile, currentIndex, totalFiles, isUpload = true, operationLabel = operationLabel)
-                    )
+                    ) }
                 }
-                if (clip.isCut) {
+                val result = if (clip.isCut) {
                     fileOperationsUseCase.move(clip.paths, target, overwriteNames, skipNames, onProgress)
                 } else {
                     fileOperationsUseCase.copy(clip.paths, target, overwriteNames, skipNames, onProgress)
                 }
-                _uiState.value = _uiState.value.copy(downloadProgress = null)
-                globalClipboardManager.clear()
+                _uiState.update { old -> old.copy(
+                    downloadProgress = null,
+                    toastMessage = result.exceptionOrNull()?.let { "Error during $operationLabel: ${it.message}" } ?: old.toastMessage
+                ) }
+                if (result.isSuccess) globalClipboardManager.clear()
                 refresh()
             }
 
             val conflicts = fileOperationsUseCase.findConflicts(clip.paths, target)
             if (conflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames -> doPaste(overwriteNames, skipNames) }
-                _uiState.value = _uiState.value.copy(overwriteConflicts = conflicts)
+                _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
             } else {
                 doPaste(emptySet(), emptySet())
             }
@@ -315,21 +308,22 @@ class DashboardViewModel @Inject constructor(
     fun resolveOverwriteConflict(overwriteNames: Set<String>, skipNames: Set<String>) {
         val action = pendingOverwriteAction
         pendingOverwriteAction = null
-        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+        _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
         if (action != null) {
-            viewModelScope.launch { action(overwriteNames, skipNames) }
+            activeTransferJob?.cancel()
+            activeTransferJob = viewModelScope.launch { action(overwriteNames, skipNames) }
         }
     }
 
     fun cancelOverwriteConflict() {
         pendingOverwriteAction = null
-        _uiState.value = _uiState.value.copy(overwriteConflicts = emptyList())
+        _uiState.update { old -> old.copy(overwriteConflicts = emptyList()) }
     }
 
     private fun observeUsbDrives() {
         viewModelScope.launch {
             usbOtgManager.connectedUsbDrives.collect { drives ->
-                _uiState.value = _uiState.value.copy(usbDrives = drives)
+                _uiState.update { old -> old.copy(usbDrives = drives) }
                 applyCategoriesWithUsb(drives)
             }
         }
@@ -343,14 +337,15 @@ class DashboardViewModel @Inject constructor(
                     type = CategoryType.USB_OTG,
                     title = drive.displayName,
                     totalSizeBytes = drive.totalBytes,
-                    subtitle = "${drive.formattedUsed} / ${drive.formattedTotal}"
+                    subtitle = "${drive.formattedUsed} / ${drive.formattedTotal}",
+                    id = drive.rootPath
                 )
             }
             filtered + usbSummaries
         } else {
             filtered
         }
-        _uiState.value = _uiState.value.copy(categories = finalCategories)
+        _uiState.update { old -> old.copy(categories = finalCategories) }
     }
 
     private fun mergeWithExisting(current: List<CategorySummary>, incoming: List<CategorySummary>): List<CategorySummary> {
@@ -374,10 +369,10 @@ class DashboardViewModel @Inject constructor(
             getDashboardDataUseCase.observeSummaries().collect { categories ->
                 baseCategories = mergeWithExisting(baseCategories, categories)
                 val volume = getDashboardDataUseCase.getStorageInfo()
-                _uiState.value = _uiState.value.copy(
+                _uiState.update { old -> old.copy(
                     isLoading = false,
                     storageVolume = volume
-                )
+                ) }
                 applyCategoriesWithUsb(_uiState.value.usbDrives)
             }
         }

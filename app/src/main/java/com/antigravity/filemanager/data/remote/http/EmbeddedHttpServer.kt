@@ -32,7 +32,9 @@ class EmbeddedHttpServer @Inject constructor(
         val validPort = if (port in 1024..65535) port else 8080
         return try {
             val s = InternalServer(validPort, password, context)
-            s.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            // 60s instead of the 5s default: an upload is read straight off this socket, and a
+            // phone that stalls for a few seconds mid-transfer shouldn't drop a multi-GB file.
+            s.start(60_000, false)
             server = s
             isRunning = true
             android.util.Log.i("EmbeddedHttpServer", "HTTP Web Share server started on port $validPort")
@@ -97,7 +99,7 @@ class EmbeddedHttpServer @Inject constructor(
             val uri = session.uri
 
             if (method == Method.OPTIONS) {
-                return addCorsHeaders(newFixedLengthResponse(Response.Status.OK, "text/plain", ""))
+                return finalizeResponse(newFixedLengthResponse(Response.Status.OK, "text/plain", ""))
             }
 
             // Authentication check (except for root page which serves the UI containing the prompt)
@@ -109,7 +111,7 @@ class EmbeddedHttpServer @Inject constructor(
                         "application/json",
                         "{\"error\":\"Unauthorized\",\"requireAuth\":true}"
                     )
-                    return addCorsHeaders(resp)
+                    return finalizeResponse(resp)
                 }
             }
 
@@ -128,7 +130,7 @@ class EmbeddedHttpServer @Inject constructor(
                 }
             } catch (e: Exception) {
                 android.util.Log.e("EmbeddedHttpServer", "Error handling HTTP request: $uri", e)
-                addCorsHeaders(newFixedLengthResponse(
+                finalizeResponse(newFixedLengthResponse(
                     Response.Status.INTERNAL_ERROR,
                     "application/json",
                     "{\"error\":\"${e.message?.replace("\"", "\\\"") ?: "Internal Server Error"}\"}"
@@ -139,24 +141,27 @@ class EmbeddedHttpServer @Inject constructor(
         private fun resolveSafeFile(relativePath: String): File? {
             val cleanRel = relativePath.trim().removePrefix("/").replace("\\", "/")
             val file = if (cleanRel.isEmpty()) storageRoot else File(storageRoot, cleanRel)
-            // Path traversal prevention: verify canonical path starts with storageRoot
-            return if (file.canonicalPath.startsWith(storageRoot.canonicalPath)) file else null
+            // Path traversal prevention. The separator matters: a bare prefix check let
+            // "../10" through to a sibling volume like /storage/emulated/10.
+            val canonical = file.canonicalFile
+            val rootPath = storageRoot.canonicalPath
+            return if (canonical.path == rootPath || canonical.path.startsWith(rootPath + File.separator)) file else null
         }
 
         private fun handleList(session: IHTTPSession): Response {
             val relPath = session.parms["path"] ?: ""
-            val targetDir = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val targetDir = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
             )
 
             if (!targetDir.exists() || !targetDir.isDirectory) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.NOT_FOUND, "application/json", "{\"error\":\"Folder not found\"}")
                 )
             }
 
             if (targetDir != storageRoot && isInsideSystemOrHiddenFolder(targetDir)) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Access to system directory is restricted\"}")
                 )
             }
@@ -186,7 +191,7 @@ class EmbeddedHttpServer @Inject constructor(
                 put("items", jsonArray)
             }
 
-            return addCorsHeaders(newFixedLengthResponse(
+            return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
                 resObj.toString()
@@ -196,18 +201,18 @@ class EmbeddedHttpServer @Inject constructor(
         private fun handleSearch(session: IHTTPSession): Response {
             val relPath = session.parms["path"] ?: ""
             val query = (session.parms["q"] ?: "").trim()
-            val targetDir = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val targetDir = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
             )
 
             if (!targetDir.exists() || !targetDir.isDirectory) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.NOT_FOUND, "application/json", "{\"error\":\"Folder not found\"}")
                 )
             }
 
             if (targetDir != storageRoot && isInsideSystemOrHiddenFolder(targetDir)) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Access to system directory is restricted\"}")
                 )
             }
@@ -257,7 +262,7 @@ class EmbeddedHttpServer @Inject constructor(
                 put("items", jsonArray)
             }
 
-            return addCorsHeaders(newFixedLengthResponse(
+            return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
                 resObj.toString()
@@ -266,18 +271,18 @@ class EmbeddedHttpServer @Inject constructor(
 
         private fun handleDownload(session: IHTTPSession): Response {
             val relPath = session.parms["path"] ?: ""
-            val targetFile = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val targetFile = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Invalid path")
             )
 
             if (!targetFile.exists()) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
                 )
             }
 
             if (targetFile != storageRoot && isInsideSystemOrHiddenFolder(targetFile)) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.FORBIDDEN, "text/plain", "Access to system files or folders is restricted")
                 )
             }
@@ -328,8 +333,8 @@ class EmbeddedHttpServer @Inject constructor(
                     "application/zip",
                     pis
                 )
-                response.addHeader("Content-Disposition", "attachment; filename=\"$zipName\"")
-                return addCorsHeaders(response)
+                response.addHeader("Content-Disposition", contentDisposition("attachment", zipName))
+                return finalizeResponse(response)
             }
 
             val fileLen = targetFile.length()
@@ -345,14 +350,20 @@ class EmbeddedHttpServer @Inject constructor(
                 if (dashIdx != -1) {
                     val startStr = rangeVal.substring(0, dashIdx).trim()
                     val endStr = rangeVal.substring(dashIdx + 1).trim()
-                    if (startStr.isNotEmpty()) rangeStart = startStr.toLongOrNull() ?: 0L
-                    if (endStr.isNotEmpty()) rangeEnd = endStr.toLongOrNull() ?: (fileLen - 1L)
+                    if (startStr.isEmpty()) {
+                        // Suffix range "bytes=-N": the last N bytes.
+                        val suffix = endStr.toLongOrNull() ?: 0L
+                        rangeStart = (fileLen - suffix).coerceAtLeast(0L)
+                    } else {
+                        rangeStart = startStr.toLongOrNull() ?: 0L
+                        if (endStr.isNotEmpty()) rangeEnd = endStr.toLongOrNull() ?: (fileLen - 1L)
+                    }
                 }
 
                 if (rangeStart > rangeEnd || rangeStart >= fileLen) {
                     val errResp = newFixedLengthResponse(Response.Status.RANGE_NOT_SATISFIABLE, "text/plain", "")
                     errResp.addHeader("Content-Range", "bytes */$fileLen")
-                    return addCorsHeaders(errResp)
+                    return finalizeResponse(errResp)
                 }
 
                 if (rangeEnd >= fileLen) rangeEnd = fileLen - 1L
@@ -369,8 +380,8 @@ class EmbeddedHttpServer @Inject constructor(
                 )
                 response.addHeader("Content-Range", "bytes $rangeStart-$rangeEnd/$fileLen")
                 response.addHeader("Accept-Ranges", "bytes")
-                response.addHeader("Content-Disposition", "inline; filename=\"${targetFile.name}\"")
-                return addCorsHeaders(response)
+                response.addHeader("Content-Disposition", contentDisposition("inline", targetFile.name))
+                return finalizeResponse(response)
             } else {
                 val fis = FileInputStream(targetFile)
                 val response = newFixedLengthResponse(
@@ -380,8 +391,8 @@ class EmbeddedHttpServer @Inject constructor(
                     fileLen
                 )
                 response.addHeader("Accept-Ranges", "bytes")
-                response.addHeader("Content-Disposition", "inline; filename=\"${targetFile.name}\"")
-                return addCorsHeaders(response)
+                response.addHeader("Content-Disposition", contentDisposition("inline", targetFile.name))
+                return finalizeResponse(response)
             }
         }
 
@@ -395,12 +406,12 @@ class EmbeddedHttpServer @Inject constructor(
 
         private fun handleUpload(session: IHTTPSession): Response {
             val relPath = session.parms["path"] ?: ""
-            val targetDir = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val targetDir = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
             )
 
             if (targetDir != storageRoot && isInsideSystemOrHiddenFolder(targetDir)) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Upload to system directory is restricted\"}")
                 )
             }
@@ -411,6 +422,42 @@ class EmbeddedHttpServer @Inject constructor(
             // multipart regex bug where filenames containing single quotes are truncated (e.g. "Sid Meier's" -> "Sid Meier")
             val explicitFileName = session.headers["x-file-name"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
                 ?: session.parms["filename"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
+
+            // The web UI posts the file as the raw body (see webshare/index.html): written
+            // straight to its destination, so an upload is limited only by free space. The
+            // multipart branch below stays for other clients (curl -F, a plain HTML form).
+            val contentType = session.headers["content-type"].orEmpty()
+            if (!contentType.startsWith("multipart/", ignoreCase = true)) {
+                val length = session.headers["content-length"]?.toLongOrNull()
+                    ?: return finalizeResponse(newFixedLengthResponse(
+                        Response.Status.LENGTH_REQUIRED, "application/json", "{\"error\":\"Content-Length required\"}"
+                    ))
+                val name = File(explicitFileName ?: "upload_${System.currentTimeMillis()}").name
+                if (isSystemOrHiddenName(name, isDirectory = false)) {
+                    return finalizeResponse(newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json", "{\"error\":\"That name is not allowed\"}"
+                    ))
+                }
+                return try {
+                    val written = writeUploadStream(targetDir, name, session.inputStream, length)
+                    MediaScannerConnection.scanFile(appContext, arrayOf(written.absolutePath), null, null)
+                    finalizeResponse(newFixedLengthResponse(
+                        Response.Status.OK, "application/json",
+                        JSONObject().put("success", true).put("count", 1).put("name", written.name).toString()
+                    ))
+                } catch (e: NotEnoughSpaceException) {
+                    finalizeResponse(newFixedLengthResponse(
+                        Response.Status.INTERNAL_ERROR, "application/json",
+                        JSONObject().put("error", "Not enough space: ${e.message}").toString()
+                    ))
+                } catch (e: Exception) {
+                    android.util.Log.e("EmbeddedHttpServer", "Upload of $name failed", e)
+                    finalizeResponse(newFixedLengthResponse(
+                        Response.Status.INTERNAL_ERROR, "application/json",
+                        JSONObject().put("error", e.message ?: "Upload failed").toString()
+                    ))
+                }
+            }
 
             val files = HashMap<String, String>()
             session.parseBody(files)
@@ -428,16 +475,24 @@ class EmbeddedHttpServer @Inject constructor(
                     File(tempFilePath).delete()
                     continue
                 }
-                val destFile = File(targetDir, safeFileName)
+                // A same-named file used to be overwritten without warning, destroying the file
+                // already on the device; keep both instead, like the app's own paste does.
+                val destFile = com.antigravity.filemanager.data.local.storage.uniqueFile(targetDir, safeFileName)
 
                 val tempFile = File(tempFilePath)
                 if (tempFile.exists()) {
-                    FileInputStream(tempFile).use { input ->
-                        FileOutputStream(destFile).use { output ->
-                            input.copyTo(output)
+                    try {
+                        FileInputStream(tempFile).use { input ->
+                            FileOutputStream(destFile).use { output ->
+                                input.copyTo(output)
+                            }
                         }
+                    } catch (e: Exception) {
+                        destFile.delete() // don't leave a truncated file behind
+                        throw e
+                    } finally {
+                        tempFile.delete()
                     }
-                    tempFile.delete()
                     uploadedPaths.add(destFile.absolutePath)
                 }
             }
@@ -452,7 +507,7 @@ class EmbeddedHttpServer @Inject constructor(
                 )
             }
 
-            return addCorsHeaders(newFixedLengthResponse(
+            return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
                 "{\"success\":true,\"count\":${uploadedPaths.size}}"
@@ -463,28 +518,28 @@ class EmbeddedHttpServer @Inject constructor(
             val relPath = session.parms["path"] ?: ""
             val folderName = session.parms["name"]?.trim() ?: ""
 
-            if (folderName.isEmpty() || folderName.contains("/") || folderName.contains("\\")) {
-                return addCorsHeaders(newFixedLengthResponse(
+            com.antigravity.filemanager.data.local.storage.invalidFileNameReason(folderName)?.let { reason ->
+                return finalizeResponse(newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
-                    "{\"error\":\"Invalid folder name\"}"
+                    JSONObject().put("error", reason).toString()
                 ))
             }
 
             if (isSystemOrHiddenName(folderName, isDirectory = true)) {
-                return addCorsHeaders(newFixedLengthResponse(
+                return finalizeResponse(newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
                     "{\"error\":\"Cannot create system or hidden folder\"}"
                 ))
             }
 
-            val parentDir = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val parentDir = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid parent path\"}")
             )
 
             if (parentDir != storageRoot && isInsideSystemOrHiddenFolder(parentDir)) {
-                return addCorsHeaders(
+                return finalizeResponse(
                     newFixedLengthResponse(Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Cannot create folder inside system directory\"}")
                 )
             }
@@ -492,7 +547,7 @@ class EmbeddedHttpServer @Inject constructor(
             val newDir = File(parentDir, folderName)
             val created = newDir.mkdirs()
 
-            return addCorsHeaders(newFixedLengthResponse(
+            return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
                 "{\"success\":$created}"
@@ -501,12 +556,12 @@ class EmbeddedHttpServer @Inject constructor(
 
         private fun handleDelete(session: IHTTPSession): Response {
             val relPath = session.parms["path"] ?: ""
-            val target = resolveSafeFile(relPath) ?: return addCorsHeaders(
+            val target = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
             )
 
             if (!target.exists() || target.canonicalPath == storageRoot.canonicalPath || isInsideSystemOrHiddenFolder(target)) {
-                return addCorsHeaders(newFixedLengthResponse(
+                return finalizeResponse(newFixedLengthResponse(
                     Response.Status.BAD_REQUEST,
                     "application/json",
                     "{\"error\":\"Cannot delete system folder, hidden item, or root directory\"}"
@@ -514,17 +569,27 @@ class EmbeddedHttpServer @Inject constructor(
             }
 
             val deleted = target.deleteRecursively()
-            return addCorsHeaders(newFixedLengthResponse(
+            return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
                 "{\"success\":$deleted}"
             ))
         }
 
-        private fun addCorsHeaders(response: Response): Response {
-            response.addHeader("Access-Control-Allow-Origin", "*")
-            response.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            response.addHeader("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token")
+        /** Headers are written as ASCII, so a raw non-ASCII name (e.g. Vietnamese) reached the
+         * browser as "?" and a quote in the name broke the header. RFC 6266: an ASCII fallback
+         * plus the exact UTF-8 name in filename*. */
+        private fun contentDisposition(type: String, fileName: String): String {
+            val fallback = fileName.map { if (it.code in 0x20..0x7e && it != '"' && it != '\\') it else '_' }.joinToString("")
+            val encoded = java.net.URLEncoder.encode(fileName, "UTF-8").replace("+", "%20")
+            return "$type; filename=\"$fallback\"; filename*=UTF-8''$encoded"
+        }
+
+        // The web UI is served from this same origin, so no CORS headers are sent: a wildcard
+        // Access-Control-Allow-Origin let any website opened by anyone on the LAN read (and, with
+        // no password set, list/download) the device's files through the visitor's browser.
+        private fun finalizeResponse(response: Response): Response {
+            response.addHeader("X-Content-Type-Options", "nosniff")
             return response
         }
     }

@@ -10,6 +10,10 @@ import com.antigravity.filemanager.data.local.db.TrashEntity
 import com.antigravity.filemanager.data.local.preferences.PreferenceManager
 import com.antigravity.filemanager.data.local.storage.FileOperationsHelper
 import com.antigravity.filemanager.data.local.storage.LocalFileScanner
+import com.antigravity.filemanager.data.local.storage.FileCopyEntry
+import com.antigravity.filemanager.data.local.storage.collectFileCopyEntries
+import com.antigravity.filemanager.data.local.storage.directorySize
+import com.antigravity.filemanager.data.local.storage.uniqueFile
 import com.antigravity.filemanager.data.remote.cloud.CloudManager
 import com.antigravity.filemanager.data.remote.ftp.FtpServerService
 import com.antigravity.filemanager.domain.model.*
@@ -38,11 +42,7 @@ internal suspend fun healZeroTrashFolders(database: AppDatabase) {
                 continue
             }
             if (item.isDirectory && item.fileSize <= 0L) {
-                val computedSize = try {
-                    file.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-                } catch (e: Exception) {
-                    0L
-                }
+                val computedSize = directorySize(file)
                 if (computedSize > 0L) {
                     database.trashDao().updateFileSize(item.id, computedSize)
                 }
@@ -432,15 +432,17 @@ class FileRepositoryImpl @Inject constructor(
     override fun isArchiveEncrypted(archiveFilePath: String): Boolean =
         operationsHelper.isArchiveEncrypted(archiveFilePath)
 
-    override suspend fun zipFiles(
-        sourcePaths: List<String>,
-        targetZipPath: String,
-        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)?
-    ): Result<FileItem> =
-        compressFiles(sourcePaths, targetZipPath, onProgress)
+    override suspend fun listArchiveEntries(archiveFilePath: String, password: String?) =
+        operationsHelper.listArchiveEntries(archiveFilePath, password)
 
-    override suspend fun extractZip(zipFilePath: String, targetDirectory: String): Result<com.antigravity.filemanager.domain.model.ExtractResult> =
-        extractArchive(zipFilePath, targetDirectory)
+    override suspend fun extractArchiveEntries(
+        archiveFilePath: String,
+        selectedPaths: List<String>,
+        baseDir: String,
+        targetDirectory: String,
+        password: String?
+    ): Result<List<java.io.File>> =
+        operationsHelper.extractArchiveEntries(archiveFilePath, selectedPaths, baseDir, targetDirectory, password)
 
     override suspend fun getFileDetails(filePath: String): FileItem? = withContext(Dispatchers.IO) {
         val f = File(filePath)
@@ -482,37 +484,22 @@ class RecycleBinRepositoryImpl @Inject constructor(
 
     override fun observeTrashItems(): Flow<List<TrashItem>> =
         database.trashDao().observeAll().map { list ->
-            val missingIds = mutableListOf<Long>()
-            val validList = list.filter { entity ->
-                if (!File(entity.trashPath).exists()) {
-                    missingIds.add(entity.id)
-                    false
-                } else {
-                    true
-                }
-            }
-            if (missingIds.isNotEmpty()) {
-                withContext(Dispatchers.IO) {
-                    try { database.trashDao().deleteByIds(missingIds) } catch (e: Exception) {}
-                }
+            val (validList, missing) = list.partition { File(it.trashPath).exists() }
+            if (missing.isNotEmpty()) {
+                try { database.trashDao().deleteByIds(missing.map { it.id }) } catch (e: Exception) {}
             }
             validList.map { entity ->
                 var displayEntity = entity
                 if (entity.isDirectory && entity.fileSize <= 0L) {
-                    val file = File(entity.trashPath)
-                    if (file.exists()) {
-                        val computed = try {
-                            file.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-                        } catch (e: Exception) { 0L }
-                        if (computed > 0L) {
-                            database.trashDao().updateFileSize(entity.id, computed)
-                            displayEntity = entity.copy(fileSize = computed)
-                        }
+                    val computed = directorySize(File(entity.trashPath))
+                    if (computed > 0L) {
+                        database.trashDao().updateFileSize(entity.id, computed)
+                        displayEntity = entity.copy(fileSize = computed)
                     }
                 }
                 displayEntity.toDomain()
             }
-        }
+        }.flowOn(Dispatchers.IO) // exists()/directory walks per emission must stay off the main thread
 
     override suspend fun getTrashItems(): List<TrashItem> = withContext(Dispatchers.IO) {
         healZeroTrashFolders(database)
@@ -525,91 +512,47 @@ class RecycleBinRepositoryImpl @Inject constructor(
     ): Result<Int> = withContext(Dispatchers.IO) {
         try {
             var count = 0
+            suspend fun record(source: File, trashFile: File, size: Long, isDir: Boolean) {
+                database.trashDao().insert(
+                    TrashEntity(
+                        originalPath = source.absolutePath,
+                        trashPath = trashFile.absolutePath,
+                        fileName = source.name,
+                        fileSize = size,
+                        deletedTimestamp = System.currentTimeMillis(),
+                        isDirectory = isDir
+                    )
+                )
+                count++
+            }
+
             // Phase 1: renameTo() is atomic and effectively instant for a same-filesystem move —
             // even a folder with thousands of files inside moves to trash in one O(1) call, so
             // there's nothing meaningful to report progress on for these. Only a genuine
             // cross-filesystem case (trash root lives on internal storage; a folder being deleted
-            // from an SD card can't renameTo() there) falls through to the slow fallback, handled
-            // for real in phase 2 below — that fallback used to be one opaque copyRecursively()
-            // call with zero visibility inside it no matter how big the folder was (same bug,
-            // same fix as FileOperationsHelper.copy/move and zipFiles' addFolder() replacement
-            // elsewhere in this codebase).
+            // from an SD card can't renameTo() there) falls through to the per-file fallback in
+            // phase 2 below.
             data class PendingItem(val source: File, val trashFile: File, val size: Long, val isDir: Boolean)
             val fallbacks = mutableListOf<PendingItem>()
             for (path in filePaths) {
                 val source = File(path)
                 if (!source.exists()) continue
-                val trashFile = File(trashRoot, "${System.currentTimeMillis()}_${source.name}")
+                // Unique per item: two same-named files trashed within the same millisecond used
+                // to share one trash path, and renameTo() silently replaced the first one.
+                val trashFile = uniqueFile(trashRoot, "${System.currentTimeMillis()}_${source.name}")
                 val isDir = source.isDirectory
-                val size = if (isDir) {
-                    try {
-                        source.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-                    } catch (e: Exception) {
-                        0L
-                    }
-                } else {
-                    source.length()
-                }
+                val size = if (isDir) directorySize(source) else source.length()
                 if (source.renameTo(trashFile)) {
-                    database.trashDao().insert(
-                        TrashEntity(
-                            originalPath = source.absolutePath,
-                            trashPath = trashFile.absolutePath,
-                            fileName = source.name,
-                            fileSize = size,
-                            deletedTimestamp = System.currentTimeMillis(),
-                            isDirectory = isDir
-                        )
-                    )
-                    count++
+                    record(source, trashFile, size, isDir)
                 } else {
                     fallbacks.add(PendingItem(source, trashFile, size, isDir))
                 }
             }
 
-            // Phase 2: genuine cross-filesystem fallback. Flattened per item (not globally) so one
-            // item failing partway through its own copy doesn't abort every other item still
-            // pending — matches phase 1's per-item error isolation — while still sharing one
-            // running counter/total across all of them for a single, stable progress bar.
-            val perItemEntries = fallbacks.map { item ->
-                val fileEntries = mutableListOf<com.antigravity.filemanager.data.local.storage.FileCopyEntry>()
-                val emptyDirEntries = mutableListOf<com.antigravity.filemanager.data.local.storage.FileCopyEntry>()
-                com.antigravity.filemanager.data.local.storage.collectFileCopyEntries(item.source, item.trashFile, fileEntries, emptyDirEntries)
-                Triple(item, fileEntries, emptyDirEntries)
-            }
-            val total = perItemEntries.sumOf { it.second.size + it.third.size }
-            var current = 0
-            for ((item, fileEntries, emptyDirEntries) in perItemEntries) {
-                val moved = try {
-                    for (entry in emptyDirEntries) {
-                        current++
-                        onProgress?.invoke(entry.source.name, current, total)
-                        if (!entry.dest.exists()) entry.dest.mkdirs()
-                    }
-                    for (entry in fileEntries) {
-                        current++
-                        onProgress?.invoke(entry.source.name, current, total)
-                        entry.dest.parentFile?.mkdirs()
-                        entry.source.copyTo(entry.dest, overwrite = true)
-                    }
-                    item.source.deleteRecursively()
-                    true
-                } catch (e: Exception) {
-                    false
-                }
-                if (moved) {
-                    database.trashDao().insert(
-                        TrashEntity(
-                            originalPath = item.source.absolutePath,
-                            trashPath = item.trashFile.absolutePath,
-                            fileName = item.source.name,
-                            fileSize = item.size,
-                            deletedTimestamp = System.currentTimeMillis(),
-                            isDirectory = item.isDir
-                        )
-                    )
-                    count++
-                }
+            // Phase 2: genuine cross-filesystem fallback.
+            val moved = moveTreesByCopy(fallbacks.map { it.source to it.trashFile }, onProgress)
+            fallbacks.forEachIndexed { index, item ->
+                if (moved[index]) record(item.source, item.trashFile, item.size, item.isDir)
             }
             if (count > 0) mediaChangeSignal.notifyChanged()
             Result.success(count)
@@ -627,26 +570,20 @@ class RecycleBinRepositoryImpl @Inject constructor(
             var restored = 0
             val scannedPaths = mutableListOf<String>()
 
-            // renameTo() alone silently fails on a lot of real devices/paths — same reason
-            // FileOperationsHelper.move() below already falls back to copy+delete instead of
-            // trusting it outright. Restore had no such fallback, so on any device/path where
-            // renameTo() just returns false, the file quietly never came back (still sitting
-            // in .filemanager_trash) with the DB row untouched — restored never incremented,
-            // no error surfaced anywhere, reading as "Restore doesn't do anything."
-            //
-            // Same two-phase progress split as moveToTrash: renameTo() is atomic/instant for a
-            // same-filesystem restore regardless of folder size, so there's nothing to report
-            // progress on for those; only a genuine renameTo() failure needs the slow per-file
-            // fallback, which used to be one opaque copyRecursively() call with zero visibility
-            // no matter how long it took — this was also the only restore/delete operation with
-            // no progress feedback of any kind, which read as the app hanging.
+            // renameTo() alone silently fails on a lot of real devices/paths (cross-filesystem,
+            // permissions), so anything it can't handle goes through the same per-file
+            // copy+delete fallback, with progress, as moveToTrash.
             data class PendingItem(val entity: TrashEntity, val trashFile: File, val originalFile: File)
             val fallbacks = mutableListOf<PendingItem>()
             for (entity in entities) {
                 val trashFile = File(entity.trashPath)
-                val originalFile = File(entity.originalPath)
                 if (!trashFile.exists()) continue
-                originalFile.parentFile?.mkdirs()
+                val original = File(entity.originalPath)
+                val parent = original.parentFile
+                parent?.mkdirs()
+                // Something new may have been created at the original path since the delete —
+                // renameTo() would silently replace it, so restore next to it instead.
+                val originalFile = if (parent != null) uniqueFile(parent, original.name) else original
                 if (trashFile.renameTo(originalFile)) {
                     database.trashDao().deleteByIds(listOf(entity.id))
                     scannedPaths.add(originalFile.absolutePath)
@@ -656,33 +593,9 @@ class RecycleBinRepositoryImpl @Inject constructor(
                 }
             }
 
-            val perItemEntries = fallbacks.map { item ->
-                val fileEntries = mutableListOf<com.antigravity.filemanager.data.local.storage.FileCopyEntry>()
-                val emptyDirEntries = mutableListOf<com.antigravity.filemanager.data.local.storage.FileCopyEntry>()
-                com.antigravity.filemanager.data.local.storage.collectFileCopyEntries(item.trashFile, item.originalFile, fileEntries, emptyDirEntries)
-                Triple(item, fileEntries, emptyDirEntries)
-            }
-            val total = perItemEntries.sumOf { it.second.size + it.third.size }
-            var current = 0
-            for ((item, fileEntries, emptyDirEntries) in perItemEntries) {
-                val moved = try {
-                    for (entry in emptyDirEntries) {
-                        current++
-                        onProgress?.invoke(entry.source.name, current, total)
-                        if (!entry.dest.exists()) entry.dest.mkdirs()
-                    }
-                    for (entry in fileEntries) {
-                        current++
-                        onProgress?.invoke(entry.source.name, current, total)
-                        entry.dest.parentFile?.mkdirs()
-                        entry.source.copyTo(entry.dest, overwrite = true)
-                    }
-                    item.trashFile.deleteRecursively()
-                    true
-                } catch (e: Exception) {
-                    false
-                }
-                if (moved) {
+            val moved = moveTreesByCopy(fallbacks.map { it.trashFile to it.originalFile }, onProgress)
+            fallbacks.forEachIndexed { index, item ->
+                if (moved[index]) {
                     database.trashDao().deleteByIds(listOf(item.entity.id))
                     scannedPaths.add(item.originalFile.absolutePath)
                     restored++
@@ -700,6 +613,45 @@ class RecycleBinRepositoryImpl @Inject constructor(
             Result.success(restored)
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    /** Copy+delete fallback for moves renameTo() can't do. Each (source, dest) pair is flattened
+     * into per-file work sharing one progress counter; a pair that fails partway has its partial
+     * destination removed and its source left untouched. Returns per-pair success. */
+    private fun moveTreesByCopy(
+        pairs: List<Pair<File, File>>,
+        onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)?
+    ): List<Boolean> {
+        val perItemEntries = pairs.map { (source, dest) ->
+            val fileEntries = mutableListOf<FileCopyEntry>()
+            val dirEntries = mutableListOf<FileCopyEntry>()
+            collectFileCopyEntries(source, dest, fileEntries, dirEntries)
+            fileEntries to dirEntries
+        }
+        val total = perItemEntries.sumOf { it.first.size + it.second.size }
+        var current = 0
+        return pairs.mapIndexed { index, (source, dest) ->
+            val (fileEntries, dirEntries) = perItemEntries[index]
+            try {
+                for (entry in dirEntries) {
+                    current++
+                    onProgress?.invoke(entry.source.name, current, total)
+                    if (!entry.dest.exists()) entry.dest.mkdirs()
+                }
+                for (entry in fileEntries) {
+                    current++
+                    onProgress?.invoke(entry.source.name, current, total)
+                    entry.dest.parentFile?.mkdirs()
+                    entry.source.copyTo(entry.dest, overwrite = true)
+                }
+                source.deleteRecursively()
+                true
+            } catch (e: Exception) {
+                android.util.Log.e("RecycleBinRepository", "Copy fallback failed: ${source.absolutePath} -> ${dest.absolutePath}", e)
+                try { dest.deleteRecursively() } catch (_: Exception) {}
+                false
+            }
         }
     }
 

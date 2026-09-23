@@ -37,6 +37,13 @@ fun DuplicateFilesScreen(
     viewModel: StorageAnalysisViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val toastContext = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(uiState.toastMessage) {
+        uiState.toastMessage?.let {
+            android.widget.Toast.makeText(toastContext, it, android.widget.Toast.LENGTH_SHORT).show()
+            viewModel.clearToast()
+        }
+    }
     val title = "Duplicate files"
     val groups = uiState.data.duplicateFileGroups
 
@@ -54,7 +61,11 @@ fun DuplicateFilesScreen(
                 viewModel.deleteDuplicates(selectedPaths.toList()) { selectedPaths = emptySet() }
                 showDeleteDialog = false
             },
-            onDismiss = { showDeleteDialog = false }
+            onDismiss = { showDeleteDialog = false },
+            // These screens always move to the Recycle Bin; the checkbox was shown but ignored.
+            showMoveToTrashOption = false,
+            defaultMoveToTrash = true,
+            message = "Move ${selectedPaths.size} item(s) to the Recycle Bin?"
         )
     }
 

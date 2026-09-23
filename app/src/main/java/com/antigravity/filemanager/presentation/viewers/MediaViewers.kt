@@ -72,13 +72,18 @@ private val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", 
 // needs to be downloaded on demand (see CloudViewerSession / CloudMediaViewerViewModel).
 private sealed class ViewerEntry {
     abstract val entryName: String
+    /** Identity for resolved-media caches: the name alone collides when entries come from
+     * several folders (e.g. search results with two IMG_0001.jpg). */
+    abstract val key: String
 
     data class Local(val file: File) : ViewerEntry() {
         override val entryName get() = file.name
+        override val key get() = file.absolutePath
     }
 
     data class Cloud(val item: FileItem) : ViewerEntry() {
         override val entryName get() = item.name
+        override val key get() = item.path
     }
 }
 
@@ -159,6 +164,10 @@ fun ImageViewerScreen(
         val idx = imageEntries.indexOfFirst { it.entryName == initialDisplayName }
         if (idx >= 0) idx else 0
     }
+    val initialKey = imageEntries.firstOrNull { it.entryName == initialDisplayName }?.key ?: initialDisplayName
+    // Per entry: bumped to retry a failed resolve; present in failedCloudMedia while failed.
+    val resolveAttempt = remember { mutableStateMapOf<String, Int>() }
+    val failedCloudMedia = remember { mutableStateMapOf<String, String>() }
 
     val pagerState = rememberPagerState(
         initialPage = initialIndex,
@@ -177,7 +186,7 @@ fun ImageViewerScreen(
                 } else {
                     ResolvedImageMedia.LocalFile(File(actualInitialPath))
                 }
-                put(initialDisplayName, media)
+                put(initialKey, media)
             }
         }
     }
@@ -185,7 +194,7 @@ fun ImageViewerScreen(
     val currentEntry = imageEntries.getOrNull(pagerState.currentPage)
     val currentMedia: ResolvedImageMedia? = when (currentEntry) {
         is ViewerEntry.Local -> ResolvedImageMedia.LocalFile(currentEntry.file)
-        is ViewerEntry.Cloud -> resolvedCloudMedia[currentEntry.entryName]
+        is ViewerEntry.Cloud -> resolvedCloudMedia[currentEntry.key]
         null -> if (isInitialStream) ResolvedImageMedia.StreamUri(actualInitialPath) else ResolvedImageMedia.LocalFile(File(actualInitialPath))
     }
     val currentLocalFile: File? = (currentMedia as? ResolvedImageMedia.LocalFile)?.file
@@ -246,7 +255,7 @@ fun ImageViewerScreen(
             isPreparingAction = false
             result.getOrNull()?.let { media ->
                 if (media is ResolvedMedia.LocalFile) {
-                    resolvedCloudMedia[cloudEntry.entryName] = ResolvedImageMedia.LocalFile(media.file)
+                    resolvedCloudMedia[cloudEntry.key] = ResolvedImageMedia.LocalFile(media.file)
                     onReady(media.file)
                 }
             }
@@ -409,25 +418,24 @@ fun ImageViewerScreen(
                 val entry = imageEntries[page]
                 val resolvedMedia = when (entry) {
                     is ViewerEntry.Local -> ResolvedImageMedia.LocalFile(entry.file)
-                    is ViewerEntry.Cloud -> resolvedCloudMedia[entry.entryName]
+                    is ViewerEntry.Cloud -> resolvedCloudMedia[entry.key]
                 }
 
                 if (resolvedMedia == null) {
-                    LaunchedEffect(entry.entryName, cloudAccountId) {
+                    LaunchedEffect(entry.key, cloudAccountId, resolveAttempt[entry.key]) {
                         val cloudEntry = entry as? ViewerEntry.Cloud ?: return@LaunchedEffect
                         val result = cloudMediaViewerViewModel.resolveMedia(cloudAccountId!!, cloudEntry.item)
+                        result.onFailure { failedCloudMedia[cloudEntry.key] = it.message ?: "Could not load this file" }
                         result.getOrNull()?.let { media ->
-                            resolvedCloudMedia[entry.entryName] = when (media) {
+                            resolvedCloudMedia[entry.key] = when (media) {
                                 is ResolvedMedia.LocalFile -> ResolvedImageMedia.LocalFile(media.file)
                                 is ResolvedMedia.Stream -> ResolvedImageMedia.StreamUri(media.url)
                             }
                         }
                     }
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(color = TealPrimary)
+                    CloudResolvePlaceholder(failedCloudMedia[entry.key]) {
+                        failedCloudMedia.remove(entry.key)
+                        resolveAttempt[entry.key] = (resolveAttempt[entry.key] ?: 0) + 1
                     }
                 } else {
                     ZoomableImagePage(
@@ -620,6 +628,10 @@ fun VideoPlayerScreen(
         val idx = videoEntries.indexOfFirst { it.entryName == initialDisplayName }
         if (idx >= 0) idx else 0
     }
+    val initialKey = videoEntries.firstOrNull { it.entryName == initialDisplayName }?.key ?: initialDisplayName
+    // Per entry: bumped to retry a failed resolve; present in failedCloudMedia while failed.
+    val resolveAttempt = remember { mutableStateMapOf<String, Int>() }
+    val failedCloudMedia = remember { mutableStateMapOf<String, String>() }
 
     val pagerState = rememberPagerState(
         initialPage = initialIndex,
@@ -634,7 +646,7 @@ fun VideoPlayerScreen(
                 } else {
                     ResolvedVideoMedia.LocalFile(File(actualInitialPath))
                 }
-                put(initialDisplayName, media)
+                put(initialKey, media)
             }
         }
     }
@@ -642,7 +654,7 @@ fun VideoPlayerScreen(
     val currentEntry = videoEntries.getOrNull(pagerState.currentPage)
     val currentMedia: ResolvedVideoMedia? = when (currentEntry) {
         is ViewerEntry.Local -> ResolvedVideoMedia.LocalFile(currentEntry.file)
-        is ViewerEntry.Cloud -> resolvedCloudMedia[currentEntry.entryName]
+        is ViewerEntry.Cloud -> resolvedCloudMedia[currentEntry.key]
         null -> if (isInitialStream) ResolvedVideoMedia.StreamUri(Uri.parse(actualInitialPath)) else ResolvedVideoMedia.LocalFile(File(actualInitialPath))
     }
     val currentLocalFile: File? = (currentMedia as? ResolvedVideoMedia.LocalFile)?.file
@@ -670,7 +682,7 @@ fun VideoPlayerScreen(
             isPreparingAction = false
             result.getOrNull()?.let { media ->
                 if (media is ResolvedMedia.LocalFile) {
-                    resolvedCloudMedia[cloudEntry.entryName] = ResolvedVideoMedia.LocalFile(media.file)
+                    resolvedCloudMedia[cloudEntry.key] = ResolvedVideoMedia.LocalFile(media.file)
                     onReady(media.file)
                 }
             }
@@ -821,27 +833,26 @@ fun VideoPlayerScreen(
                 val isCurrent = page == pagerState.currentPage
                 val resolvedMedia = when (entry) {
                     is ViewerEntry.Local -> ResolvedVideoMedia.LocalFile(entry.file)
-                    is ViewerEntry.Cloud -> resolvedCloudMedia[entry.entryName]
+                    is ViewerEntry.Cloud -> resolvedCloudMedia[entry.key]
                 }
 
                 if (resolvedMedia == null) {
                     if (isCurrent) {
-                        LaunchedEffect(entry.entryName, cloudAccountId) {
+                        LaunchedEffect(entry.key, cloudAccountId, resolveAttempt[entry.key]) {
                             val cloudEntry = entry as? ViewerEntry.Cloud ?: return@LaunchedEffect
                             val result = cloudMediaViewerViewModel.resolveMedia(cloudAccountId!!, cloudEntry.item)
+                            result.onFailure { failedCloudMedia[cloudEntry.key] = it.message ?: "Could not load this file" }
                             result.getOrNull()?.let { media ->
-                                resolvedCloudMedia[cloudEntry.entryName] = when (media) {
+                                resolvedCloudMedia[cloudEntry.key] = when (media) {
                                     is ResolvedMedia.LocalFile -> ResolvedVideoMedia.LocalFile(media.file)
                                     is ResolvedMedia.Stream -> ResolvedVideoMedia.StreamUri(Uri.parse(media.url))
                                 }
                             }
                         }
                     }
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(color = TealPrimary)
+                    CloudResolvePlaceholder(failedCloudMedia[entry.key]) {
+                        failedCloudMedia.remove(entry.key)
+                        resolveAttempt[entry.key] = (resolveAttempt[entry.key] ?: 0) + 1
                     }
                 } else if (isCurrent) {
                     val playbackUri = when (resolvedMedia) {
@@ -915,6 +926,23 @@ fun VideoPlayerScreen(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/** Shown while a cloud page resolves; on failure shows the error with a retry instead of
+ * spinning forever (a failed resolve used to be silently ignored). */
+@Composable
+private fun CloudResolvePlaceholder(error: String?, onRetry: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        if (error == null) {
+            CircularProgressIndicator(color = TealPrimary)
+        } else {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
+                Text(error, color = TextSecondary, fontSize = 14.sp)
+                Spacer(modifier = Modifier.height(12.dp))
+                TextButton(onClick = onRetry) { Text("Retry", color = TealPrimary, fontWeight = FontWeight.SemiBold) }
             }
         }
     }

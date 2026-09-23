@@ -12,7 +12,6 @@ import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FolderBadgeType
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -35,33 +34,50 @@ class CloudManager @Inject constructor(
         // below) so whatever already piled up in cloud_downloads/ before this cap existed gets
         // trimmed down immediately, instead of only shrinking gradually the next time each account
         // happens to download something new.
-        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { trimCloudDownloadsCache() }
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            trimCloudDownloadsCache()
+            // filesDir/cloud_accounts/ used to hold a permanent private duplicate of every file
+            // ever uploaded (plus empty mirrors of created folders) — pure storage waste, since the
+            // originals are still on the device and the real copies are in the cloud. Nothing
+            // reads it anymore; reclaim whatever older versions left behind.
+            try { File(context.filesDir, "cloud_accounts").deleteRecursively() } catch (e: Exception) {}
+        }
     }
 
-    private val folderIdCache = ConcurrentHashMap<String, String>()
-    private val nodeKeyCache = ConcurrentHashMap<String, String>()
-    private val sessionNodesCache = ConcurrentHashMap<String, Pair<String, List<MegaNode>>>()
+    // Display path -> provider id/handle, remembered from listings. Kept per account: two
+    // accounts routinely share display paths ("/My Drive/Photos", "/Documents"), and one shared
+    // map handed account B the ids of account A's folders — "folder shows empty" at best.
+    private val folderIdCaches = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
     private val masterKeyCache = ConcurrentHashMap<String, String>()
 
-    data class MegaNode(
-        val id: String,
-        val p: String,
-        val name: String,
-        val isDir: Boolean,
-        val size: Long,
-        val ts: Long,
-        val t: Int,
-        val k: String = ""
-    )
+    private fun ids(accountId: String): ConcurrentHashMap<String, String> =
+        folderIdCaches.getOrPut(accountId) { ConcurrentHashMap() }
+
+    private fun rememberId(accountId: String, displayPath: String, name: String, id: String) {
+        val cache = ids(accountId)
+        cache[displayPath] = id
+        cache[displayPath.trimStart('/')] = id
+        cache[name] = id
+        cache[id] = id
+    }
+
+    private fun forgetId(accountId: String, displayPath: String, id: String? = null) {
+        val cache = ids(accountId)
+        cache.remove(displayPath)
+        cache.remove(displayPath.trimStart('/'))
+        if (id != null) cache.remove(id)
+    }
+
+    private fun isRootPath(path: String) = path == "/" || path.isBlank()
+
+    private fun childDisplayPath(parentPath: String, name: String): String =
+        if (isRootPath(parentPath)) "/$name" else "${parentPath.trimEnd('/')}/$name"
 
     // cloud_downloads/<accountId> (see downloadFile below) is used as a permanent "already viewed,
     // don't re-fetch" cache for the media viewer/preview — nothing ever capped its size or evicted
     // old entries, so every full-resolution photo/video ever opened from any connected cloud
-    // account piled up here forever. A system storage-cleaner reporting this app using tens of GB
-    // was this directory, not anything the user could see or manage from inside the app itself.
-    // Trimmed after every successful download into it: oldest-by-last-modified files removed first
-    // until back under the cap, so a photo/video you looked at recently stays cached but one from
-    // months ago eventually makes room for newer ones.
+    // account piled up here forever. Trimmed after every successful download into it:
+    // oldest-by-last-modified files removed first until back under the cap.
     private val cloudDownloadsCacheMaxBytes = 500L * 1024 * 1024 // 500 MB
 
     private suspend fun trimCloudDownloadsCache() = withContext(Dispatchers.IO) {
@@ -79,21 +95,10 @@ class CloudManager @Inject constructor(
         } catch (e: Exception) {}
     }
 
-    //region Account storage & session payload
-    fun getAccountStorageDir(accountId: String, relativePath: String = ""): File {
-        val baseDir = File(context.filesDir, "cloud_accounts/$accountId")
-        if (!baseDir.exists()) {
-            baseDir.mkdirs()
-        }
-
-        val cleaned = relativePath.trimStart('/')
-        return if (cleaned.isEmpty()) baseDir else File(baseDir, cleaned)
-    }
-
+    //region Account session payload
     fun saveSessionPayload(accountId: String, payload: String?) {
         if (payload.isNullOrBlank()) return
         try {
-            sessionNodesCache.remove(accountId)
             masterKeyCache.remove(accountId)
             val sessionDir = File(context.filesDir, "cloud_sessions")
             if (!sessionDir.exists()) sessionDir.mkdirs()
@@ -119,13 +124,14 @@ class CloudManager @Inject constructor(
     fun deleteSessionPayload(accountId: String) {
         // Account-keyed in-memory caches must be dropped here too, otherwise they linger for the
         // life of the process (this manager is a singleton) even after the account is removed.
-        sessionNodesCache.remove(accountId)
+        folderIdCaches.remove(accountId)
         masterKeyCache.remove(accountId)
+        dropboxApi.invalidateTree(accountId)
+        megaApi.invalidateNodeTreeCache(accountId)
         try {
             val file = File(context.filesDir, "cloud_sessions/$accountId.json")
             if (file.exists()) file.delete()
-            val accountDir = File(context.filesDir, "cloud_accounts/$accountId")
-            if (accountDir.exists()) accountDir.deleteRecursively()
+            com.antigravity.filemanager.utils.CloudDownloadCache.accountDir(context, accountId).deleteRecursively()
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -149,25 +155,51 @@ class CloudManager @Inject constructor(
         }
     }
 
-    // Lists cloud files via the real per-provider API, falling back to the local account-mirror
-    // directory only if that call fails outright (e.g. no network, expired session).
-    //
-    // parseSessionNodes()/sessionNodesCache used to be checked FIRST here, short-circuiting the
-    // real API with whatever a WebView-DOM-scrape had last saved to session payload — dating
-    // from before any provider had a real API client. That scrape flow (CloudLoginWebViewDialog)
-    // is dead now (MEGA logs in natively, Drive/Dropbox use real OAuth clients below), so nothing
-    // populates a session payload anymore and the check was permanently a no-op — but it was a
-    // live landmine: it would have silently served stale/wrong listings again the moment anything
-    // ever wrote to that cache. Removed so this function has exactly one source of truth per call.
+    /** Every MEGA call needs the master key in `refreshToken` to decrypt node keys/names. It may
+     * instead only live in the imported session payload, so fall back to that — for every MEGA
+     * operation, not just some of them. */
+    private fun megaAccount(account: CloudAccount): CloudAccount {
+        if (!account.refreshToken.isNullOrBlank()) return account
+        val masterKey = masterKeyCache[account.id] ?: try {
+            val sessionJson = getSessionPayload(account.id, account.sessionHandle)
+            if (sessionJson.isNotBlank()) {
+                org.json.JSONObject(sessionJson).optString("masterKey", "").also {
+                    if (it.isNotBlank()) masterKeyCache[account.id] = it
+                }
+            } else ""
+        } catch (e: Exception) { "" }
+        return if (masterKey.isNotBlank()) account.copy(refreshToken = masterKey) else account
+    }
+
+    /** Resolves a MEGA display path to a node handle: remembered id, else a walk of the node tree. */
+    private suspend fun megaHandle(account: CloudAccount, displayPath: String): String {
+        val cache = ids(account.id)
+        val cached = cache[displayPath] ?: cache[displayPath.trimStart('/')] ?: displayPath
+        return if (cached.startsWith("/")) megaApi.resolveHandleForDisplayPath(account, cached) ?: cached else cached
+    }
+
+    /** Resolves a Google Drive display path to a file/folder id. */
+    private suspend fun driveId(account: CloudAccount, displayPath: String, allowNameFallback: Boolean = false): String {
+        val cache = ids(account.id)
+        cache[displayPath]?.let { return it }
+        cache[displayPath.trimStart('/')]?.let { return it }
+        if (allowNameFallback) {
+            // resolveIdForDisplayPath only walks folders, so a file path cold-cache miss relies on
+            // its name having been seen in a listing of this account.
+            val fileName = displayPath.substringAfterLast("/")
+            (cache[fileName] ?: cache["/$fileName"])?.let { return it }
+        }
+        return googleDriveApi.resolveIdForDisplayPath(account, displayPath) ?: displayPath
+    }
     //endregion
 
     //region Listing
+    // Lists cloud files via the real per-provider API — the single source of truth per call.
     suspend fun listCloudFiles(account: CloudAccount, remotePath: String, forceFullRefresh: Boolean = false): Result<List<FileItem>> = withContext(Dispatchers.IO) {
         try {
-            // 1. Try remote API if valid token/session exists
-            val remoteResult = when (account.provider) {
+            when (account.provider) {
                 CloudProvider.GOOGLE_DRIVE -> {
-                    if (remotePath == "/" || remotePath.isBlank()) {
+                    if (isRootPath(remotePath)) {
                         // Virtual top-level menu (My Drive / Starred / Shared with me / Shared
                         // Drives) — matches how the stock Drive app and most third-party file
                         // managers group a Drive account, instead of dumping My Drive's raw
@@ -180,13 +212,10 @@ class CloudManager @Inject constructor(
                             FileItem(id = "__shared_drives__", name = "Shared Drives", path = "/Shared Drives", isDirectory = true, mimeType = "application/vnd.google-apps.folder"),
                             FileItem(id = "__trash__", name = "Trash", path = "/Trash", isDirectory = true, mimeType = "application/vnd.google-apps.folder", folderBadgeType = FolderBadgeType.TRASH)
                         )
-                        virtualItems.forEach { item ->
-                            folderIdCache[item.path] = item.id
-                            folderIdCache[item.name] = item.id
-                        }
+                        virtualItems.forEach { rememberId(account.id, it.path, it.name, it.id) }
                         Result.success(virtualItems)
                     } else {
-                        val resolvedId = folderIdCache[remotePath]
+                        val resolvedId = ids(account.id)[remotePath]
                             ?: googleDriveApi.resolveIdForDisplayPath(account, remotePath)
                             ?: remotePath.trimStart('/')
                         val result = when (resolvedId) {
@@ -196,169 +225,66 @@ class CloudManager @Inject constructor(
                             "__trash__" -> googleDriveApi.listTrash(account)
                             else -> googleDriveApi.listFiles(account, resolvedId)
                         }
-                        if (result.isSuccess) {
-                            val list = result.getOrNull() ?: emptyList()
-                            list.forEach { item ->
-                                val itemDisplayPath = "${remotePath.trimEnd('/')}/${item.name}"
-                                folderIdCache[itemDisplayPath] = item.id
-                                folderIdCache[item.id] = item.id
-                                folderIdCache[item.name] = item.id
-                            }
-                            Result.success(list.map { item ->
-                                val itemDisplayPath = "${remotePath.trimEnd('/')}/${item.name}"
+                        result.map { list ->
+                            list.map { item ->
+                                val itemDisplayPath = childDisplayPath(remotePath, item.name)
+                                rememberId(account.id, itemDisplayPath, item.name, item.id)
                                 item.copy(
                                     path = itemDisplayPath,
                                     folderBadgeType = if (item.isDirectory) detectFolderBadge(item.name) else FolderBadgeType.STANDARD
                                 )
-                            })
-                        } else {
-                            result
+                            }
                         }
                     }
                 }
                 CloudProvider.DROPBOX -> {
-                    // The virtual "Trash" entry (and the special "/Trash" path branch that used to
-                    // sit here calling dropboxApi.listTrash) was removed by request — Dropbox has
-                    // no real trash/recycle-bin API (list_folder's include_deleted returns every
-                    // item ever deleted since account creation, not the ~30-day-recoverable set the
-                    // web "Deleted files" page shows — see the extensive investigation this came
-                    // from), so it could only ever show a wildly inaccurate, unfilterable list
-                    // (tens of thousands of long-expired entries next to genuinely recent ones,
-                    // with no deletion date available to tell them apart). dropboxApi.listTrash/
-                    // restoreFile/permanentlyDelete are left in place, unused, rather than deleted
-                    // outright, in case a real trash API becomes available later.
-                    val path = if (remotePath == "/" || remotePath.isBlank()) "" else remotePath
+                    // No virtual "Trash" entry: Dropbox has no real trash API (list_folder's
+                    // include_deleted returns every item ever deleted since account creation, not
+                    // the ~30-day-recoverable set), so it could only show a wildly inaccurate list.
+                    val path = if (isRootPath(remotePath)) "" else remotePath
                     if (forceFullRefresh) {
-                        // A manual pull-to-refresh used to invalidateTree() here, forcing the next
-                        // listing (right below) to rebuild the WHOLE account's tree via
-                        // list_folder(recursive=true) — accurate everywhere, but meant refreshing
-                        // even one small subfolder repaid the cost of relisting the entire account.
-                        // refreshFolderShallow instead re-lists just this one folder and patches
-                        // only its direct children into the existing cached tree, leaving every
-                        // other cached folder as-is — see its own doc comment for the tradeoffs
-                        // (subfolder item counts here come back at 0 until fetchFolderItemCounts's
-                        // fan-out backfills them, and a change made in some OTHER folder around the
-                        // same time won't show until that folder is itself refreshed).
+                        // Re-lists just this one folder and patches its direct children into the
+                        // cached tree, instead of rebuilding the whole account's tree.
                         dropboxApi.refreshFolderShallow(account, path)
                     }
-                    // Always build/reuse the cached whole-account tree, same as MEGA — now that
-                    // the tree cache never expires on its own (only an explicit invalidateTree()
-                    // or refreshFolderShallow patch changes it), paying for one full recursive
-                    // fetch (only when nothing is cached yet at all) is worth it: every navigation
-                    // after that (including the "copy/move to Dropbox" destination picker, and
-                    // revisiting a folder right after a transfer) is served from memory instead of
-                    // a fresh network call that looked like the folder was "reloading" every time.
-                    val result = dropboxApi.listFolderCached(account, path, allowFullTreeFetch = true)
-                    if (result.isSuccess) {
-                        val list = result.getOrNull() ?: emptyList()
-                        list.forEach { item ->
-                            val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
-                            folderIdCache[itemDisplayPath] = item.id
-                            folderIdCache[item.id] = item.id
-                            folderIdCache[item.name] = item.id
-                        }
-                        Result.success(list.map { item ->
-                            val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
+                    // Always build/reuse the cached whole-account tree: one full recursive fetch
+                    // (only when nothing is cached yet) serves every later navigation from memory.
+                    dropboxApi.listFolderCached(account, path, allowFullTreeFetch = true).map { list ->
+                        list.map { item ->
+                            val itemDisplayPath = childDisplayPath(remotePath, item.name)
+                            rememberId(account.id, itemDisplayPath, item.name, item.id)
                             item.copy(path = itemDisplayPath, folderBadgeType = if (item.isDirectory) detectFolderBadge(item.name) else FolderBadgeType.STANDARD)
-                        })
-                    } else {
-                        result
+                        }
                     }
                 }
                 CloudProvider.MEGA -> {
                     if (forceFullRefresh) {
                         megaApi.invalidateNodeTreeCache(account.id)
                     }
-                    val masterKeyFromSession = masterKeyCache[account.id] ?: try {
-                        val sessionJson = getSessionPayload(account.id, account.sessionHandle)
-                        if (sessionJson.isNotBlank()) org.json.JSONObject(sessionJson).optString("masterKey", "") else ""
-                    } catch (e: Exception) { "" }
-
-                    val effectiveMasterKey = account.refreshToken?.ifBlank { null } ?: masterKeyFromSession.ifBlank { null }
-                    val effectiveAccount = if (account.refreshToken.isNullOrBlank() && !effectiveMasterKey.isNullOrBlank()) {
-                        account.copy(refreshToken = effectiveMasterKey)
-                    } else {
-                        account
-                    }
-
-                    val handle = if (remotePath == "/" || remotePath.isBlank() || remotePath == "root") {
+                    val megaAccount = megaAccount(account)
+                    val handle = if (isRootPath(remotePath) || remotePath == "root") {
                         null
                     } else {
-                        // folderIdCache is normally populated by the listing that revealed this
-                        // folder in the first place, but it's in-memory only — a cold process (or
-                        // navigating straight to a remembered deep folder without replaying every
-                        // parent level) can miss it. Resolving by walking the node tree instead of
-                        // falling back to the raw display-path string is what actually fixes
-                        // "folder shows empty" here; see resolveHandleForDisplayPath's comment.
-                        folderIdCache[remotePath] ?: megaApi.resolveHandleForDisplayPath(effectiveAccount, remotePath) ?: remotePath
+                        // The id cache is in-memory only — a cold process (or navigating straight
+                        // to a remembered deep folder) can miss it, so resolve by walking the node
+                        // tree rather than passing the display path as if it were a handle.
+                        megaHandle(megaAccount, remotePath)
                     }
-                    val result = megaApi.listFiles(effectiveAccount, handle)
-                    if (result.isSuccess) {
-                        val list = result.getOrNull() ?: emptyList()
-                        list.forEach { item ->
-                            val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
-                            folderIdCache[itemDisplayPath] = item.id
-                        }
-                        Result.success(list.map { item ->
-                            val itemDisplayPath = if (remotePath == "/" || remotePath.isBlank()) "/${item.name}" else "${remotePath.trimEnd('/')}/${item.name}"
+                    megaApi.listFiles(megaAccount, handle).map { list ->
+                        list.map { item ->
+                            val itemDisplayPath = childDisplayPath(remotePath, item.name)
+                            ids(account.id)[itemDisplayPath] = item.id
                             item.copy(path = itemDisplayPath)
-                        })
-                    } else {
-                        result
+                        }
                     }
                 }
-                CloudProvider.TERABOX -> {
-                    teraBoxApi.listFiles(account, remotePath)
-                }
+                CloudProvider.TERABOX -> teraBoxApi.listFiles(account, remotePath)
             }
-
-            if (remoteResult.isSuccess) {
-                return@withContext remoteResult
-            }
-
-            // 2. Read from the account's local cloud drive directory — a best-effort offline
-            // fallback for providers that actually mirror files there. For MEGA this directory
-            // is normally empty (nothing mirrors into it), so on a transient remote failure (e.g.
-            // MEGA briefly rate-limiting under concurrent requests) this used to silently return
-            // an empty "success", wiping out whatever was already displayed. Only trust this
-            // fallback when it actually found something — otherwise surface the original remote
-            // failure so callers can keep showing their last-known-good (e.g. cached) list.
-            val folder = getAccountStorageDir(account.id, remotePath)
-            val children = folder.listFiles() ?: emptyArray()
-            if (children.isEmpty()) {
-                return@withContext remoteResult
-            }
-
-            val resultList = children.map { file ->
-                val isDir = file.isDirectory
-                val count = if (isDir) file.listFiles()?.size ?: 0 else 0
-                val ext = if (!isDir) file.extension else ""
-                val itemPath = if (remotePath == "/" || remotePath.isBlank()) "/${file.name}" else "${remotePath.trimEnd('/')}/${file.name}"
-
-                FileItem(
-                    id = file.absolutePath,
-                    name = file.name,
-                    path = itemPath,
-                    size = if (isDir) 0L else file.length(),
-                    lastModified = file.lastModified(),
-                    isDirectory = isDir,
-                    itemCount = count,
-                    extension = ext
-                )
-            }.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase(Locale.getDefault()) }))
-
-            Result.success(resultList)
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(e)
         }
     }
-
-    // parseSessionNodes() (WebView-DOM-scrape session-payload parsing, dead since every provider
-    // switched to a real API client — see the comment on listCloudFiles above) was removed here,
-    // along with its only callers (resolveRoot/RootResolution/rootResolutionCache). sessionNodesCache
-    // and nodeKeyCache stay: downloadFile()'s MEGA branch still reads them as an (always-empty,
-    // now that nothing populates them) best-effort lookup ahead of its real handle/key resolution —
-    // removing those two fields is a separate, riskier change than deleting this dead function.
 
     fun detectFolderBadge(folderName: String): FolderBadgeType {
         val lower = folderName.lowercase(Locale.getDefault())
@@ -375,82 +301,27 @@ class CloudManager @Inject constructor(
 
     //region Quota, thumbnails & streaming
     suspend fun getAccountQuota(account: CloudAccount): Result<Pair<Long, Long>> = withContext(Dispatchers.IO) {
-        // 1. Try querying cloud API client
         try {
             val apiQuota = when (account.provider) {
                 CloudProvider.GOOGLE_DRIVE -> googleDriveApi.getStorageQuota(account)
                 CloudProvider.DROPBOX -> dropboxApi.getSpaceUsage(account)
-                CloudProvider.MEGA -> megaApi.getStorageQuota(account)
+                CloudProvider.MEGA -> megaApi.getStorageQuota(megaAccount(account))
                 CloudProvider.TERABOX -> teraBoxApi.getQuota(account.accessToken ?: account.sessionHandle ?: "").map { it.totalBytes to it.usedBytes }
             }
-            if (apiQuota.isSuccess) {
-                val (apiTotal, apiUsed) = apiQuota.getOrThrow()
-                if (apiTotal > 0L) {
-                    var finalUsed = apiUsed
-                    if (finalUsed == 0L) {
-                        // Check session payload for exact used size
-                        val sessionJson = getSessionPayload(account.id, account.sessionHandle)
-                        if (sessionJson.isNotBlank()) {
-                            val json = org.json.JSONObject(sessionJson)
-                            val arr = json.optJSONArray("folders")
-                            if (arr != null && arr.length() > 0) {
-                                var sumBytes = 0L
-                                for (i in 0 until arr.length()) {
-                                    val obj = arr.getJSONObject(i)
-                                    if (!obj.optBoolean("isDir", false)) {
-                                        sumBytes += obj.optLong("size", 0L)
-                                    }
-                                }
-                                if (sumBytes > 0L) finalUsed = sumBytes
-                            }
-                        }
-                    }
-                    return@withContext Result.success(Pair(apiTotal, finalUsed))
-                }
-            }
+            val quota = apiQuota.getOrNull()
+            if (quota != null && quota.first > 0L) return@withContext Result.success(quota)
         } catch (e: Exception) {
-            // Fall through
+            if (e is kotlinx.coroutines.CancellationException) throw e
         }
 
-        // 2. Fallback to session payload and local files
+        // Fallback: whatever was recorded on the account, else the provider's free-tier size.
         val total = account.totalSpaceBytes ?: when (account.provider) {
             CloudProvider.GOOGLE_DRIVE -> 15L * 1024 * 1024 * 1024
             CloudProvider.DROPBOX -> 2L * 1024 * 1024 * 1024
             CloudProvider.MEGA -> 50L * 1024 * 1024 * 1024
             CloudProvider.TERABOX -> 1024L * 1024 * 1024 * 1024
         }
-        var used = account.usedSpaceBytes ?: 0L
-
-        try {
-            val sessionJson = getSessionPayload(account.id, account.sessionHandle)
-            if (sessionJson.isNotBlank()) {
-                val json = org.json.JSONObject(sessionJson)
-                val arr = json.optJSONArray("folders")
-                if (arr != null && arr.length() > 0) {
-                    var sumBytes = 0L
-                    for (i in 0 until arr.length()) {
-                        val obj = arr.getJSONObject(i)
-                        if (!obj.optBoolean("isDir", false)) {
-                            sumBytes += obj.optLong("size", 0L)
-                        }
-                    }
-                    if (sumBytes > 0L) {
-                        used = sumBytes
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            // Ignore
-        }
-
-        if (used == 0L) {
-            val accountDir = getAccountStorageDir(account.id)
-            val localUsed = accountDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-            if (localUsed > 0L) {
-                used = localUsed
-            }
-        }
-        Result.success(Pair(total, used))
+        Result.success(Pair(total, account.usedSpaceBytes ?: 0L))
     }
 
     /**
@@ -460,7 +331,7 @@ class CloudManager @Inject constructor(
      */
     suspend fun downloadThumbnail(account: CloudAccount, nodeId: String): Result<ByteArray> = withContext(Dispatchers.IO) {
         when (account.provider) {
-            CloudProvider.MEGA -> megaApi.downloadThumbnail(account, nodeId)
+            CloudProvider.MEGA -> megaApi.downloadThumbnail(megaAccount(account), nodeId)
             CloudProvider.GOOGLE_DRIVE -> googleDriveApi.downloadThumbnail(account, nodeId)
             CloudProvider.TERABOX -> teraBoxApi.downloadThumbnail(account, nodeId)
             CloudProvider.DROPBOX -> Result.failure(Exception("Thumbnail endpoint not supported for ${account.provider}"))
@@ -475,7 +346,7 @@ class CloudManager @Inject constructor(
     suspend fun downloadFilePartial(account: CloudAccount, nodeId: String, localTargetFile: java.io.File, maxBytes: Long): Result<java.io.File> =
         withContext(Dispatchers.IO) {
             when (account.provider) {
-                CloudProvider.MEGA -> megaApi.downloadFilePartial(account, nodeId, localTargetFile, maxBytes)
+                CloudProvider.MEGA -> megaApi.downloadFilePartial(megaAccount(account), nodeId, localTargetFile, maxBytes)
                 CloudProvider.DROPBOX, CloudProvider.GOOGLE_DRIVE, CloudProvider.TERABOX ->
                     Result.failure(Exception("Partial download not supported for ${account.provider}"))
             }
@@ -492,7 +363,7 @@ class CloudManager @Inject constructor(
         withContext(Dispatchers.IO) {
             when (account.provider) {
                 CloudProvider.MEGA -> megaApi.openThumbnailDataSource(
-                    account,
+                    megaAccount(account),
                     nodeId,
                     if (forPlayback) MegaDecryptingDataSource.PLAYBACK_FETCH_WINDOW else MegaDecryptingDataSource.DEFAULT_FETCH_WINDOW
                 )
@@ -527,18 +398,9 @@ class CloudManager @Inject constructor(
             when (account.provider) {
                 CloudProvider.DROPBOX -> dropboxApi.getTemporaryLink(account, remotePath)
                     .map { com.antigravity.filemanager.domain.model.CloudStreamSource(it) }
-                CloudProvider.GOOGLE_DRIVE -> {
-                    // A Drive FileItem's `path` is a synthetic display path (e.g. "/My Drive/x.jpg"),
-                    // not the real Drive file ID the media endpoint needs — same resolution
-                    // [downloadFile] below uses to turn one back into an ID via folderIdCache.
-                    val fileName = remotePath.substringAfterLast("/").ifEmpty { "cloud_file" }
-                    val fileId = folderIdCache[remotePath]
-                        ?: folderIdCache[remotePath.trimStart('/')]
-                        ?: folderIdCache[fileName]
-                        ?: folderIdCache["/$fileName"]
-                        ?: remotePath
-                    googleDriveApi.getAuthenticatedMediaUrl(account, fileId)
-                }
+                // A Drive FileItem's `path` is a synthetic display path (e.g. "/My Drive/x.jpg"),
+                // not the real Drive file ID the media endpoint needs.
+                CloudProvider.GOOGLE_DRIVE -> googleDriveApi.getAuthenticatedMediaUrl(account, driveId(account, remotePath, allowNameFallback = true))
                 // Like Drive, the URL only works with the session cookie sent as a header.
                 CloudProvider.TERABOX -> teraBoxApi.getStreamSource(account, remotePath)
                 CloudProvider.MEGA -> Result.failure(Exception("Streaming not supported for ${account.provider}"))
@@ -554,66 +416,18 @@ class CloudManager @Inject constructor(
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
+            // Always fetched from the provider. The old name-based shortcuts (any cached or
+            // mirrored file with the same NAME, anywhere in the account) handed back a different
+            // file whenever two folders held same-named files — e.g. every camera's IMG_0001.jpg
+            // — and pasted that wrong file into the user's folder. Callers that keep a viewer
+            // cache check it themselves, with a size match, before calling this.
             val fileName = remotePath.substringAfterLast("/").ifEmpty { "cloud_file" }
-            val accountDir = getAccountStorageDir(account.id)
-            val localSource = File(accountDir, remotePath.trimStart('/'))
-            val cacheDir = File(context.cacheDir, "cloud_downloads/${account.id}")
-            val cacheFile = File(cacheDir, fileName)
-
             val destFile = File(localTargetDir, fileName)
             destFile.parentFile?.mkdirs()
 
-            var localFile: File? = if (localSource.exists() && localSource.isFile) localSource else null
-            if (localFile == null) {
-                val altFile = File(accountDir, fileName)
-                if (altFile.exists() && altFile.isFile) localFile = altFile
-            }
-            if (localFile == null && cacheFile.exists() && cacheFile.isFile && cacheFile.length() > 0) {
-                localFile = cacheFile
-            }
-            if (localFile == null) {
-                localFile = accountDir.walkTopDown().find { it.isFile && (it.name == fileName || it.name == remotePath || it.nameWithoutExtension == fileName) }
-            }
-
-            if (localFile != null && localFile.exists() && localFile.isFile) {
-                if (destFile.absolutePath != localFile.absolutePath) {
-                    if (destFile.exists()) {
-                        destFile.delete()
-                    }
-                    val total = localFile.length()
-                    localFile.inputStream().use { input ->
-                        destFile.outputStream().use { output ->
-                            val buf = ByteArray(64 * 1024)
-                            var read: Int
-                            var count = 0L
-                            while (input.read(buf).also { read = it } != -1) {
-                                kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                                output.write(buf, 0, read)
-                                count += read
-                                onProgress?.invoke(count, total)
-                            }
-                        }
-                    }
-                } else {
-                    onProgress?.invoke(destFile.length(), destFile.length())
-                }
-                trimCloudDownloadsCache()
-                return@withContext Result.success(destFile)
-            }
-
-            val matchingNode = sessionNodesCache[account.id]?.second?.find {
-                it.name == fileName || it.id == remotePath || it.id == folderIdCache[remotePath] || it.name.equals(fileName, ignoreCase = true)
-            }
-
-            val remoteResult = when (account.provider) {
+            val result = when (account.provider) {
                 CloudProvider.GOOGLE_DRIVE -> {
-                    val fileId = matchingNode?.id
-                        ?: folderIdCache[remotePath]
-                        ?: folderIdCache[remotePath.trimStart('/')]
-                        ?: folderIdCache[fileName]
-                        ?: folderIdCache["/$fileName"]
-                        ?: googleDriveApi.resolveIdForDisplayPath(account, remotePath)
-                        ?: remotePath
+                    val fileId = driveId(account, remotePath, allowNameFallback = true)
                     googleDriveApi.downloadFile(account, fileId, localTargetDir, fileName, onProgress)
                 }
                 CloudProvider.DROPBOX -> {
@@ -621,74 +435,24 @@ class CloudManager @Inject constructor(
                     dropboxApi.downloadFile(account, path, localTargetDir, fileName, onProgress)
                 }
                 CloudProvider.MEGA -> {
-                    val masterKeyFromSession = masterKeyCache[account.id] ?: try {
-                        val sessionJson = getSessionPayload(account.id, account.sessionHandle)
-                        if (sessionJson.isNotBlank()) {
-                            val k = org.json.JSONObject(sessionJson).optString("masterKey", "")
-                            if (k.isNotBlank()) masterKeyCache[account.id] = k
-                            k
-                        } else ""
-                    } catch (e: Exception) { "" }
-
-                    val effectiveMasterKey = account.refreshToken?.ifBlank { null } ?: masterKeyFromSession.ifBlank { null }
-                    val effectiveAccount = if (account.refreshToken.isNullOrBlank() && !effectiveMasterKey.isNullOrBlank()) {
-                        account.copy(refreshToken = effectiveMasterKey)
-                    } else {
-                        account
-                    }
-                    val nodeHandle = matchingNode?.id
-                        ?: folderIdCache[remotePath]
-                        ?: folderIdCache[remotePath.trimStart('/')]
-                        ?: folderIdCache[fileName]
-                        ?: folderIdCache["/$fileName"]
-                        ?: remotePath.substringAfterLast("/").ifEmpty { remotePath }
-                    val nodeKey = matchingNode?.k?.ifBlank { null }
-                        ?: nodeKeyCache[remotePath]
-                        ?: nodeKeyCache[remotePath.trimStart('/')]
-                        ?: nodeKeyCache[nodeHandle]
-                        ?: ""
-                    megaApi.downloadFile(effectiveAccount, nodeHandle, localTargetDir, fileName, nodeKey, onProgress)
+                    val megaAccount = megaAccount(account)
+                    val cache = ids(account.id)
+                    val nodeHandle = cache[remotePath]
+                        ?: cache[remotePath.trimStart('/')]
+                        ?: megaApi.resolveHandleForDisplayPath(megaAccount, remotePath)
+                        ?: fileName
+                    megaApi.downloadFile(megaAccount, nodeHandle, localTargetDir, fileName, "", onProgress)
                 }
                 CloudProvider.TERABOX -> {
                     val path = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
                     teraBoxApi.downloadFile(account, path, destFile, onProgress)
                 }
             }
-
-            val result = if (remoteResult.isSuccess) {
-                remoteResult
+            if (result.isSuccess) {
+                trimCloudDownloadsCache()
             } else {
-                // Fallback to any matching file in account directory or cache directory if available
-                val fallbackFile = accountDir.walkTopDown().find { it.isFile && (it.name == fileName || it.name == remotePath) } ?: if (cacheFile.exists() && cacheFile.length() > 0) cacheFile else null
-                if (fallbackFile != null && fallbackFile.exists() && fallbackFile.isFile) {
-                    if (destFile.absolutePath != fallbackFile.absolutePath) {
-                        if (destFile.exists()) {
-                            destFile.delete()
-                        }
-                        val total = fallbackFile.length()
-                        fallbackFile.inputStream().use { input ->
-                            destFile.outputStream().use { output ->
-                                val buf = ByteArray(64 * 1024)
-                                var read: Int
-                                var count = 0L
-                                while (input.read(buf).also { read = it } != -1) {
-                                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                                    output.write(buf, 0, read)
-                                    count += read
-                                    onProgress?.invoke(count, total)
-                                }
-                            }
-                        }
-                    } else {
-                        onProgress?.invoke(destFile.length(), destFile.length())
-                    }
-                    Result.success(destFile)
-                } else {
-                    android.util.Log.e("CloudManager", "downloadFile: no local fallback either — provider=${account.provider} remotePath='$remotePath' error=${remoteResult.exceptionOrNull()}")
-                    remoteResult
-                }
+                android.util.Log.e("CloudManager", "downloadFile failed — provider=${account.provider} remotePath='$remotePath' error=${result.exceptionOrNull()}")
             }
-            if (result.isSuccess) trimCloudDownloadsCache()
             result
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
@@ -706,138 +470,33 @@ class CloudManager @Inject constructor(
         try {
             val srcFile = File(localFilePath)
             if (!srcFile.exists()) return@withContext Result.failure(Exception("Local file not found: $localFilePath"))
-
             val totalBytes = srcFile.length()
-            val targetFolder = getAccountStorageDir(account.id, remoteTargetDir)
-            val targetFile = File(targetFolder, srcFile.name)
-            targetFolder.mkdirs()
 
-            srcFile.inputStream().use { input ->
-                targetFile.outputStream().use { output ->
-                    val buf = ByteArray(64 * 1024)
-                    var read: Int
-                    var count = 0L
-                    while (input.read(buf).also { read = it } != -1) {
-                        kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                        output.write(buf, 0, read)
-                        count += read
-                        onProgress?.invoke(count, totalBytes)
-                    }
+            // Every provider's real remote failure must be reported — never a silent success.
+            val remoteResult: Result<String> = when (account.provider) {
+                CloudProvider.GOOGLE_DRIVE -> {
+                    val parentId = if (isRootPath(remoteTargetDir)) "root" else driveId(account, remoteTargetDir)
+                    googleDriveApi.uploadFile(account, srcFile, parentId, onProgress)
                 }
-            }
-
-            var remoteFileId = ""
-            // Every provider's real remote failure must be reported — silently keeping the local
-            // mirror and returning Result.success(Unit) regardless of what the actual API call did
-            // is what caused Dropbox/Drive uploads to appear to "do nothing": the user gets no
-            // error, sees no toast, and the file just never shows up in their real cloud account.
-            // MEGA additionally deletes its local mirror on failure (a MEGA account with no master
-            // key can NEVER succeed later, so keeping a "pending" copy would be actively
-            // misleading); Drive/Dropbox keep theirs since a transient OAuth/network error is more
-            // plausibly retryable and the local copy is still real, usable data either way.
-            var uploadFailure: Exception? = null
-            try {
-                when (account.provider) {
-                    CloudProvider.GOOGLE_DRIVE -> {
-                        val parentId = if (remoteTargetDir == "/" || remoteTargetDir.isBlank()) {
-                            "root"
-                        } else {
-                            folderIdCache[remoteTargetDir]
-                                ?: folderIdCache[remoteTargetDir.trimStart('/')]
-                                ?: googleDriveApi.resolveIdForDisplayPath(account, remoteTargetDir)
-                                ?: remoteTargetDir
-                        }
-                        val driveRes = googleDriveApi.uploadFile(account, srcFile, parentId, onProgress)
-                        if (driveRes.isSuccess) {
-                            remoteFileId = driveRes.getOrNull() ?: ""
-                        } else {
-                            uploadFailure = driveRes.exceptionOrNull() as? Exception ?: Exception("Google Drive upload failed")
-                        }
-                    }
-                    CloudProvider.DROPBOX -> {
-                        val dbxRes = dropboxApi.uploadFile(account, srcFile, remoteTargetDir, onProgress)
-                        if (dbxRes.isSuccess) {
-                            remoteFileId = dbxRes.getOrNull() ?: ""
-                            // uploadFile() already patches the cached tree in place with the new
-                            // entry — invalidating here would throw that away and force the next
-                            // listing to do a full recursive re-fetch of the whole account just to
-                            // show the one file that changed.
-                        } else {
-                            uploadFailure = dbxRes.exceptionOrNull() as? Exception ?: Exception("Dropbox upload failed")
-                        }
-                    }
-                    CloudProvider.MEGA -> {
-                        // Same master-key fallback chain used by listCloudFiles, so upload works
-                        // whether the key came from a normal login or an imported session payload.
-                        val masterKeyFromSession = masterKeyCache[account.id] ?: try {
-                            val sessionJson = getSessionPayload(account.id, account.sessionHandle)
-                            if (sessionJson.isNotBlank()) org.json.JSONObject(sessionJson).optString("masterKey", "") else ""
-                        } catch (e: Exception) { "" }
-                        val effectiveMasterKey = account.refreshToken?.ifBlank { null } ?: masterKeyFromSession.ifBlank { null }
-                        val effectiveAccount = if (account.refreshToken.isNullOrBlank() && !effectiveMasterKey.isNullOrBlank()) {
-                            account.copy(refreshToken = effectiveMasterKey)
-                        } else {
-                            account
-                        }
-                        // folderIdCache is only populated by actually listing/visiting a folder in
-                        // this process — copying straight into a MEGA folder without having
-                        // browsed into it first this session (a cold cache) used to fall straight
-                        // back to the raw display-path STRING as the "parentHandle", which MEGA's
-                        // API can't resolve to a real node — the upload command then had nothing
-                        // valid to attach to and just hung until it timed out. Every other MEGA
-                        // path resolution (listCloudFiles above, resolveHandleForDisplayPath's own
-                        // callers) already falls back to walking the real node tree instead; this
-                        // was the one spot that didn't, which is exactly why a manual refresh
-                        // (which populates folderIdCache via a fresh listing) made the retry work.
-                        val parentHandle = if (remoteTargetDir == "/" || remoteTargetDir.isBlank()) {
-                            null
-                        } else {
-                            folderIdCache[remoteTargetDir] ?: megaApi.resolveHandleForDisplayPath(effectiveAccount, remoteTargetDir) ?: remoteTargetDir
-                        }
-                        val megaRes = megaApi.uploadFile(effectiveAccount, srcFile, parentHandle, onProgress)
-                        if (megaRes.isSuccess) {
-                            remoteFileId = megaRes.getOrNull()?.id ?: ""
-                        } else {
-                            uploadFailure = megaRes.exceptionOrNull() as? Exception ?: Exception("MEGA upload failed")
-                        }
-                    }
-                    CloudProvider.TERABOX -> {
-                        val tbRes = teraBoxApi.uploadFile(account, srcFile, remoteTargetDir, onProgress)
-                        if (tbRes.isSuccess) {
-                            remoteFileId = tbRes.getOrNull()?.id ?: ""
-                        } else {
-                            uploadFailure = tbRes.exceptionOrNull() as? Exception ?: Exception("TeraBox upload failed")
-                        }
-                    }
+                // uploadFile() already patches the cached tree in place with the new entry.
+                CloudProvider.DROPBOX -> dropboxApi.uploadFile(account, srcFile, remoteTargetDir, onProgress)
+                CloudProvider.MEGA -> {
+                    val megaAccount = megaAccount(account)
+                    // Resolve the parent by walking the node tree on a cold cache; the raw display
+                    // path is not a valid handle and made the upload hang until it timed out.
+                    val parentHandle = if (isRootPath(remoteTargetDir)) null else megaHandle(megaAccount, remoteTargetDir)
+                    megaApi.uploadFile(megaAccount, srcFile, parentHandle, onProgress).map { it.id }
                 }
-            } catch (e: Exception) {
-                // Cancellation is not a failure — the caller (or its ViewModel scope) intentionally
-                // stopped this transfer, so it must propagate up and cancel this coroutine normally,
-                // not get reported to the user as "upload failed".
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                android.util.Log.e("CloudManager", "Remote upload threw for ${account.provider}", e)
-                uploadFailure = e
+                CloudProvider.TERABOX -> teraBoxApi.uploadFile(account, srcFile, remoteTargetDir, onProgress).map { it.id }
             }
 
-            val failureToReport = uploadFailure
-            if (failureToReport != null) {
-                if (account.provider == CloudProvider.MEGA) targetFile.delete()
-                return@withContext Result.failure(failureToReport)
+            val remoteFileId = remoteResult.getOrElse { error ->
+                android.util.Log.e("CloudManager", "Remote upload failed for ${account.provider}", error)
+                return@withContext Result.failure(error)
             }
-
-            val remotePath = if (remoteTargetDir == "/" || remoteTargetDir.isBlank()) "/${srcFile.name}" else "${remoteTargetDir.trimEnd('/')}/${srcFile.name}"
-            val effectiveId = remoteFileId.ifBlank { targetFile.absolutePath }
-            addOrUpdateSessionPayload(
-                accountId = account.id,
-                name = srcFile.name,
-                remotePath = remotePath,
-                fileId = effectiveId,
-                parentPath = remoteTargetDir,
-                size = srcFile.length(),
-                lastModified = srcFile.lastModified(),
-                isDir = false
-            )
-
+            if (remoteFileId.isNotBlank()) {
+                rememberId(account.id, childDisplayPath(remoteTargetDir, srcFile.name), srcFile.name, remoteFileId)
+            }
             onProgress?.invoke(totalBytes, totalBytes)
             Result.success(Unit)
         } catch (e: Exception) {
@@ -850,404 +509,122 @@ class CloudManager @Inject constructor(
     //region Folder & item mutations (create / delete / restore / rename / move)
     suspend fun createFolder(account: CloudAccount, folderName: String, parentPath: String): Result<FileItem> = withContext(Dispatchers.IO) {
         try {
-            val parentFolder = getAccountStorageDir(account.id, parentPath)
-            val newFolder = File(parentFolder, folderName)
-            newFolder.mkdirs()
-
-            val itemPath = if (parentPath == "/" || parentPath.isBlank()) "/$folderName" else "${parentPath.trimEnd('/')}/$folderName"
-
-            // Also attempt remote creation. A failure here must be reported, not swallowed — the
-            // caller (e.g. a recursive cloud-to-cloud folder copy) relies on this to actually
-            // exist server-side before it starts uploading files into it; silently keeping only
-            // the local mirror on failure is what let every "created" MEGA folder look fine here
-            // while every upload into it failed downstream.
-            var remoteId: String? = null
-            var remoteFailure: Exception? = null
-            try {
-                when (account.provider) {
-                    CloudProvider.GOOGLE_DRIVE -> {
-                        // Same class of bug as MEGA below: parentPath is a display path, not a
-                        // real Drive folder ID — resolve it via the cache first, walking the tree
-                        // on a miss instead of falling back to the raw path string (Drive's API
-                        // 404s on that — "File not found: .").
-                        val resolvedParentId = if (parentPath == "/" || parentPath.isBlank()) {
-                            "root"
-                        } else {
-                            folderIdCache[parentPath]
-                                ?: folderIdCache[parentPath.trimStart('/')]
-                                ?: googleDriveApi.resolveIdForDisplayPath(account, parentPath)
-                                ?: parentPath
-                        }
-                        googleDriveApi.createFolder(account, folderName, resolvedParentId).onSuccess { item ->
-                            remoteId = item.id
-                            folderIdCache[itemPath] = item.id
-                            folderIdCache[item.id] = item.id
-                        }.onFailure {
-                            remoteFailure = it as? Exception ?: Exception(it.message ?: "Google Drive create folder failed")
-                        }
-                    }
-                    CloudProvider.DROPBOX -> {
-                        // Patch the new folder into the cached tree instead of invalidating it —
-                        // a recursive cloud-to-cloud copy calls this once per subfolder, and
-                        // wiping the whole account's cache each time meant every listing right
-                        // after (including this same copy's own conflict checks) re-fetched the
-                        // full tree from network again, which is what made Dropbox look like it
-                        // "never caches" even though the tree cache itself never expires.
-                        dropboxApi.createFolder(account, itemPath).onSuccess { item ->
-                            remoteId = item.id
-                            dropboxApi.patchTreeAfterFolderCreate(account.id, itemPath, item.id)
-                        }.onFailure {
-                            remoteFailure = it as? Exception ?: Exception(it.message ?: "Dropbox create folder failed")
-                        }
-                    }
-                    CloudProvider.MEGA -> {
-                        // MEGA identifies folders by handle, not path — resolve the display path
-                        // the same way listCloudFiles/uploadFile do (cache hit, else walk the tree),
-                        // instead of handing the raw path string to megaApi.createFolder as if it
-                        // were already a handle.
-                        val resolvedParentHandle = if (parentPath == "/" || parentPath.isBlank()) {
-                            null
-                        } else {
-                            folderIdCache[parentPath] ?: megaApi.resolveHandleForDisplayPath(account, parentPath) ?: parentPath
-                        }
-                        val createResult = megaApi.createFolder(account, folderName, resolvedParentHandle)
-                        createResult.onSuccess { item ->
-                            remoteId = item.id
-                            folderIdCache[itemPath] = item.id
-                            folderIdCache[item.id] = item.id
-                        }.onFailure {
-                            remoteFailure = it as? Exception ?: Exception(it.message ?: "MEGA create folder failed")
-                        }
-                    }
-                    CloudProvider.TERABOX -> {
-                        teraBoxApi.createFolder(account, folderName, parentPath).onSuccess { item ->
-                            remoteId = item.id
-                            folderIdCache[itemPath] = item.id
-                            folderIdCache[item.id] = item.id
-                        }.onFailure {
-                            remoteFailure = it as? Exception ?: Exception(it.message ?: "TeraBox create folder failed")
-                        }
-                    }
+            com.antigravity.filemanager.data.local.storage.invalidFileNameReason(folderName)?.let { return@withContext Result.failure(java.io.IOException(it)) }
+            val itemPath = childDisplayPath(parentPath, folderName)
+            // A failure here must be reported, not swallowed — callers (e.g. a recursive
+            // cloud-to-cloud folder copy) rely on the folder actually existing server-side before
+            // uploading into it.
+            val created: Result<FileItem> = when (account.provider) {
+                CloudProvider.GOOGLE_DRIVE -> {
+                    // parentPath is a display path, not a Drive id — the raw string 404s.
+                    val parentId = if (isRootPath(parentPath)) "root" else driveId(account, parentPath)
+                    googleDriveApi.createFolder(account, folderName, parentId)
                 }
-            } catch (e: Exception) {
-                remoteFailure = e
+                CloudProvider.DROPBOX -> dropboxApi.createFolder(account, itemPath).onSuccess { item ->
+                    // Patch the new folder into the cached tree instead of invalidating it — a
+                    // recursive copy calls this once per subfolder.
+                    dropboxApi.patchTreeAfterFolderCreate(account.id, itemPath, item.id)
+                }
+                CloudProvider.MEGA -> {
+                    val megaAccount = megaAccount(account)
+                    val parentHandle = if (isRootPath(parentPath)) null else megaHandle(megaAccount, parentPath)
+                    megaApi.createFolder(megaAccount, folderName, parentHandle)
+                }
+                CloudProvider.TERABOX -> teraBoxApi.createFolder(account, folderName, parentPath)
             }
-            if (remoteFailure != null) {
-                return@withContext Result.failure(remoteFailure!!)
-            }
-
-            // fileId here ends up in folderIdCache[itemPath] too (see addOrUpdateSessionPayload
-            // below) — passing the local mirror path unconditionally, like this used to, clobbered
-            // the correct remote handle/ID this function just resolved above with a path that is
-            // meaningless to the actual provider API. Only fall back to the local path when there
-            // truly is no remote id (Dropbox, which addresses everything by path anyway, or a
-            // provider create that only partially succeeded).
-            addOrUpdateSessionPayload(
-                accountId = account.id,
-                name = folderName,
-                remotePath = itemPath,
-                fileId = remoteId ?: newFolder.absolutePath,
-                parentPath = parentPath,
-                size = 0L,
-                lastModified = System.currentTimeMillis(),
-                isDir = true
-            )
-
-            Result.success(
+            created.map { item ->
+                rememberId(account.id, itemPath, folderName, item.id)
                 FileItem(
-                    id = remoteId ?: newFolder.absolutePath,
+                    id = item.id,
                     name = folderName,
                     path = itemPath,
                     isDirectory = true,
                     itemCount = 0
                 )
-            )
+            }
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(e)
-        }
-    }
-
-    fun addOrUpdateSessionPayload(
-        accountId: String,
-        name: String,
-        remotePath: String,
-        fileId: String,
-        parentPath: String,
-        size: Long,
-        lastModified: Long,
-        isDir: Boolean = false
-    ) {
-        try {
-            val cached = sessionNodesCache[accountId]
-            val resolvedParentId = if (parentPath == "/" || parentPath.isBlank() || parentPath == "root") {
-                cached?.first ?: "root"
-            } else {
-                folderIdCache[parentPath] ?: folderIdCache[parentPath.trimStart('/')] ?: parentPath
-            }
-
-            val cleanId = fileId.ifBlank { remotePath }
-            folderIdCache[remotePath] = cleanId
-            folderIdCache[remotePath.trimStart('/')] = cleanId
-            folderIdCache[name] = cleanId
-            folderIdCache[cleanId] = cleanId
-
-            // 1. Update memory cache
-            if (cached != null) {
-                val allNodes = cached.second.toMutableList()
-                allNodes.removeAll { it.id == cleanId || (it.p == resolvedParentId && it.name == name) }
-                allNodes.add(
-                    MegaNode(
-                        id = cleanId,
-                        p = resolvedParentId,
-                        name = name,
-                        size = size,
-                        ts = lastModified,
-                        isDir = isDir,
-                        t = if (isDir) 1 else 0,
-                        k = ""
-                    )
-                )
-                sessionNodesCache[accountId] = Pair(cached.first, allNodes)
-            }
-
-            // 2. Update persistent session JSON file
-            val sessionFile = File(context.filesDir, "cloud_sessions/$accountId.json")
-            if (sessionFile.exists()) {
-                val text = sessionFile.readText()
-                if (text.isNotBlank()) {
-                    val json = org.json.JSONObject(text)
-                    val key = if (json.has("folders")) "folders" else if (json.has("files")) "files" else "folders"
-                    val arr = if (json.has(key)) json.getJSONArray(key) else org.json.JSONArray()
-                    val newArr = org.json.JSONArray()
-                    var replaced = false
-                    for (i in 0 until arr.length()) {
-                        val obj = arr.getJSONObject(i)
-                        val id = obj.optString("id")
-                        val p = obj.optString("p", obj.optString("parent"))
-                        val n = obj.optString("name")
-                        if (id == cleanId || (p == resolvedParentId && n == name)) {
-                            val updatedObj = org.json.JSONObject().apply {
-                                put("id", cleanId)
-                                put("name", name)
-                                put("p", resolvedParentId)
-                                put("size", size)
-                                put("ts", lastModified)
-                                put("isDir", isDir)
-                            }
-                            newArr.put(updatedObj)
-                            replaced = true
-                        } else {
-                            newArr.put(obj)
-                        }
-                    }
-                    if (!replaced) {
-                        newArr.put(org.json.JSONObject().apply {
-                            put("id", cleanId)
-                            put("name", name)
-                            put("p", resolvedParentId)
-                            put("size", size)
-                            put("ts", lastModified)
-                            put("isDir", isDir)
-                        })
-                    }
-                    json.put(key, newArr)
-                    sessionFile.writeText(json.toString())
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    fun deleteFromSessionPayload(accountId: String, remotePathOrId: String) {
-        try {
-            val targetId = folderIdCache[remotePathOrId] ?: folderIdCache[remotePathOrId.trimStart('/')] ?: remotePathOrId
-            val fileName = remotePathOrId.substringAfterLast('/')
-
-            // 1. Update memory cache
-            val cached = sessionNodesCache[accountId]
-            val nodesToRemove = mutableSetOf<String>()
-            if (cached != null) {
-                val allNodes = cached.second
-                allNodes.filter { 
-                    it.id == targetId || it.id == remotePathOrId || it.name == fileName || it.name == remotePathOrId.trimStart('/') 
-                }.forEach { nodesToRemove.add(it.id) }
-
-                // Find all descendants recursively if it's a directory
-                var changed = true
-                while (changed) {
-                    val sizeBefore = nodesToRemove.size
-                    allNodes.forEach { node ->
-                        if (nodesToRemove.contains(node.p)) {
-                            nodesToRemove.add(node.id)
-                        }
-                    }
-                    changed = nodesToRemove.size > sizeBefore
-                }
-
-                val filteredNodes = allNodes.filterNot { nodesToRemove.contains(it.id) }
-                sessionNodesCache[accountId] = Pair(cached.first, filteredNodes)
-            }
-
-            // 2. Update persistent session payload file
-            val sessionFile = File(context.filesDir, "cloud_sessions/$accountId.json")
-            if (sessionFile.exists()) {
-                val text = sessionFile.readText()
-                if (text.isNotBlank()) {
-                    val json = org.json.JSONObject(text)
-                    val key = if (json.has("folders")) "folders" else if (json.has("files")) "files" else null
-                    if (key != null) {
-                        val arr = json.getJSONArray(key)
-                        val newArr = org.json.JSONArray()
-                        for (i in 0 until arr.length()) {
-                            val obj = arr.getJSONObject(i)
-                            val id = obj.optString("id")
-                            val name = obj.optString("name")
-                            if (!nodesToRemove.contains(id) && id != targetId && id != remotePathOrId && name != fileName && name != remotePathOrId.trimStart('/')) {
-                                newArr.put(obj)
-                            }
-                        }
-                        json.put(key, newArr)
-                        sessionFile.writeText(json.toString())
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 
     suspend fun deleteItem(account: CloudAccount, remotePathOrId: String, moveToTrash: Boolean = true): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val targetId = folderIdCache[remotePathOrId] ?: folderIdCache[remotePathOrId.trimStart('/')] ?: remotePathOrId
-            val fileName = remotePathOrId.substringAfterLast('/')
+            val cache = ids(account.id)
+            val targetId = cache[remotePathOrId] ?: cache[remotePathOrId.trimStart('/')] ?: remotePathOrId
 
-            // 1. Delete from local account storage directory
-            val accountDir = getAccountStorageDir(account.id)
-            val targetFile = File(accountDir, remotePathOrId.trimStart('/'))
-            if (targetFile.exists()) {
-                targetFile.deleteRecursively()
-            }
-            val altFile = File(accountDir, fileName)
-            if (altFile.exists()) {
-                altFile.deleteRecursively()
-            }
-
-            // 2. Delete from cache downloads
-            val cacheDir = File(context.cacheDir, "cloud_downloads/${account.id}")
-            val cacheFile = File(cacheDir, fileName)
-            if (cacheFile.exists()) {
-                cacheFile.delete()
-            }
-
-            // 3. Remove from session payload and in-memory caches
-            deleteFromSessionPayload(account.id, remotePathOrId)
-            folderIdCache.remove(remotePathOrId)
-            folderIdCache.remove(remotePathOrId.trimStart('/'))
-            folderIdCache.remove(targetId)
-
-            // 4. Remote API deletion — moveToTrash routes to each provider's real trash/rubbish
-            // bin where one exists (Google Drive, MEGA); Dropbox has no distinct trash API call
-            // to make since Dropbox itself already keeps deleted files recoverable from its own
-            // web UI for ~30 days regardless of which delete call is used.
-            //
-            // A failure here MUST be reported, not swallowed — this used to always return
-            // Result.success(Unit) regardless of what the remote call actually did, on the
-            // reasoning that the local mirror was already cleaned up. But callers rely on this
-            // Result to know whether the remote item is really gone — a cloud-to-cloud "Move"
-            // checks it before deleting the source, so a silently-ignored remote failure left the
-            // "moved" folder still sitting on the source account with no error shown anywhere.
-            val remoteResult = try {
-                when (account.provider) {
-                    CloudProvider.GOOGLE_DRIVE -> {
-                        // Same targetId-fell-back-to-a-raw-path risk as MEGA above.
-                        val resolvedTargetId = if (targetId.startsWith("/")) {
-                            googleDriveApi.resolveIdForDisplayPath(account, targetId) ?: targetId
-                        } else {
-                            targetId
-                        }
-                        if (moveToTrash) googleDriveApi.trashFile(account, resolvedTargetId) else googleDriveApi.deleteFile(account, resolvedTargetId)
+            // Remote API deletion — moveToTrash routes to each provider's real trash/rubbish
+            // bin where one exists (Google Drive, MEGA); Dropbox itself keeps deleted files
+            // recoverable from its own web UI for ~30 days regardless of which call is used.
+            // A failure here MUST be reported: a cloud-to-cloud "Move" checks it before
+            // treating the source as gone.
+            val remoteResult = when (account.provider) {
+                CloudProvider.GOOGLE_DRIVE -> {
+                    val resolvedTargetId = if (targetId.startsWith("/")) {
+                        googleDriveApi.resolveIdForDisplayPath(account, targetId) ?: targetId
+                    } else {
+                        targetId
                     }
-                    CloudProvider.DROPBOX -> {
-                        val dropboxPath = if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId"
-                        if (moveToTrash) {
-                            dropboxApi.delete(account, dropboxPath).also { dropboxApi.patchTreeAfterDelete(account.id, dropboxPath) }
-                        } else {
-                            // moveToTrash=false means this delete came from inside the Trash view
-                            // itself (see CloudExplorerUiState.isInsideTrashView) — the item is
-                            // already gone from the normal tree, so there's nothing to patch out
-                            // of the regular listing cache; purge it from Dropbox's own retained
-                            // copy instead.
-                            dropboxApi.permanentlyDelete(account, dropboxPath)
-                        }
-                    }
-                    CloudProvider.MEGA -> {
-                        // targetId falls back to the raw display-path STRING on a folderIdCache
-                        // miss (see above) — MEGA identifies nodes by handle, not path, so handing
-                        // it that string as if it were a handle sent a garbage "n" to the move/
-                        // delete command. MEGA apparently doesn't treat that as an error (the
-                        // response never started with "-"), so this silently no-op'd while still
-                        // reporting success — the exact "Move said it worked but the MEGA source
-                        // is still there" bug. Walk the tree to resolve the real handle first,
-                        // same fallback listCloudFiles/createFolder already use for a cold cache.
-                        val resolvedTargetId = if (targetId.startsWith("/")) {
-                            megaApi.resolveHandleForDisplayPath(account, targetId) ?: targetId
-                        } else {
-                            targetId
-                        }
-                        (if (moveToTrash) megaApi.moveToRubbishBin(account, resolvedTargetId) else megaApi.deleteNode(account, resolvedTargetId))
-                            .also { megaApi.invalidateNodeTreeCache(account.id) }
-                    }
-                    CloudProvider.TERABOX -> {
-                        val path = if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId"
-                        teraBoxApi.deleteFile(account, path)
+                    if (moveToTrash) googleDriveApi.trashFile(account, resolvedTargetId) else googleDriveApi.deleteFile(account, resolvedTargetId)
+                }
+                CloudProvider.DROPBOX -> {
+                    val dropboxPath = if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId"
+                    if (moveToTrash) {
+                        dropboxApi.delete(account, dropboxPath).also { dropboxApi.patchTreeAfterDelete(account.id, dropboxPath) }
+                    } else {
+                        // moveToTrash=false means this delete came from inside the Trash view
+                        // itself — purge it from Dropbox's own retained copy instead.
+                        dropboxApi.permanentlyDelete(account, dropboxPath)
                     }
                 }
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                Result.failure(e)
+                CloudProvider.MEGA -> {
+                    // MEGA identifies nodes by handle; a display path handed over as a handle
+                    // silently no-op'd while reporting success.
+                    val megaAccount = megaAccount(account)
+                    val handle = megaHandle(megaAccount, remotePathOrId)
+                    (if (moveToTrash) megaApi.moveToRubbishBin(megaAccount, handle) else megaApi.deleteNode(megaAccount, handle))
+                        .also { megaApi.invalidateNodeTreeCache(account.id) }
+                }
+                CloudProvider.TERABOX -> {
+                    val path = if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId"
+                    teraBoxApi.deleteFile(account, path)
+                }
             }
             android.util.Log.d("CloudManager", "deleteItem: provider=${account.provider} remotePathOrId='$remotePathOrId' targetId='$targetId' isSuccess=${remoteResult.isSuccess} error=${remoteResult.exceptionOrNull()}")
 
             if (remoteResult.isFailure) {
                 return@withContext Result.failure(remoteResult.exceptionOrNull() ?: Exception("Remote delete failed"))
             }
+            forgetId(account.id, remotePathOrId, targetId)
+            com.antigravity.filemanager.utils.CloudDownloadCache.dirFor(context, account.id, remotePathOrId).deleteRecursively()
             Result.success(Unit)
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(e)
         }
     }
 
     /** Permanently deletes many MEGA items in as few HTTP round trips as possible — see
-     * MegaApiClient.deleteNodesBatch. Only MEGA gets this fast path today: Dropbox/Google Drive
-     * items instead fall back to the caller doing its own bounded-parallel per-item deletes (see
-     * CloudExplorerViewModel.deleteSelected), which is why this is scoped to the exact case that
-     * was actually unusable — emptying a MEGA Rubbish Bin with hundreds of items sequentially
-     * could take over an hour; this cuts it to roughly (item count / 25) requests. Returns results
-     * keyed by the ORIGINAL remotePathOrId strings passed in, not MEGA handles, so callers can
-     * match failures back to what the user actually selected. */
+     * MegaApiClient.deleteNodesBatch. Emptying a MEGA Rubbish Bin with hundreds of items
+     * sequentially could take over an hour; this cuts it to roughly (item count / 25) requests.
+     * Returns results keyed by the ORIGINAL remotePathOrId strings passed in, not MEGA handles,
+     * so callers can match failures back to what the user actually selected. */
     suspend fun deletePermanentlyBatchMega(account: CloudAccount, remotePathsOrIds: List<String>): Map<String, Result<Unit>> = withContext(Dispatchers.IO) {
-        val pathToHandle = remotePathsOrIds.associateWith { remotePathOrId ->
-            val targetId = folderIdCache[remotePathOrId] ?: folderIdCache[remotePathOrId.trimStart('/')] ?: remotePathOrId
-            if (targetId.startsWith("/")) megaApi.resolveHandleForDisplayPath(account, targetId) ?: targetId else targetId
-        }
-        val handleResults = megaApi.deleteNodesBatch(account, pathToHandle.values.toList())
+        val megaAccount = megaAccount(account)
+        val pathToHandle = remotePathsOrIds.associateWith { megaHandle(megaAccount, it) }
+        val handleResults = megaApi.deleteNodesBatch(megaAccount, pathToHandle.values.toList())
         remotePathsOrIds.associateWith { remotePathOrId ->
             val handle = pathToHandle.getValue(remotePathOrId)
             val result = handleResults[handle] ?: Result.failure(Exception("No result for '$remotePathOrId'"))
-            if (result.isSuccess) {
-                deleteFromSessionPayload(account.id, remotePathOrId)
-                folderIdCache.remove(remotePathOrId)
-                folderIdCache.remove(remotePathOrId.trimStart('/'))
-                folderIdCache.remove(handle)
-            }
+            if (result.isSuccess) forgetId(account.id, remotePathOrId, handle)
             result
         }
     }
 
     /** Restores an item out of the provider's real trash/rubbish bin. */
     suspend fun restoreItem(account: CloudAccount, remotePathOrId: String): Result<Unit> = withContext(Dispatchers.IO) {
-        val targetId = folderIdCache[remotePathOrId] ?: folderIdCache[remotePathOrId.trimStart('/')] ?: remotePathOrId
+        val cache = ids(account.id)
+        val targetId = cache[remotePathOrId] ?: cache[remotePathOrId.trimStart('/')] ?: remotePathOrId
         when (account.provider) {
             CloudProvider.GOOGLE_DRIVE -> {
                 val resolvedTargetId = if (targetId.startsWith("/")) {
@@ -1257,88 +634,85 @@ class CloudManager @Inject constructor(
                 }
                 googleDriveApi.restoreFromTrash(account, resolvedTargetId)
             }
-            CloudProvider.MEGA -> megaApi.restoreFromRubbishBin(account, targetId).also { megaApi.invalidateNodeTreeCache(account.id) }
+            CloudProvider.MEGA -> megaApi.restoreFromRubbishBin(megaAccount(account), targetId).also { megaApi.invalidateNodeTreeCache(account.id) }
             CloudProvider.DROPBOX -> {
                 val dropboxPath = if (remotePathOrId.startsWith("/")) remotePathOrId else "/$remotePathOrId"
                 dropboxApi.restoreFile(account, dropboxPath).map { }.also { dropboxApi.invalidateTree(account.id) }
             }
-            CloudProvider.TERABOX -> Result.success(Unit)
+            CloudProvider.TERABOX -> Result.failure(UnsupportedOperationException("TeraBox has no restore API"))
         }
     }
 
     suspend fun renameItem(account: CloudAccount, remotePath: String, newName: String): Result<FileItem> = withContext(Dispatchers.IO) {
+        com.antigravity.filemanager.data.local.storage.invalidFileNameReason(newName)?.let { return@withContext Result.failure(java.io.IOException(it)) }
         when (account.provider) {
-            CloudProvider.DROPBOX -> dropboxApi.renameFile(account, remotePath, newName).also { dropboxApi.invalidateTree(account.id) }
+            CloudProvider.DROPBOX -> dropboxApi.renameFile(account, remotePath, newName)
+                .onSuccess { item -> dropboxApi.patchTreeAfterMove(account.id, remotePath, item.path) }
             CloudProvider.GOOGLE_DRIVE -> {
-                val targetId = folderIdCache[remotePath]
-                    ?: folderIdCache[remotePath.trimStart('/')]
-                    ?: googleDriveApi.resolveIdForDisplayPath(account, remotePath)
-                    ?: remotePath
+                val targetId = driveId(account, remotePath)
                 googleDriveApi.renameFile(account, targetId, newName).map { FileItem(id = targetId, name = newName, path = remotePath) }
             }
             CloudProvider.MEGA -> {
-                val targetId = folderIdCache[remotePath] ?: folderIdCache[remotePath.trimStart('/')] ?: remotePath
-                megaApi.renameNode(account, targetId, newName)
+                val megaAccount = megaAccount(account)
+                val targetId = megaHandle(megaAccount, remotePath)
+                megaApi.renameNode(megaAccount, targetId, newName)
                     .also { megaApi.invalidateNodeTreeCache(account.id) }
                     .map { FileItem(id = targetId, name = newName, path = remotePath) }
             }
             CloudProvider.TERABOX -> {
                 val cleanPath = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
-                val newPath = (if (cleanPath.contains("/")) cleanPath.substringBeforeLast("/") else "") + "/" + newName
+                val newPath = cleanPath.substringBeforeLast("/") + "/" + newName
                 teraBoxApi.renameFile(account, cleanPath, newName).map {
                     FileItem(id = newPath, name = newName, path = newPath)
                 }
             }
-        }
+        }.onSuccess { forgetId(account.id, remotePath) }
     }
 
     /** Relocates an item to a different folder within the SAME cloud account, entirely
-     * server-side — no download+reupload round trip. The generic cloud-to-cloud paste flow
-     * (paste() in CloudExplorerViewModel) only needs that round trip because there's no API that
-     * spans two different providers/accounts; within one account, every provider has a real
-     * move primitive, so a same-account "Move" should use this instead of pretending it's a
-     * cross-provider transfer. Copy is not handled here — Dropbox/Drive do have a native
-     * server-side copy, but MEGA doesn't (no simple "duplicate this subtree" command), so a
-     * same-account Copy still goes through the round trip for now. */
+     * server-side — no download+reupload round trip. Copy is not handled here — MEGA has no
+     * simple "duplicate this subtree" command, so a same-account Copy still goes through the
+     * generic round trip. */
     suspend fun moveItemWithinAccount(account: CloudAccount, sourcePath: String, targetDir: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
+            val cache = ids(account.id)
             when (account.provider) {
                 CloudProvider.DROPBOX -> {
-                    dropboxApi.moveItem(account, sourcePath, targetDir).map { }
-                        .also { if (it.isSuccess) dropboxApi.invalidateTree(account.id) }
+                    dropboxApi.moveItem(account, sourcePath, targetDir)
+                        .onSuccess { item -> dropboxApi.patchTreeAfterMove(account.id, sourcePath, item.path) }
+                        .map { }
                 }
                 CloudProvider.MEGA -> {
-                    val nodeHandle = folderIdCache[sourcePath]
-                        ?: megaApi.resolveHandleForDisplayPath(account, sourcePath)
+                    val megaAccount = megaAccount(account)
+                    val nodeHandle = cache[sourcePath]
+                        ?: megaApi.resolveHandleForDisplayPath(megaAccount, sourcePath)
                         ?: return@withContext Result.failure(Exception("Could not resolve MEGA handle for '$sourcePath'"))
-                    val newParentHandle = if (targetDir == "/" || targetDir.isBlank()) {
-                        megaApi.resolveRootHandle(account)
+                    val newParentHandle = if (isRootPath(targetDir)) {
+                        megaApi.resolveRootHandle(megaAccount)
                     } else {
-                        folderIdCache[targetDir] ?: megaApi.resolveHandleForDisplayPath(account, targetDir)
+                        cache[targetDir] ?: megaApi.resolveHandleForDisplayPath(megaAccount, targetDir)
                     } ?: return@withContext Result.failure(Exception("Could not resolve MEGA target folder"))
-                    megaApi.moveNode(account, nodeHandle, newParentHandle)
+                    megaApi.moveNode(megaAccount, nodeHandle, newParentHandle)
                 }
                 CloudProvider.GOOGLE_DRIVE -> {
-                    val fileId = folderIdCache[sourcePath]
+                    val fileId = cache[sourcePath]
                         ?: googleDriveApi.resolveIdForDisplayPath(account, sourcePath)
                         ?: return@withContext Result.failure(Exception("Could not resolve Drive file id for '$sourcePath'"))
                     val oldParentPath = sourcePath.substringBeforeLast('/', "")
                     val oldParentId = if (oldParentPath.isEmpty() || oldParentPath == "/My Drive") {
                         "root"
                     } else {
-                        folderIdCache[oldParentPath] ?: googleDriveApi.resolveIdForDisplayPath(account, oldParentPath) ?: "root"
+                        cache[oldParentPath] ?: googleDriveApi.resolveIdForDisplayPath(account, oldParentPath) ?: "root"
                     }
-                    val newParentId = if (targetDir == "/" || targetDir.isBlank() || targetDir == "/My Drive") {
+                    val newParentId = if (isRootPath(targetDir) || targetDir == "/My Drive") {
                         "root"
                     } else {
-                        folderIdCache[targetDir] ?: googleDriveApi.resolveIdForDisplayPath(account, targetDir) ?: targetDir
+                        cache[targetDir] ?: googleDriveApi.resolveIdForDisplayPath(account, targetDir) ?: targetDir
                     }
                     googleDriveApi.moveFile(account, fileId, oldParentId, newParentId)
                 }
-                CloudProvider.TERABOX -> {
-                    teraBoxApi.moveFile(account, sourcePath, targetDir)
-                }
-            }
+                CloudProvider.TERABOX -> teraBoxApi.moveFile(account, sourcePath, targetDir)
+            }.onSuccess { forgetId(account.id, sourcePath) }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(e)

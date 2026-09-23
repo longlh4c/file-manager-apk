@@ -173,14 +173,16 @@ class GoogleDriveApiClient @Inject constructor(
         return currentId
     }
 
-    suspend fun listFiles(account: CloudAccount, parentId: String = "root"): Result<List<FileItem>> = withContext(Dispatchers.IO) {
+    /** Runs one files.list query to completion (all pages). */
+    private suspend fun queryFiles(account: CloudAccount, query: String, label: String): Result<List<FileItem>> = withContext(Dispatchers.IO) {
         try {
             val drive = buildDrive(account)
             val files = mutableListOf<DriveFile>()
             var pageToken: String? = null
             do {
+                currentCoroutineContext().ensureActive()
                 val result = drive.files().list()
-                    .setQ("'$parentId' in parents and trashed = false")
+                    .setQ(query)
                     .setFields("nextPageToken, files(id,name,mimeType,size,modifiedTime)")
                     .setPageSize(200)
                     .setPageToken(pageToken)
@@ -190,92 +192,29 @@ class GoogleDriveApiClient @Inject constructor(
                 files.addAll(result.files ?: emptyList())
                 pageToken = result.nextPageToken
             } while (pageToken != null)
-
             Result.success(files.map { toFileItem(it) })
         } catch (e: Exception) {
-            android.util.Log.e("GoogleDriveApiClient", "listFiles failed for parentId=$parentId: ${e.message}", e)
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            android.util.Log.e("GoogleDriveApiClient", "$label failed: ${e.message}", e)
             Result.failure(e)
         }
     }
+
+    suspend fun listFiles(account: CloudAccount, parentId: String = "root"): Result<List<FileItem>> =
+        queryFiles(account, "'${parentId.replace("'", "\\'")}' in parents and trashed = false", "listFiles($parentId)")
 
     /** Files/folders the user has starred, regardless of where they live (My Drive or a Shared Drive). */
-    suspend fun listStarred(account: CloudAccount): Result<List<FileItem>> = withContext(Dispatchers.IO) {
-        try {
-            val drive = buildDrive(account)
-            val files = mutableListOf<DriveFile>()
-            var pageToken: String? = null
-            do {
-                val result = drive.files().list()
-                    .setQ("starred = true and trashed = false")
-                    .setFields("nextPageToken, files(id,name,mimeType,size,modifiedTime)")
-                    .setPageSize(200)
-                    .setPageToken(pageToken)
-                    .setIncludeItemsFromAllDrives(true)
-                    .setSupportsAllDrives(true)
-                    .execute()
-                files.addAll(result.files ?: emptyList())
-                pageToken = result.nextPageToken
-            } while (pageToken != null)
-
-            Result.success(files.map { toFileItem(it) })
-        } catch (e: Exception) {
-            android.util.Log.e("GoogleDriveApiClient", "listStarred failed: ${e.message}", e)
-            Result.failure(e)
-        }
-    }
+    suspend fun listStarred(account: CloudAccount): Result<List<FileItem>> =
+        queryFiles(account, "starred = true and trashed = false", "listStarred")
 
     /** Items currently in this account's Drive Trash (see [trashFile]) — the mirror image of
      * every other listing query here, which all exclude `trashed = true`. */
-    suspend fun listTrash(account: CloudAccount): Result<List<FileItem>> = withContext(Dispatchers.IO) {
-        try {
-            val drive = buildDrive(account)
-            val files = mutableListOf<DriveFile>()
-            var pageToken: String? = null
-            do {
-                val result = drive.files().list()
-                    .setQ("trashed = true")
-                    .setFields("nextPageToken, files(id,name,mimeType,size,modifiedTime)")
-                    .setPageSize(200)
-                    .setPageToken(pageToken)
-                    .setIncludeItemsFromAllDrives(true)
-                    .setSupportsAllDrives(true)
-                    .execute()
-                files.addAll(result.files ?: emptyList())
-                pageToken = result.nextPageToken
-            } while (pageToken != null)
-
-            Result.success(files.map { toFileItem(it) })
-        } catch (e: Exception) {
-            android.util.Log.e("GoogleDriveApiClient", "listTrash failed: ${e.message}", e)
-            Result.failure(e)
-        }
-    }
+    suspend fun listTrash(account: CloudAccount): Result<List<FileItem>> =
+        queryFiles(account, "trashed = true", "listTrash")
 
     /** Items other people have shared directly with this account (not the user's own tree). */
-    suspend fun listSharedWithMe(account: CloudAccount): Result<List<FileItem>> = withContext(Dispatchers.IO) {
-        try {
-            val drive = buildDrive(account)
-            val files = mutableListOf<DriveFile>()
-            var pageToken: String? = null
-            do {
-                val result = drive.files().list()
-                    .setQ("sharedWithMe = true and trashed = false")
-                    .setFields("nextPageToken, files(id,name,mimeType,size,modifiedTime)")
-                    .setPageSize(200)
-                    .setPageToken(pageToken)
-                    .setIncludeItemsFromAllDrives(true)
-                    .setSupportsAllDrives(true)
-                    .execute()
-                files.addAll(result.files ?: emptyList())
-                pageToken = result.nextPageToken
-            } while (pageToken != null)
-
-            Result.success(files.map { toFileItem(it) })
-        } catch (e: Exception) {
-            android.util.Log.e("GoogleDriveApiClient", "listSharedWithMe failed: ${e.message}", e)
-            Result.failure(e)
-        }
-    }
+    suspend fun listSharedWithMe(account: CloudAccount): Result<List<FileItem>> =
+        queryFiles(account, "sharedWithMe = true and trashed = false", "listSharedWithMe")
 
     /** Shared Drives (formerly Team Drives) this account belongs to. A Shared Drive's own id also
      * works directly as a parentId for listFiles() — its "root" IS that id, no special corpora
@@ -390,67 +329,64 @@ class GoogleDriveApiClient @Inject constructor(
                 targetFile.delete()
             }
 
-            if (exportMimeType != null) {
-                val inputStream = drive.files().export(fileId, exportMimeType).executeMediaAsInputStream()
-                FileOutputStream(targetFile).use { output ->
-                    val buffer = ByteArray(64 * 1024)
-                    var bytesRead = 0L
-                    var read: Int
-                    while (inputStream.read(buffer).also { read = it } != -1) {
-                        output.write(buffer, 0, read)
-                        bytesRead += read
-                        onProgress?.invoke(bytesRead, totalBytes)
-                    }
-                }
-            } else {
-                try {
-                    val inputStream = drive.files().get(fileId).setSupportsAllDrives(true).executeMediaAsInputStream()
-                    FileOutputStream(targetFile).use { output ->
-                        val buffer = ByteArray(64 * 1024)
-                        var bytesRead = 0L
-                        var read: Int
-                        while (inputStream.read(buffer).also { read = it } != -1) {
-                            kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                            output.write(buffer, 0, read)
-                            bytesRead += read
-                            onProgress?.invoke(bytesRead, totalBytes)
-                        }
-                    }
-                } catch (e: Exception) {
-                    if (e is kotlinx.coroutines.CancellationException) throw e
-                    val msg = e.message.orEmpty()
-                    if (msg.contains("fileNotDownloadable") || msg.contains("Use Export") || msg.contains("403")) {
+            var written: File = targetFile
+            try {
+                if (exportMimeType != null) {
+                    drive.files().export(fileId, exportMimeType).executeMediaAsInputStream()
+                        .use { copyWithProgress(it, targetFile, totalBytes, onProgress) }
+                } else {
+                    try {
+                        drive.files().get(fileId).setSupportsAllDrives(true).executeMediaAsInputStream()
+                            .use { copyWithProgress(it, targetFile, totalBytes, onProgress) }
+                    } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        // Only Drive's own "this is a Google Docs file, export it" rejection falls
+                        // back to export — a plain 403 (quota, permissions) used to trigger it
+                        // too, replacing the real error with a confusing export failure.
+                        val msg = e.message.orEmpty()
+                        if (!msg.contains("fileNotDownloadable") && !msg.contains("Use Export")) throw e
                         android.util.Log.i("GoogleDriveApiClient", "Binary download rejected; attempting Google Docs export for $fileId")
-                        val exportedFile = if (targetFile.name.contains(".")) targetFile else File(targetFile.parentFile, "${targetFile.name}.docx")
-                        if (exportedFile.exists()) exportedFile.delete()
+                        targetFile.delete()
+                        written = if (targetFile.name.contains(".")) targetFile else File(targetFile.parentFile, "${targetFile.name}.docx")
+                        if (written.exists()) written.delete()
                         val exportStream = try {
                             drive.files().export(fileId, "application/vnd.openxmlformats-officedocument.wordprocessingml.document").executeMediaAsInputStream()
                         } catch (e2: Exception) {
                             drive.files().export(fileId, "application/pdf").executeMediaAsInputStream()
                         }
-                        FileOutputStream(exportedFile).use { output ->
-                            val buffer = ByteArray(64 * 1024)
-                            var bytesRead = 0L
-                            var read: Int
-                            while (exportStream.read(buffer).also { read = it } != -1) {
-                                kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                                output.write(buffer, 0, read)
-                                bytesRead += read
-                                onProgress?.invoke(bytesRead, totalBytes)
-                            }
-                        }
-                        return@withContext Result.success(exportedFile)
-                    } else {
-                        throw e
+                        exportStream.use { copyWithProgress(it, written, totalBytes, onProgress) }
                     }
                 }
+            } catch (e: Throwable) {
+                // Never leave a truncated file behind looking like a finished download.
+                written.delete()
+                throw e
             }
-            onProgress?.invoke(targetFile.length(), targetFile.length())
-            Result.success(targetFile)
+            onProgress?.invoke(written.length(), written.length())
+            Result.success(written)
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             android.util.Log.e("GoogleDriveApiClient", "Download failed for fileId=$fileId, fileName=$fileName: ${e.message}", e)
             Result.failure(e)
+        }
+    }
+
+    private suspend fun copyWithProgress(
+        input: java.io.InputStream,
+        target: File,
+        totalBytes: Long,
+        onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)?
+    ) {
+        FileOutputStream(target).use { output ->
+            val buffer = ByteArray(64 * 1024)
+            var bytesRead = 0L
+            var read: Int
+            while (input.read(buffer).also { read = it } != -1) {
+                currentCoroutineContext().ensureActive()
+                output.write(buffer, 0, read)
+                bytesRead += read
+                onProgress?.invoke(bytesRead, totalBytes)
+            }
         }
     }
 
@@ -475,7 +411,7 @@ class GoogleDriveApiClient @Inject constructor(
                 val bytesSent = (progress * totalBytes).toLong()
                 onProgress?.invoke(bytesSent, totalBytes)
             }
-            val created = uploader.setFields("id").execute()
+            val created = uploader.setFields("id").setSupportsAllDrives(true).execute()
             onProgress?.invoke(totalBytes, totalBytes)
             Result.success(created.id)
         } catch (e: Exception) {
@@ -492,7 +428,7 @@ class GoogleDriveApiClient @Inject constructor(
                 mimeType = "application/vnd.google-apps.folder"
                 parents = listOf(effectiveParent)
             }
-            val created = drive.files().create(metadata).setFields("id").execute()
+            val created = drive.files().create(metadata).setFields("id").setSupportsAllDrives(true).execute()
             Result.success(
                 FileItem(
                     id = created.id,
@@ -510,7 +446,7 @@ class GoogleDriveApiClient @Inject constructor(
     suspend fun deleteFile(account: CloudAccount, fileId: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val drive = buildDrive(account)
-            drive.files().delete(fileId).execute()
+            drive.files().delete(fileId).setSupportsAllDrives(true).execute()
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
@@ -522,7 +458,7 @@ class GoogleDriveApiClient @Inject constructor(
     suspend fun trashFile(account: CloudAccount, fileId: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val drive = buildDrive(account)
-            drive.files().update(fileId, DriveFile().apply { trashed = true }).execute()
+            drive.files().update(fileId, DriveFile().apply { trashed = true }).setSupportsAllDrives(true).execute()
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
@@ -534,7 +470,7 @@ class GoogleDriveApiClient @Inject constructor(
     suspend fun restoreFromTrash(account: CloudAccount, fileId: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val drive = buildDrive(account)
-            drive.files().update(fileId, DriveFile().apply { trashed = false }).execute()
+            drive.files().update(fileId, DriveFile().apply { trashed = false }).setSupportsAllDrives(true).execute()
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
@@ -544,7 +480,7 @@ class GoogleDriveApiClient @Inject constructor(
     suspend fun renameFile(account: CloudAccount, fileId: String, newName: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val drive = buildDrive(account)
-            drive.files().update(fileId, DriveFile().apply { name = newName }).execute()
+            drive.files().update(fileId, DriveFile().apply { name = newName }).setSupportsAllDrives(true).execute()
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)

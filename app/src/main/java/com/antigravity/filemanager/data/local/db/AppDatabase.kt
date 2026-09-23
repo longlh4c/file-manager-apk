@@ -196,7 +196,7 @@ interface BookmarkDao {
 @Database(
     entities = [TrashEntity::class, CloudEntity::class, FolderPreferenceEntity::class, BookmarkEntity::class],
     version = 6,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun trashDao(): TrashDao

@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit
 class TransferConcurrencyFtplet(maxConcurrentTransfers: Int) : DefaultFtplet() {
     private val semaphore = Semaphore(maxConcurrentTransfers, true) // fair: first-in-first-served
     private val permitHeldAttr = "owl_transfer_permit_held"
+    private val disconnectedAttr = "owl_transfer_disconnected"
     private val lock = Any()
 
     companion object {
@@ -31,10 +32,19 @@ class TransferConcurrencyFtplet(maxConcurrentTransfers: Int) : DefaultFtplet() {
         }
 
         return if (acquired) {
-            synchronized(lock) {
-                session.setAttribute(permitHeldAttr, true)
+            val stillConnected = synchronized(lock) {
+                // The client may have gone away while this transfer waited for a slot. Its
+                // onDisconnect already ran and found nothing to release, so keeping the slot now
+                // would leak it for good; after 4 such leaks every transfer timed out.
+                if (session.getAttribute(disconnectedAttr) == true) {
+                    semaphore.release()
+                    false
+                } else {
+                    session.setAttribute(permitHeldAttr, true)
+                    true
+                }
             }
-            FtpletResult.DEFAULT
+            if (stillConnected) FtpletResult.DEFAULT else FtpletResult.DISCONNECT
         } else {
             android.util.Log.w(
                 "TransferLimiter",
@@ -67,7 +77,13 @@ class TransferConcurrencyFtplet(maxConcurrentTransfers: Int) : DefaultFtplet() {
     }
 
     override fun onDisconnect(session: FtpSession): FtpletResult {
-        release(session)
+        synchronized(lock) {
+            session.setAttribute(disconnectedAttr, true)
+            release(session)
+        }
         return FtpletResult.DEFAULT
     }
+
+    /** Free transfer slots; for tests. */
+    internal fun availableSlots(): Int = semaphore.availablePermits()
 }

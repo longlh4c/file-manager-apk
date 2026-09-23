@@ -567,9 +567,18 @@ fun CloudExplorerScreen(
                 )
             }
 
+            // The folder shown here receives items dragged from the other dual-panel pane.
+            val shownFolderName = if (uiState.currentPath.isBlank() || uiState.currentPath == "/") uiState.account?.accountName ?: title else uiState.currentPath.trimEnd('/').substringAfterLast('/')
             PullToRefreshWrapper(
                 onRefresh = { viewModel.refresh(isManual = true) },
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize().then(
+                    if (uiState.isInsideTrashView) Modifier
+                    else Modifier.dualPaneDropZone(
+                        location = cloudLocation(accountId, uiState.currentPath),
+                        name = shownFolderName,
+                        isPaneBackground = true
+                    ) { items -> viewModel.dropItems(items) }
+                )
             ) {
                 if (uiState.isSearching && filteredFiles.isEmpty()) {
                     Box(
@@ -629,10 +638,30 @@ fun CloudExplorerScreen(
                             isLoading = uiState.isLoading,
                             record = uiState.searchQuery.isBlank()
                         )
+                        val revealName = uiState.revealItemName
+                        LaunchedEffect(revealName, filteredFiles) {
+                            if (revealName == null) return@LaunchedEffect
+                            val index = filteredFiles.indexOfFirst { it.name == revealName }
+                            if (index >= 0) {
+                                listState.animateScrollToItem(index)
+                                viewModel.onItemRevealed()
+                            }
+                        }
                         LazyColumn(state = listState, modifier = Modifier.fillMaxSize().weight(1f)) {
                         items(filteredFiles, key = { it.id }) { file ->
                             FileListItem(
                                 file = file,
+                                modifier = Modifier.dualPaneDragSource(
+                                    sourceLocation = cloudLocation(accountId, uiState.currentPath),
+                                    items = { viewModel.dragItems(file) },
+                                    onFinished = { viewModel.clearSelection() }
+                                ).then(
+                                    if (file.isDirectory && !uiState.isInsideTrashView) {
+                                        Modifier.dualPaneDropZone(location = cloudLocation(accountId, file.path), name = file.name) { items ->
+                                            viewModel.dropItems(items, targetPath = file.path)
+                                        }
+                                    } else Modifier
+                                ),
                                 // Keyed by id, not path: MEGA (and its Rubbish Bin in particular)
                                 // allows multiple siblings with the identical name, and this
                                 // app's display "path" for a cloud item is built from its name —

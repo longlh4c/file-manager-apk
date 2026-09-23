@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.antigravity.filemanager.domain.model.CategoryType
 import com.antigravity.filemanager.presentation.components.CategoryCard
+import com.antigravity.filemanager.presentation.components.dualPaneDropZone
 import com.antigravity.filemanager.presentation.components.CloudDownloadProgressDialog
 import com.antigravity.filemanager.presentation.components.FileManagerTopBar
 import com.antigravity.filemanager.presentation.components.PasteBottomBar
@@ -128,6 +129,7 @@ fun DashboardScreen(
                 CircularProgressIndicator(color = TealPrimary)
             }
         }
+        val dragState = com.antigravity.filemanager.presentation.components.LocalDualPaneDrag.current
         LazyVerticalGrid(
             columns = GridCells.Fixed(3),
             modifier = Modifier
@@ -139,10 +141,31 @@ fun DashboardScreen(
         ) {
             items(
                 uiState.categories.filterNot { it.type == CategoryType.CLOUD || it.type == CategoryType.ACCESS_FROM_NETWORK },
-                key = { it.type.name + it.title }
+                key = { it.type.name + it.title + it.id }
             ) { summary ->
                 CategoryCard(
                     summary = summary,
+                    // In dual-panel mode Main storage and Downloads take drops (the folder opens
+                    // in this pane and receives them) and the Recycle Bin trashes them; media
+                    // categories are views, not places, so they take none.
+                    modifier = when (summary.type) {
+                        CategoryType.MAIN_STORAGE, CategoryType.DOWNLOADS -> {
+                            val (path, title) = if (summary.type == CategoryType.MAIN_STORAGE) {
+                                Environment.getExternalStorageDirectory().absolutePath to "Main storage"
+                            } else {
+                                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).absolutePath to "Download"
+                            }
+                            Modifier.dualPaneDropZone(location = path, name = summary.title) { items ->
+                                dragState?.onDropInto?.invoke(path, items)
+                            }
+                        }
+                        CategoryType.RECYCLE_BIN -> Modifier.dualPaneDropZone(
+                            location = "trash",
+                            name = summary.title,
+                            kind = com.antigravity.filemanager.presentation.components.DropZoneKind.TRASH
+                        ) { items -> dragState?.onTrash?.invoke(items) }
+                        else -> Modifier
+                    },
                     onClick = {
                         when (summary.type) {
                             CategoryType.MAIN_STORAGE -> {
@@ -162,7 +185,7 @@ fun DashboardScreen(
                             CategoryType.ACCESS_FROM_NETWORK -> {}
                             CategoryType.RECYCLE_BIN -> onNavigateToTrash()
                             CategoryType.USB_OTG -> {
-                                val usbDrive = uiState.usbDrives.find { it.displayName == summary.title } ?: uiState.usbDrives.firstOrNull()
+                                val usbDrive = uiState.usbDrives.find { it.rootPath == summary.id }
                                 if (usbDrive != null) {
                                     onNavigateToBrowser(usbDrive.rootPath, usbDrive.displayName)
                                 }

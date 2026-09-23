@@ -278,6 +278,20 @@ class TeraBoxApiClientTest {
     }
 
     @Test
+    fun listFilesReadsEveryPage() = runBlocking {
+        val tb = fakeClient { req ->
+            val page = req.url.queryParameter("page")!!.toInt()
+            val count = if (page == 1) 1000 else 3
+            val entries = (0 until count).joinToString(",") { i ->
+                val name = "f${page}_$i.txt"
+                """{"fs_id":"${page}_$i","path":"/big/$name","server_filename":"$name","isdir":0,"size":1}"""
+            }
+            200 to """{"errno":0,"list":[$entries]}""".toByteArray()
+        }
+        assertEquals(1003, tb.listFiles(account, "/big").getOrThrow().size)
+    }
+
+    @Test
     fun listFilesSetsExtensionForFilesOnly() = runBlocking {
         val tb = fakeClient {
             200 to """{"errno":0,"list":[
@@ -289,6 +303,99 @@ class TeraBoxApiClientTest {
         assertEquals("", items.getValue("Photos").extension)
         assertEquals("jpg", items.getValue("Photos.Trip.JPG").extension)
         assertEquals("", items.getValue("notes").extension)
+    }
+
+    @Test
+    fun uploadSendsFourMegabyteSlicesToTheUploadHost() = runBlocking {
+        val file = java.io.File.createTempFile("tb_upload", ".bin").apply {
+            deleteOnExit()
+            writeBytes(ByteArray(10 * 1024 * 1024) { (it % 251).toByte() })
+        }
+        val slices = mutableListOf<Pair<String, Int>>()
+        var createBlockList = ""
+        var precreateBlockList = ""
+        val tb = fakeClient { req ->
+            val path = req.url.encodedPath
+            when {
+                path == "/api/precreate" -> {
+                    precreateBlockList = formField(req, "block_list")
+                    200 to """{"errno":0,"return_type":1,"uploadid":"UP1"}""".toByteArray()
+                }
+                path == "/rest/2.0/pcs/file" && req.url.queryParameter("method") == "locateupload" ->
+                    200 to """{"host":"c-test.terabox.com"}""".toByteArray()
+                path == "/rest/2.0/pcs/superfile2" -> {
+                    val seq = req.url.queryParameter("partseq")!!.toInt()
+                    slices += req.url.host to seq
+                    200 to """{"md5":"slice$seq"}""".toByteArray()
+                }
+                path == "/api/create" -> {
+                    createBlockList = formField(req, "block_list")
+                    200 to """{"errno":0,"fs_id":99}""".toByteArray()
+                }
+                else -> 404 to ByteArray(0)
+            }
+        }
+
+        val item = tb.uploadFile(account, file, "/dir").getOrThrow()
+
+        assertEquals(listOf("c-test.terabox.com" to 0, "c-test.terabox.com" to 1, "c-test.terabox.com" to 2), slices)
+        assertEquals(3, org.json.JSONArray(precreateBlockList).length())
+        assertEquals("""["slice0","slice1","slice2"]""", createBlockList)
+        assertEquals("99", item.id)
+        assertEquals("/dir/${file.name}", item.path)
+    }
+
+    @Test
+    fun wrongClusterIsRetriedOnTheAdvertisedPrefix() = runBlocking {
+        val hosts = mutableListOf<String>()
+        val http = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val req = chain.request()
+                hosts += req.url.host
+                val onRightCluster = req.url.host == "jp.terabox.com"
+                val builder = okhttp3.Response.Builder()
+                    .request(req).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("test")
+                    .body(okhttp3.ResponseBody.create(
+                        "application/json".toMediaTypeOrNull(),
+                        if (onRightCluster) """{"errno":0,"list":[]}""" else """{"errno":-6}"""
+                    ))
+                if (!onRightCluster) builder.header("Url-Domain-Prefix", "jp")
+                builder.build()
+            }
+            .build()
+        val tb = TeraBoxApiClient(http)
+
+        val result = tb.listFiles(account, "/")
+
+        assertTrue(result.isSuccess)
+        assertEquals(listOf("www.terabox.com", "jp.terabox.com"), hosts)
+    }
+
+    @Test
+    fun deleteRunsSynchronouslyAndReportsPerItemFailure() = runBlocking {
+        var query = ""
+        val tb = fakeClient { req ->
+            when (req.url.encodedPath) {
+                "/api/filemanager" -> {
+                    query = req.url.query.orEmpty()
+                    200 to """{"errno":0,"info":[{"errno":-9,"path":"/_owltest"}]}""".toByteArray()
+                }
+                else -> 404 to ByteArray(0)
+            }
+        }
+
+        val result = tb.deleteFile(account, "/_owltest")
+
+        assertTrue(result.isFailure)
+        assertTrue(query.contains("opera=delete"))
+        assertTrue(query.contains("async=0"))
+    }
+
+    private fun formField(req: okhttp3.Request, name: String): String {
+        val buffer = okio.Buffer()
+        req.body!!.writeTo(buffer)
+        return buffer.readUtf8().split("&").map { java.net.URLDecoder.decode(it, "UTF-8") }
+            .first { it.startsWith("$name=") }.substringAfter("=")
     }
 
     @Test

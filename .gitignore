@@ -1,2 +1,10 @@
 /app/build
 /.gradle
+/build
+local.properties
+*.apk
+hs_err_pid*.log
+replay_pid*.log
+temp_*
+.idea/
+*.iml

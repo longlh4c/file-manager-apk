@@ -6,16 +6,28 @@ import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "file_manager_prefs")
+// A corrupt settings file (e.g. power loss mid-write) used to make every read throw, crashing the
+// app on each launch; start over from defaults instead.
+private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
+    name = "file_manager_prefs",
+    corruptionHandler = androidx.datastore.core.handlers.ReplaceFileCorruptionHandler { emptyPreferences() }
+)
 
 @Singleton
 class PreferenceManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
+    // A read error (not corruption, handled above) falls back to defaults rather than crashing
+    // whichever screen collects these flows.
+    private val prefsData: Flow<Preferences> = context.dataStore.data.catch { e ->
+        if (e is java.io.IOException) emit(emptyPreferences()) else throw e
+    }
+
     private object Keys {
         val FTP_PORT = intPreferencesKey("ftp_port")
         val HTTP_PORT = intPreferencesKey("http_port")
@@ -34,19 +46,19 @@ class PreferenceManager @Inject constructor(
         val IS_VIEWING_IMAGE = booleanPreferencesKey("is_viewing_image")
     }
 
-    val ftpPortFlow: Flow<Int> = context.dataStore.data.map { it[Keys.FTP_PORT] ?: 1524 }
-    val httpPortFlow: Flow<Int> = context.dataStore.data.map { it[Keys.HTTP_PORT] ?: 8080 }
-    val ftpPasswordFlow: Flow<String> = context.dataStore.data.map { it[Keys.FTP_PASSWORD] ?: "" }
-    val ftpRandomPasswordFlow: Flow<Boolean> = context.dataStore.data.map { it[Keys.FTP_RANDOM_PASSWORD] ?: false }
+    val ftpPortFlow: Flow<Int> = prefsData.map { it[Keys.FTP_PORT] ?: 1524 }
+    val httpPortFlow: Flow<Int> = prefsData.map { it[Keys.HTTP_PORT] ?: 8080 }
+    val ftpPasswordFlow: Flow<String> = prefsData.map { it[Keys.FTP_PASSWORD] ?: "" }
+    val ftpRandomPasswordFlow: Flow<Boolean> = prefsData.map { it[Keys.FTP_RANDOM_PASSWORD] ?: false }
     // Whether the FTP/HTTP server was left running (as opposed to explicitly stopped by the user) —
     // used to auto-restart it if the OS/OEM battery manager kills the app process outright while
     // it's on, since a plain Android low-memory kill doesn't otherwise bring the FTP listener back
     // on its own. See FtpServerService.onStartCommand's null-intent (system restart) branch.
-    val ftpWasRunningFlow: Flow<Boolean> = context.dataStore.data.map { it[Keys.FTP_WAS_RUNNING] ?: false }
-    val isGridViewFlow: Flow<Boolean> = context.dataStore.data.map { it[Keys.IS_GRID_VIEW] ?: true }
-    val defaultSortOptionFlow: Flow<String> = context.dataStore.data.map { it[Keys.DEFAULT_SORT_OPTION] ?: "BY_NAME_ASC" }
-    val defaultViewModeFlow: Flow<String> = context.dataStore.data.map { it[Keys.DEFAULT_VIEW_MODE] ?: "LIST" }
-    val defaultShowHiddenFlow: Flow<Boolean> = context.dataStore.data.map { it[Keys.DEFAULT_SHOW_HIDDEN] ?: false }
+    val ftpWasRunningFlow: Flow<Boolean> = prefsData.map { it[Keys.FTP_WAS_RUNNING] ?: false }
+    val isGridViewFlow: Flow<Boolean> = prefsData.map { it[Keys.IS_GRID_VIEW] ?: true }
+    val defaultSortOptionFlow: Flow<String> = prefsData.map { it[Keys.DEFAULT_SORT_OPTION] ?: "BY_NAME_ASC" }
+    val defaultViewModeFlow: Flow<String> = prefsData.map { it[Keys.DEFAULT_VIEW_MODE] ?: "LIST" }
+    val defaultShowHiddenFlow: Flow<Boolean> = prefsData.map { it[Keys.DEFAULT_SHOW_HIDDEN] ?: false }
 
     suspend fun saveFtpConfig(port: Int, password: String, isRandom: Boolean) {
         context.dataStore.edit { prefs ->
@@ -93,7 +105,7 @@ class PreferenceManager @Inject constructor(
         }
     }
 
-    val lastViewedImageFlow: Flow<LastViewedImageState?> = context.dataStore.data.map { prefs ->
+    val lastViewedImageFlow: Flow<LastViewedImageState?> = prefsData.map { prefs ->
         if (prefs[Keys.IS_VIEWING_IMAGE] == true) {
             val path = prefs[Keys.LAST_VIEWED_IMAGE_PATH]
             if (!path.isNullOrEmpty()) {

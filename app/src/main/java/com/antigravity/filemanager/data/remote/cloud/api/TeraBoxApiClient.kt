@@ -11,7 +11,6 @@ import kotlinx.coroutines.withContext
 import okhttp3.*
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -45,6 +44,8 @@ class TeraBoxApiClient @Inject constructor(
         const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         const val REFERER = "https://www.terabox.com/main"
         const val APP_ID = "250528"
+        const val UPLOAD_BLOCK_SIZE = 4 * 1024 * 1024
+        const val DEFAULT_UPLOAD_HOST = "https://c-jp.terabox.com"
     }
 
     @Volatile
@@ -149,24 +150,30 @@ class TeraBoxApiClient @Inject constructor(
         method: String = "GET",
         body: RequestBody? = null
     ): Pair<Response, String> {
+        val usedPrefix = currentDomainPrefix
         val fullUrl = "${getBaseUrl()}$pathWithQuery"
         val req = buildAuthorizedRequest(fullUrl, cookieHeader, method, body)
         val resp = okHttpClient.newCall(req).execute()
 
         // Capture Url-Domain-Prefix header if present in any response
-        val domainPrefix = resp.header("Url-Domain-Prefix")
-        if (!domainPrefix.isNullOrBlank() && domainPrefix != currentDomainPrefix) {
+        val domainPrefix = resp.header("Url-Domain-Prefix")?.takeIf { it.isNotBlank() }
+        if (domainPrefix != null && domainPrefix != currentDomainPrefix) {
             currentDomainPrefix = domainPrefix
         }
 
         val bodyString = resp.body?.string() ?: ""
 
-        // Check if errno == -6 ("user not login" due to wrong domain cluster)
+        // Check if errno == -6 ("user not login" due to wrong domain cluster). Compare against
+        // the cluster this request actually went to: the header above has already been stored,
+        // and a concurrent request may have learned the right cluster meanwhile — comparing with
+        // currentDomainPrefix skipped the retry, so the first listing after a cold start failed.
         if (bodyString.contains("\"errno\":-6") || bodyString.contains("\"errno\": -6")) {
-            val targetPrefix = domainPrefix?.takeIf { it.isNotBlank() } ?: if (currentDomainPrefix == null) "dm" else null
-            if (targetPrefix != null && targetPrefix != currentDomainPrefix) {
+            val targetPrefix = domainPrefix
+                ?: currentDomainPrefix?.takeIf { it != usedPrefix }
+                ?: if (usedPrefix == null) "dm" else null
+            if (targetPrefix != null && targetPrefix != usedPrefix) {
                 currentDomainPrefix = targetPrefix
-                val retryUrl = "${getBaseUrl()}$pathWithQuery"
+                val retryUrl = "https://$targetPrefix.terabox.com$pathWithQuery"
                 val retryReq = buildAuthorizedRequest(retryUrl, cookieHeader, method, body)
                 val retryResp = okHttpClient.newCall(retryReq).execute()
                 val retryBody = retryResp.body?.string() ?: ""
@@ -326,10 +333,10 @@ class TeraBoxApiClient @Inject constructor(
 
         val thumbUrl = rawThumb?.replace("\\/", "/")?.replace("&amp;", "&")
         if (thumbUrl.isNullOrBlank()) return null
+        // Account-scoped only: bare path keys let one account's "/Photos/a.jpg" thumbnail show up
+        // for another account's file at the same path.
         thumbnailUrls["${account.id}:$fsId"] = thumbUrl
         thumbnailUrls["${account.id}:$filePath"] = thumbUrl
-        thumbnailUrls[fsId] = thumbUrl
-        thumbnailUrls[filePath] = thumbUrl
         return thumbUrl
     }
 
@@ -374,33 +381,43 @@ class TeraBoxApiClient @Inject constructor(
             }
 
             val encodedDir = URLEncoder.encode(cleanPath, "UTF-8")
-            val pathWithQuery = "/api/list?web=1&clienttype=0&app_id=250528&channel=dubox&dir=$encodedDir&order=name&desc=0&num=1000&page=1&showempty=0"
-            val (response, body) = executeWithRetry(pathWithQuery, cookie)
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
-            }
-
-            val json = JSONObject(body)
-            val errno = json.optInt("errno", -1)
-            if (errno != 0) {
-                // errno == -9 means directory does not exist or empty
-                if (errno == -9) {
-                    return@withContext Result.success(emptyList())
+            val pageSize = 1000
+            // A folder is returned one page at a time; only reading page 1 silently cut every
+            // folder off at its first 1000 entries.
+            val pages = mutableListOf<JSONArray>()
+            var page = 1
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val pathWithQuery = "/api/list?web=1&clienttype=0&app_id=250528&channel=dubox&dir=$encodedDir&order=name&desc=0&num=$pageSize&page=$page&showempty=0"
+                val (response, body) = executeWithRetry(pathWithQuery, cookie)
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
                 }
-                return@withContext Result.failure(IOException("TeraBox listFiles failed (errno: $errno)"))
+
+                val json = JSONObject(body)
+                val errno = json.optInt("errno", -1)
+                if (errno != 0) {
+                    // errno == -9 means directory does not exist or empty
+                    if (errno == -9 && page == 1) {
+                        return@withContext Result.success(emptyList())
+                    }
+                    return@withContext Result.failure(IOException("TeraBox listFiles failed (errno: $errno)"))
+                }
+                val pageItems = json.optJSONArray("list") ?: JSONArray()
+                pages.add(pageItems)
+                if (pageItems.length() < pageSize) break
+                page++
             }
 
-            val listJson = json.optJSONArray("list") ?: JSONArray()
             val items = mutableListOf<FileItem>()
 
-            for (i in 0 until listJson.length()) {
-                val item = listJson.getJSONObject(i)
+            for (item in pages.flatMap { arr -> (0 until arr.length()).map { arr.getJSONObject(it) } }) {
                 val fileName = item.optString("server_filename", "")
                 val filePath = item.optString("path", cleanPath.trimEnd('/') + "/" + fileName)
                 val isDir = item.optInt("isdir", 0) == 1
                 val size = item.optLong("size", 0L)
                 val mtimeSec = item.optLong("server_mtime", 0L)
-                val lastModified = if (mtimeSec > 0) mtimeSec * 1000L else System.currentTimeMillis()
+                val lastModified = if (mtimeSec > 0) mtimeSec * 1000L else 0L
                 val fsId = item.opt("fs_id")?.toString() ?: filePath
                 cacheThumbnailUrl(account, item, fsId, filePath)
 
@@ -482,25 +499,36 @@ class TeraBoxApiClient @Inject constructor(
         }
     }
 
+    /** Runs a /api/filemanager operation synchronously (async=0) with the page jsToken. The
+     * top-level errno can be 0 while an individual item failed, so per-item errors count too. */
+    private fun fileManager(opera: String, fileListJson: String, cookie: String): Result<Unit> {
+        val jsToken = fetchJsToken(cookie)
+        val tokenQuery = if (jsToken.isNotBlank()) "&jsToken=${URLEncoder.encode(jsToken, "UTF-8")}" else ""
+        val formBody = FormBody.Builder().add("filelist", fileListJson).build()
+        val (response, body) = executeWithRetry(
+            "/api/filemanager?opera=$opera&async=0&onnest=fail$tokenQuery", cookie, method = "POST", body = formBody
+        )
+        if (!response.isSuccessful) {
+            return Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
+        }
+        val json = JSONObject(body)
+        val info = json.optJSONArray("info")
+        val itemErrno = (0 until (info?.length() ?: 0))
+            .map { info!!.optJSONObject(it)?.optInt("errno", 0) ?: 0 }
+            .firstOrNull { it != 0 } ?: 0
+        val errno = json.optInt("errno", -1).takeIf { it != 0 } ?: itemErrno
+        if (errno != 0) {
+            android.util.Log.e("TeraBoxApiClient", "filemanager $opera failed: ${body.take(500)}")
+            return Result.failure(IOException("TeraBox $opera failed (errno: $errno)"))
+        }
+        return Result.success(Unit)
+    }
+
     suspend fun deleteFile(account: CloudAccount, remotePath: String): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val cookie = getCookieString(account)
             val fileListJson = JSONArray().put(remotePath).toString()
-            val formBody = FormBody.Builder()
-                .add("filelist", fileListJson)
-                .build()
-
-            val (response, body) = executeWithRetry("/api/filemanager?opera=delete", cookie, method = "POST", body = formBody)
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
-            }
-
-            val json = JSONObject(body)
-            val errno = json.optInt("errno", -1)
-            if (errno != 0) {
-                return@withContext Result.failure(IOException("TeraBox delete failed (errno: $errno)"))
-            }
-            Result.success(Unit)
+            fileManager("delete", fileListJson, cookie)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -514,21 +542,7 @@ class TeraBoxApiClient @Inject constructor(
                 put("newname", newName)
             }
             val fileListJson = JSONArray().put(renameEntry).toString()
-            val formBody = FormBody.Builder()
-                .add("filelist", fileListJson)
-                .build()
-
-            val (response, body) = executeWithRetry("/api/filemanager?opera=rename", cookie, method = "POST", body = formBody)
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
-            }
-
-            val json = JSONObject(body)
-            val errno = json.optInt("errno", -1)
-            if (errno != 0) {
-                return@withContext Result.failure(IOException("TeraBox rename failed (errno: $errno)"))
-            }
-            Result.success(Unit)
+            fileManager("rename", fileListJson, cookie)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -549,21 +563,7 @@ class TeraBoxApiClient @Inject constructor(
                 put("newname", fileName)
             }
             val fileListJson = JSONArray().put(moveEntry).toString()
-            val formBody = FormBody.Builder()
-                .add("filelist", fileListJson)
-                .build()
-
-            val (response, body) = executeWithRetry("/api/filemanager?opera=move", cookie, method = "POST", body = formBody)
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(IOException("HTTP ${response.code}: ${response.message}"))
-            }
-
-            val json = JSONObject(body)
-            val errno = json.optInt("errno", -1)
-            if (errno != 0) {
-                return@withContext Result.failure(IOException("TeraBox move failed (errno: $errno)"))
-            }
-            Result.success(Unit)
+            fileManager("move", fileListJson, cookie)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -589,6 +589,7 @@ class TeraBoxApiClient @Inject constructor(
             }
 
             if (!response.isSuccessful) {
+                response.close()
                 // If failed, try regional baseUrl once
                 if (currentDomainPrefix != null) {
                     val retryUrl = "${getBaseUrl()}/rest/2.0/pcs/file?method=download&path=$encodedPath"
@@ -596,11 +597,15 @@ class TeraBoxApiClient @Inject constructor(
                     response = okHttpClient.newCall(request).execute()
                 }
                 if (!response.isSuccessful) {
+                    response.close()
                     return@withContext Result.failure(IOException("Download failed with HTTP ${response.code}"))
                 }
             }
 
-            val responseBody = response.body ?: return@withContext Result.failure(IOException("Empty response body"))
+            val responseBody = response.body ?: run {
+                response.close()
+                return@withContext Result.failure(IOException("Empty response body"))
+            }
             val totalBytes = responseBody.contentLength()
             var bytesRead = 0L
             var lastProgressTime = 0L
@@ -727,7 +732,6 @@ class TeraBoxApiClient @Inject constructor(
             }
 
             val cachedUrl = thumbnailUrls["${account.id}:$nodeIdOrPath"]
-                ?: thumbnailUrls[nodeIdOrPath]
                 ?: if (nodeIdOrPath.startsWith("http://") || nodeIdOrPath.startsWith("https://")) nodeIdOrPath else null
 
             var thumbUrl = cachedUrl
@@ -823,11 +827,12 @@ class TeraBoxApiClient @Inject constructor(
             val targetPath = "$cleanParent/${localFile.name}"
             val fileSize = localFile.length()
 
-            // 1. Calculate file MD5
-            val md5 = calculateMD5(localFile)
-            val blockListJson = JSONArray().put(md5).toString()
+            // 1. Per-block MD5s: TeraBox splits a file into 4 MB blocks, each uploaded as its own
+            // slice and listed in block_list (a single whole-file MD5 only matches small files).
+            val blockMd5s = calculateBlockMd5s(localFile)
+            val blockListJson = JSONArray(blockMd5s).toString()
 
-            // 2. Precreate file
+            // 2. Precreate
             val precreateBody = FormBody.Builder()
                 .add("path", targetPath)
                 .add("size", fileSize.toString())
@@ -836,69 +841,83 @@ class TeraBoxApiClient @Inject constructor(
                 .add("block_list", blockListJson)
                 .build()
 
-            val (precreateResp, precreateBodyStr) = executeWithRetry("/api/precreate", cookie, method = "POST", body = precreateBody)
+            // The web API rejects precreate/create without the page's jsToken.
+            val jsToken = fetchJsToken(cookie)
+            val tokenQuery = if (jsToken.isNotBlank()) "?jsToken=${URLEncoder.encode(jsToken, "UTF-8")}" else ""
+            val (precreateResp, precreateBodyStr) = executeWithRetry("/api/precreate$tokenQuery", cookie, method = "POST", body = precreateBody)
             if (!precreateResp.isSuccessful) {
                 return@withContext Result.failure(IOException("Precreate failed: HTTP ${precreateResp.code}"))
             }
 
             val precreateJson = JSONObject(precreateBodyStr)
             val precreateErr = precreateJson.optInt("errno", -1)
+            if (precreateErr != 0) {
+                android.util.Log.e("TeraBoxApiClient", "precreate failed (jsToken ${if (jsToken.isBlank()) "missing" else "present"}): $precreateBodyStr")
+                return@withContext Result.failure(IOException("TeraBox precreate failed (errno: $precreateErr)"))
+            }
             val returnType = precreateJson.optInt("return_type", 1) // 2 = rapid upload (already exists on server)
 
-            if (precreateErr == 0 && returnType == 2) {
+            if (returnType == 2) {
                 // Rapid upload completed!
                 onProgress?.invoke(fileSize, fileSize)
-                val fsId = precreateJson.opt("fs_id")?.toString() ?: targetPath
-                return@withContext Result.success(
-                    FileItem(
-                        id = fsId,
-                        name = localFile.name,
-                        path = targetPath,
-                        size = fileSize,
-                        isDirectory = false,
-                        lastModified = System.currentTimeMillis(),
-                        extension = localFile.extension
-                    )
-                )
+                val fsId = precreateJson.optJSONObject("info")?.opt("fs_id")?.toString()
+                    ?: precreateJson.opt("fs_id")?.toString() ?: targetPath
+                return@withContext Result.success(uploadedItem(fsId, localFile, targetPath, fileSize))
             }
 
             val uploadId = precreateJson.optString("uploadid", "")
+            if (uploadId.isBlank()) {
+                return@withContext Result.failure(IOException("TeraBox precreate returned no upload id"))
+            }
 
-            // 3. Upload slice
-            val uploadUrl = "${getBaseUrl()}/rest/2.0/pcs/superfile2?method=upload&type=tmpfile&path=${URLEncoder.encode(targetPath, "UTF-8")}&uploadid=$uploadId&partseq=0"
+            // 3. Upload each block to the dedicated upload host. Posting slices to the web host
+            // (www.terabox.com) is rejected with HTTP 405 — every upload used to fail there.
+            val uploadHost = locateUploadHost(cookie)
+            val job = currentCoroutineContext()[kotlinx.coroutines.Job]
+            val sliceMd5s = mutableListOf<String>()
+            var uploadedBytes = 0L
+            java.io.RandomAccessFile(localFile, "r").use { raf ->
+                for (partSeq in blockMd5s.indices) {
+                    currentCoroutineContext().ensureActive()
+                    val offset = partSeq.toLong() * UPLOAD_BLOCK_SIZE
+                    val length = minOf(UPLOAD_BLOCK_SIZE.toLong(), fileSize - offset).toInt()
+                    val block = ByteArray(length)
+                    raf.seek(offset)
+                    raf.readFully(block)
 
-            val fileRequestBody = object : RequestBody() {
-                private val fileBody = localFile.asRequestBody("application/octet-stream".toMediaTypeOrNull())
-                override fun contentType() = fileBody.contentType()
-                override fun contentLength() = fileBody.contentLength()
-                override fun writeTo(sink: okio.BufferedSink) {
-                    localFile.inputStream().use { inputStream ->
-                        val buffer = ByteArray(64 * 1024)
-                        var uploaded = 0L
-                        var read: Int
-                        var lastProgress = 0L
-                        while (inputStream.read(buffer).also { read = it } != -1) {
-                            sink.write(buffer, 0, read)
-                            uploaded += read
-                            val now = System.currentTimeMillis()
-                            if (now - lastProgress >= 100) {
-                                lastProgress = now
-                                onProgress?.invoke(uploaded, fileSize)
+                    val sliceBody = object : RequestBody() {
+                        override fun contentType() = "application/octet-stream".toMediaTypeOrNull()
+                        override fun contentLength() = length.toLong()
+                        override fun writeTo(sink: okio.BufferedSink) {
+                            var written = 0
+                            while (written < length) {
+                                if (job?.isActive == false) throw IOException("Upload cancelled")
+                                val n = minOf(64 * 1024, length - written)
+                                sink.write(block, written, n)
+                                written += n
+                                onProgress?.invoke(uploadedBytes + written, fileSize)
                             }
                         }
                     }
+                    val multipartBody = MultipartBody.Builder()
+                        .setType(MultipartBody.FORM)
+                        .addFormDataPart("file", "blob", sliceBody)
+                        .build()
+                    val sliceUrl = "$uploadHost/rest/2.0/pcs/superfile2?method=upload&type=tmpfile" +
+                        "&path=${URLEncoder.encode(targetPath, "UTF-8")}&uploadid=$uploadId&partseq=$partSeq"
+                    val uploadReq = buildAuthorizedRequest(sliceUrl, cookie, method = "POST", body = multipartBody)
+                    val (code, sliceResponse) = okHttpClient.newCall(uploadReq).execute().use { it.code to (it.body?.string() ?: "") }
+                    if (code !in 200..299) {
+                        return@withContext Result.failure(IOException("Slice upload failed: HTTP $code $sliceResponse".take(300)))
+                    }
+                    val sliceJson = try { JSONObject(sliceResponse) } catch (_: Exception) { null }
+                    val sliceErr = sliceJson?.optInt("error_code", 0) ?: 0
+                    if (sliceErr != 0) {
+                        return@withContext Result.failure(IOException("Slice upload failed (error_code: $sliceErr)"))
+                    }
+                    sliceMd5s.add(sliceJson?.optString("md5")?.takeIf { it.isNotBlank() } ?: blockMd5s[partSeq])
+                    uploadedBytes += length
                 }
-            }
-
-            val multipartBody = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart("file", localFile.name, fileRequestBody)
-                .build()
-
-            val uploadReq = buildAuthorizedRequest(uploadUrl, cookie, method = "POST", body = multipartBody)
-            val uploadResp = okHttpClient.newCall(uploadReq).execute()
-            if (!uploadResp.isSuccessful) {
-                return@withContext Result.failure(IOException("Slice upload failed: HTTP ${uploadResp.code}"))
             }
 
             // 4. Create / Finalize
@@ -907,10 +926,10 @@ class TeraBoxApiClient @Inject constructor(
                 .add("size", fileSize.toString())
                 .add("isdir", "0")
                 .add("uploadid", uploadId)
-                .add("block_list", blockListJson)
+                .add("block_list", JSONArray(sliceMd5s).toString())
                 .build()
 
-            val (createResp, createBodyStr) = executeWithRetry("/api/create", cookie, method = "POST", body = createBody)
+            val (createResp, createBodyStr) = executeWithRetry("/api/create$tokenQuery", cookie, method = "POST", body = createBody)
             if (!createResp.isSuccessful) {
                 return@withContext Result.failure(IOException("Create file failed: HTTP ${createResp.code}"))
             }
@@ -918,41 +937,93 @@ class TeraBoxApiClient @Inject constructor(
             val createJson = JSONObject(createBodyStr)
             val createErr = createJson.optInt("errno", -1)
             if (createErr != 0) {
+                android.util.Log.e("TeraBoxApiClient", "create failed: $createBodyStr")
                 return@withContext Result.failure(IOException("Create file failed (errno: $createErr)"))
             }
 
             onProgress?.invoke(fileSize, fileSize)
             val fsId = createJson.opt("fs_id")?.toString() ?: targetPath
-            Result.success(
-                FileItem(
-                    id = fsId,
-                    name = localFile.name,
-                    path = targetPath,
-                    size = fileSize,
-                    isDirectory = false,
-                    lastModified = System.currentTimeMillis(),
-                    extension = localFile.extension
-                )
-            )
+            Result.success(uploadedItem(fsId, localFile, targetPath, fileSize))
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            android.util.Log.e("TeraBoxApiClient", "uploadFile failed for ${localFile.name}", e)
             Result.failure(e)
         }
     }
 
-    private fun calculateMD5(file: File): String {
-        val digest = MessageDigest.getInstance("MD5")
-        file.inputStream().use { fis ->
+    private fun uploadedItem(fsId: String, localFile: File, targetPath: String, size: Long) = FileItem(
+        id = fsId,
+        name = localFile.name,
+        path = targetPath,
+        size = size,
+        isDirectory = false,
+        lastModified = System.currentTimeMillis(),
+        extension = localFile.extension
+    )
+
+    private val jsTokens = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** The anti-CSRF token embedded in the web app's page, required by write calls such as
+     * precreate/create. Empty if it can't be found (the call is then attempted without it). */
+    private fun fetchJsToken(cookie: String): String {
+        jsTokens[cookie]?.let { return it }
+        return try {
+            val html = okHttpClient.newCall(
+                Request.Builder()
+                    .url("${getBaseUrl()}/main")
+                    .header("User-Agent", USER_AGENT)
+                    .header("Cookie", buildCookieHeader(cookie))
+                    .build()
+            ).execute().use { it.body?.string().orEmpty() }
+            val patterns = listOf(
+                Regex("fn%28%22([A-Za-z0-9]+)%22%29"),
+                Regex("fn\\(\"([A-Za-z0-9]+)\"\\)"),
+                Regex("\"jsToken\"\\s*:\\s*\"([^\"]+)\""),
+                Regex("jsToken\\s*=\\s*\"([^\"]+)\"")
+            )
+            val token = patterns.firstNotNullOfOrNull { it.find(html)?.groupValues?.get(1) }.orEmpty()
+            android.util.Log.i("TeraBoxApiClient", "jsToken lookup: ${if (token.isBlank()) "not found (page ${html.length} chars)" else "found (${token.length} chars)"}")
+            if (token.isNotBlank()) jsTokens[cookie] = token
+            token
+        } catch (e: Exception) {
+            android.util.Log.w("TeraBoxApiClient", "jsToken lookup failed: ${e.message}")
+            ""
+        }
+    }
+
+    /** The host slices must be posted to (e.g. https://c-jp.terabox.com), as advertised by the
+     * web API; falls back to TeraBox's main upload cluster if the lookup fails. */
+    private fun locateUploadHost(cookie: String): String {
+        return try {
+            val (resp, body) = executeWithRetry("/rest/2.0/pcs/file?method=locateupload", cookie)
+            val host = if (resp.isSuccessful) JSONObject(body).optString("host") else ""
+            if (host.isNotBlank()) {
+                if (host.startsWith("http")) host.trimEnd('/') else "https://$host"
+            } else DEFAULT_UPLOAD_HOST
+        } catch (e: Exception) {
+            android.util.Log.w("TeraBoxApiClient", "locateupload failed, using $DEFAULT_UPLOAD_HOST: ${e.message}")
+            DEFAULT_UPLOAD_HOST
+        }
+    }
+
+    private fun calculateBlockMd5s(file: File): List<String> {
+        val result = mutableListOf<String>()
+        file.inputStream().use { input ->
             val buffer = ByteArray(64 * 1024)
-            var read: Int
-            while (fis.read(buffer).also { read = it } != -1) {
-                digest.update(buffer, 0, read)
+            while (true) {
+                val digest = MessageDigest.getInstance("MD5")
+                var inBlock = 0
+                while (inBlock < UPLOAD_BLOCK_SIZE) {
+                    val read = input.read(buffer, 0, minOf(buffer.size, UPLOAD_BLOCK_SIZE - inBlock))
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                    inBlock += read
+                }
+                if (inBlock == 0 && result.isNotEmpty()) break
+                result.add(digest.digest().joinToString("") { "%02x".format(it) })
+                if (inBlock < UPLOAD_BLOCK_SIZE) break
             }
         }
-        val bytes = digest.digest()
-        val sb = StringBuilder()
-        for (b in bytes) {
-            sb.append(String.format("%02x", b))
-        }
-        return sb.toString()
+        return result
     }
 }

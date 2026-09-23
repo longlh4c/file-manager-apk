@@ -38,6 +38,13 @@ fun LargeFilesScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
+    LaunchedEffect(uiState.toastMessage) {
+        uiState.toastMessage?.let {
+            android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_SHORT).show()
+            viewModel.clearToast()
+        }
+    }
+
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
     var selectedPaths by remember { mutableStateOf(setOf<String>()) }
@@ -75,18 +82,23 @@ fun LargeFilesScreen(
                 }
                 showDeleteDialog = false
             },
-            onDismiss = { showDeleteDialog = false }
+            onDismiss = { showDeleteDialog = false },
+            // These screens always move to the Recycle Bin; the checkbox was shown but ignored.
+            showMoveToTrashOption = false,
+            defaultMoveToTrash = true,
+            message = "Move ${selectedPaths.size} item(s) to the Recycle Bin?"
         )
     }
 
-    if (showRenameDialog && itemToRename != null) {
+    val renameTarget = itemToRename
+    if (showRenameDialog && renameTarget != null) {
         TextInputDialog(
             title = "Rename",
-            initialValue = itemToRename!!.name,
+            initialValue = renameTarget.name,
             confirmButtonText = "OK",
-            selectNameWithoutExtension = !itemToRename!!.isDirectory,
+            selectNameWithoutExtension = !renameTarget.isDirectory,
             onConfirm = { newName ->
-                viewModel.rename(itemToRename!!.path, newName) {
+                viewModel.rename(renameTarget.path, newName) {
                     selectedPaths = emptySet()
                 }
                 showRenameDialog = false

@@ -1,7 +1,11 @@
 package com.antigravity.filemanager.presentation.navigation
 
+import kotlinx.coroutines.flow.first
 import android.widget.Toast
+import androidx.activity.OnBackPressedDispatcher
+import androidx.activity.OnBackPressedDispatcherOwner
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
@@ -19,6 +23,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.border
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -36,6 +45,7 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -71,6 +81,7 @@ import com.antigravity.filemanager.presentation.network.AccessFromNetworkScreen
 import com.antigravity.filemanager.presentation.theme.DarkCard
 import com.antigravity.filemanager.presentation.theme.DividerDark
 import com.antigravity.filemanager.presentation.theme.TealPrimary
+import com.antigravity.filemanager.presentation.theme.TextPrimary
 import com.antigravity.filemanager.presentation.theme.TextSecondary
 import com.antigravity.filemanager.presentation.trash.RecycleBinScreen
 import com.antigravity.filemanager.presentation.viewers.ImageViewerScreen
@@ -116,14 +127,17 @@ fun AppNavigation(
     val leftNavController = rememberNavController()
     val rightNavController = rememberNavController()
 
-    // Restore the last-viewed image on cold start or after process death
-    val lastViewedImage by preferenceManager.lastViewedImageFlow.collectAsStateWithLifecycle(initialValue = null)
+    // Restore the last-viewed image on cold start or after process death. Only the value persisted
+    // at startup counts: observing the flow meant that, when nothing was saved yet, the first image
+    // opened this session (which saves itself as "last viewed") was "restored" as a second viewer
+    // stacked on top of itself, needing two Backs to leave.
     var hasRestoredLastViewed by rememberSaveable { mutableStateOf(false) }
 
-    LaunchedEffect(lastViewedImage) {
-        val state = lastViewedImage
-        if (state != null && !hasRestoredLastViewed) {
-            hasRestoredLastViewed = true
+    LaunchedEffect(Unit) {
+        if (hasRestoredLastViewed) return@LaunchedEffect
+        hasRestoredLastViewed = true
+        val state = preferenceManager.lastViewedImageFlow.first()
+        if (state != null) {
             val isValid = if (state.cloudAccountId == null) File(state.path).exists() else true
             if (isValid) {
                 leftNavController.navigate(
@@ -160,6 +174,12 @@ fun AppNavigation(
                 "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v" -> {
                     controller.navigate(Screen.VideoPlayer.createRoute(file.path, parent, sortOption.name, cloudAccountId, fileName = file.name))
                 }
+                // Browsed in-app (see ArchiveViewerScreen) instead of handed to another app.
+                "zip", "7z", "rar" -> if (isStreamUrl) {
+                    com.antigravity.filemanager.utils.FileOpener.openFile(context, file)
+                } else {
+                    controller.navigate(Screen.ArchiveViewer.createRoute(file.path))
+                }
                 else -> {
                     com.antigravity.filemanager.utils.FileOpener.openFile(context, file)
                 }
@@ -171,6 +191,20 @@ fun AppNavigation(
     val rightOpenFileHandler = remember(rightNavController) { createOpenFileHandler(rightNavController) }
 
     val activePanel by dualPanelManager.activePanel.collectAsStateWithLifecycle()
+
+    // Each pane gets its own back dispatcher and system Back goes only to the active one. Both
+    // NavHosts (and every screen's own BackHandler) used to register on the activity's shared
+    // dispatcher, where the right pane — composed last — always won: Back while working in the
+    // left pane popped or navigated the right pane instead.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    val leftBack = remember(lifecycleOwner) { PaneBackDispatcherOwner(lifecycleOwner) }
+    val rightBack = remember(lifecycleOwner) { PaneBackDispatcherOwner(lifecycleOwner) }
+    val activeBack = if (isDualSplit && activePanel == ActivePanel.RIGHT) rightBack else leftBack
+    // An active pane with nothing left to go back to closes the split instead of leaving the app.
+    BackHandler(enabled = activeBack.hasEnabledCallbacks || isDualSplit) {
+        if (activeBack.hasEnabledCallbacks) activeBack.onBackPressedDispatcher.onBackPressed()
+        else dualPanelManager.close()
+    }
 
     val animProgress by animateFloatAsState(
         targetValue = if (isDualSplit) 1f else 0f,
@@ -238,6 +272,37 @@ fun AppNavigation(
         }
     } else Modifier
 
+    // Drag-and-drop of local items between the two panes (see DualPaneDrag).
+    val paneDrag = remember { com.antigravity.filemanager.presentation.components.DualPaneDragState() }
+    // Drops whose destination isn't a folder a pane is showing (a dashboard card, a cloud
+    // account, the Recycle Bin) run here instead, without opening that destination.
+    val dropViewModel: DualPaneDropViewModel = hiltViewModel()
+    val dropState by dropViewModel.uiState.collectAsStateWithLifecycle()
+    paneDrag.onTrash = { dropViewModel.trash(it) }
+    paneDrag.onDropInto = { location, items -> dropViewModel.dropInto(location, items) }
+    LaunchedEffect(dropState.message) {
+        dropState.message?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+            dropViewModel.clearMessage()
+        }
+    }
+    if (dropState.conflicts.isNotEmpty()) {
+        com.antigravity.filemanager.presentation.components.OverwriteConflictDialog(
+            conflicts = dropState.conflicts,
+            onConfirm = { overwriteNames, skipNames -> dropViewModel.resolveConflicts(overwriteNames, skipNames) },
+            onCancel = { dropViewModel.cancelConflicts() }
+        )
+    }
+    dropState.progress?.let { progress ->
+        com.antigravity.filemanager.presentation.components.CloudDownloadProgressDialog(
+            progress = progress,
+            onCancel = { dropViewModel.cancelTransfer() }
+        )
+    }
+    LaunchedEffect(isDualSplit) { if (!isDualSplit) paneDrag.cancel() }
+    var rootOffset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+
+    Box(modifier = Modifier.fillMaxSize().onGloballyPositioned { rootOffset = it.positionInWindow() }) {
     Row(modifier = Modifier.fillMaxSize()) {
         // Left Pane: Always occupies slot 0 of Row so its composition and state are 100% preserved
         Box(
@@ -255,12 +320,18 @@ fun AppNavigation(
                         scaleY = leftScale
                     }
             ) {
-                LeftPaneContent(
-                    navController = leftNavController,
-                    openFileHandler = leftOpenFileHandler,
-                    isDualPanelActive = isDualSplit,
-                    onToggleDualPanel = onToggleDualPanel
-                )
+                CompositionLocalProvider(
+                    LocalOnBackPressedDispatcherOwner provides leftBack,
+                    com.antigravity.filemanager.presentation.components.LocalPane provides ActivePanel.LEFT.takeIf { isDualSplit },
+                    com.antigravity.filemanager.presentation.components.LocalDualPaneDrag provides paneDrag.takeIf { isDualSplit }
+                ) {
+                    LeftPaneContent(
+                        navController = leftNavController,
+                        openFileHandler = leftOpenFileHandler,
+                        isDualPanelActive = isDualSplit,
+                        onToggleDualPanel = onToggleDualPanel
+                    )
+                }
             }
 
             if (isDualSplit) {
@@ -302,12 +373,17 @@ fun AppNavigation(
                             scaleY = rightScale
                         }
                 ) {
-                    RightPaneContent(
-                        navController = rightNavController,
-                        openFileHandler = rightOpenFileHandler,
-                        onClose = { dualPanelManager.close() },
-                        activePanel = activePanel
-                    )
+                    CompositionLocalProvider(
+                        LocalOnBackPressedDispatcherOwner provides rightBack,
+                        com.antigravity.filemanager.presentation.components.LocalPane provides ActivePanel.RIGHT.takeIf { isDualSplit },
+                        com.antigravity.filemanager.presentation.components.LocalDualPaneDrag provides paneDrag.takeIf { isDualSplit }
+                    ) {
+                        RightPaneContent(
+                            navController = rightNavController,
+                            openFileHandler = rightOpenFileHandler,
+                            onClose = { dualPanelManager.close() }
+                        )
+                    }
                 }
 
                 if (isDualSplit) {
@@ -322,6 +398,8 @@ fun AppNavigation(
                 }
             }
         }
+    }
+    DualPaneDragOverlay(paneDrag, rootOffset)
     }
 }
 
@@ -546,6 +624,17 @@ private fun LeftPaneContent(
                 }
 
                 composable(
+                    route = Screen.ArchiveViewer.route,
+                    arguments = listOf(navArgument("path") { type = NavType.StringType; defaultValue = "" })
+                ) {
+                    com.antigravity.filemanager.presentation.archive.ArchiveViewerScreen(
+                        onNavigateBack = { navController.popBackStack() },
+                        onOpenFile = openFileHandler
+                    )
+                }
+
+
+                composable(
                     route = Screen.ImageViewer.route,
                     arguments = listOf(
                         navArgument("path") { type = NavType.StringType; defaultValue = "" },
@@ -659,21 +748,13 @@ private fun FileManagerBottomBar(
 private fun RightPaneContent(
     navController: NavHostController,
     openFileHandler: (FileItem, FileSortOption, String?) -> Unit,
-    onClose: () -> Unit,
-    activePanel: ActivePanel
+    onClose: () -> Unit
 ) {
     val currentRoute = navController.currentBackStackEntryAsState().value?.destination?.route
     val isCloudTab = currentRoute in CLOUD_TAB_ROUTES
     val isFtpTab = currentRoute in FTP_TAB_ROUTES
     val isLocalTab = !isCloudTab && !isFtpTab
     val showBottomBar = currentRoute !in TAB_BAR_HIDDEN_ROUTES
-
-    val rightCanPop = navController.previousBackStackEntry != null
-
-    // BackHandler within Right Pane: Only pops Right Pane navigation when Right Pane is currently focused
-    BackHandler(enabled = rightCanPop && activePanel == ActivePanel.RIGHT) {
-        navController.popBackStack()
-    }
 
     fun switchTab(graphRoute: String) {
         if (graphRoute == LOCAL_GRAPH && isLocalTab && currentRoute != Screen.Dashboard.route) {
@@ -885,6 +966,17 @@ private fun RightPaneContent(
                 }
 
                 composable(
+                    route = Screen.ArchiveViewer.route,
+                    arguments = listOf(navArgument("path") { type = NavType.StringType; defaultValue = "" })
+                ) {
+                    com.antigravity.filemanager.presentation.archive.ArchiveViewerScreen(
+                        onNavigateBack = { navController.popBackStack() },
+                        onOpenFile = openFileHandler
+                    )
+                }
+
+
+                composable(
                     route = Screen.ImageViewer.route,
                     arguments = listOf(
                         navArgument("path") { type = NavType.StringType; defaultValue = "" },
@@ -960,3 +1052,107 @@ private val CLOUD_TAB_ROUTES = setOf(
 private val FTP_TAB_ROUTES = setOf(
     Screen.AccessFromNetwork.route
 )
+
+/** One dual-panel pane's own back dispatcher (see AppNavigation). [hasEnabledCallbacks] is
+ * observable so the activity-level router only intercepts Back when this pane can use it. */
+private class PaneBackDispatcherOwner(
+    private val lifecycleOwner: androidx.lifecycle.LifecycleOwner
+) : OnBackPressedDispatcherOwner {
+    var hasEnabledCallbacks by mutableStateOf(false)
+        private set
+
+    override val onBackPressedDispatcher = OnBackPressedDispatcher(null) { hasEnabledCallbacks = it }
+
+    override val lifecycle: androidx.lifecycle.Lifecycle get() = lifecycleOwner.lifecycle
+}
+
+/** What a drag between the panes shows: the dragged-items chip under the finger, an outline on
+ * the pane that would receive the drop, and the Copy / Move / Cancel menu after dropping. */
+@Composable
+private fun DualPaneDragOverlay(
+    state: com.antigravity.filemanager.presentation.components.DualPaneDragState,
+    rootOffset: androidx.compose.ui.geometry.Offset
+) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val payload = state.payload
+    if (payload != null) {
+        val target = state.hoveredTarget
+        if (target != null) {
+            val topLeft = target.bounds.topLeft - rootOffset
+            Box(
+                modifier = Modifier
+                    .offset { androidx.compose.ui.unit.IntOffset(topLeft.x.toInt(), topLeft.y.toInt()) }
+                    .size(with(density) { target.bounds.width.toDp() }, with(density) { target.bounds.height.toDp() })
+                    .border(2.dp, TealPrimary, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+            )
+        }
+        val at = state.pointer - rootOffset
+        val count = payload.paths.size
+        Text(
+            text = (if (count == 1) java.io.File(payload.paths.first()).name else "$count items") +
+                (target?.let { "  →  ${it.name}" } ?: ""),
+            color = Color.Black,
+            fontSize = 13.sp,
+            maxLines = 1,
+            modifier = Modifier
+                .offset { androidx.compose.ui.unit.IntOffset(at.x.toInt() + 24, at.y.toInt() - 72) }
+                .background(if (target != null) TealPrimary else Color(0xFFB0B0B0), androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        )
+    }
+
+    state.pendingDrop?.let { drop ->
+        val count = drop.payload.paths.size
+        val what = if (count == 1) "\"${java.io.File(drop.payload.paths.first()).name}\"" else "$count items"
+        if (drop.target.kind == com.antigravity.filemanager.presentation.components.DropZoneKind.TRASH) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { state.resolve(null) },
+                title = { Text("Move $what to trash?", color = TextPrimary) },
+                text = {
+                    Text(
+                        if (drop.payload.items.sourceCloudAccountId == null) "They can be restored from the Recycle Bin."
+                        else "They go to this cloud account's own trash.",
+                        color = TextSecondary
+                    )
+                },
+                confirmButton = {
+                    Row {
+                        androidx.compose.material3.TextButton(onClick = { state.resolve(null) }) {
+                            Text("CANCEL", color = TextSecondary)
+                        }
+                        androidx.compose.material3.Button(
+                            onClick = { state.resolve(isMove = true) },
+                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = com.antigravity.filemanager.presentation.theme.PastelCoral, contentColor = Color.Black)
+                        ) {
+                            Text("MOVE TO TRASH")
+                        }
+                    }
+                },
+                containerColor = DarkCard
+            )
+            return
+        }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { state.resolve(null) },
+            title = { Text("Drop $what", color = TextPrimary) },
+            text = { Text("into \"${drop.target.name}\"", color = TextSecondary) },
+            confirmButton = {
+                Row {
+                    androidx.compose.material3.TextButton(onClick = { state.resolve(null) }) {
+                        Text("CANCEL", color = TextSecondary)
+                    }
+                    androidx.compose.material3.TextButton(onClick = { state.resolve(isMove = true) }) {
+                        Text("MOVE", color = TealPrimary)
+                    }
+                    androidx.compose.material3.Button(
+                        onClick = { state.resolve(isMove = false) },
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = TealPrimary, contentColor = Color.Black)
+                    ) {
+                        Text("COPY")
+                    }
+                }
+            },
+            containerColor = DarkCard
+        )
+    }
+}
