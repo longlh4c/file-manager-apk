@@ -4,7 +4,6 @@ import android.content.Context
 import com.antigravity.filemanager.domain.model.CloudAccount
 import com.antigravity.filemanager.domain.model.FileItem
 import com.google.api.client.googleapis.extensions.android.gms.auth.GoogleAccountCredential
-import com.google.api.client.http.FileContent
 import com.google.api.client.http.HttpRequestInitializer
 import com.google.api.client.http.javanet.NetHttpTransport
 import com.google.api.client.json.gson.GsonFactory
@@ -403,7 +402,21 @@ class GoogleDriveApiClient @Inject constructor(
                 name = localFile.name
                 parents = listOf(effectiveParent)
             }
-            val mediaContent = FileContent(null, localFile)
+            // execute() blocks until the whole file is sent, so cancelling the coroutine left the
+            // upload running to the end. Reading through a stream that checks the job stops it.
+            val job = currentCoroutineContext()[kotlinx.coroutines.Job]
+            val mediaContent = object : com.google.api.client.http.AbstractInputStreamContent(null) {
+                override fun getLength(): Long = localFile.length()
+                override fun retrySupported(): Boolean = true
+                override fun getInputStream(): java.io.InputStream =
+                    object : java.io.FilterInputStream(java.io.FileInputStream(localFile)) {
+                        private fun checkActive() {
+                            if (job?.isActive == false) throw java.io.InterruptedIOException("Upload cancelled")
+                        }
+                        override fun read(): Int { checkActive(); return super.read() }
+                        override fun read(b: ByteArray, off: Int, len: Int): Int { checkActive(); return super.read(b, off, len) }
+                    }
+            }
             val totalBytes = localFile.length()
             val uploader = drive.files().create(metadata, mediaContent)
             uploader.mediaHttpUploader?.setProgressListener { httpUploader ->
@@ -415,6 +428,8 @@ class GoogleDriveApiClient @Inject constructor(
             onProgress?.invoke(totalBytes, totalBytes)
             Result.success(created.id)
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            currentCoroutineContext().ensureActive() // cancelled mid-upload: report it as such
             Result.failure(e)
         }
     }
