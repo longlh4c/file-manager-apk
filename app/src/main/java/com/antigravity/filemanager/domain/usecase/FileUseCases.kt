@@ -559,6 +559,8 @@ class CloudStorageUseCase @Inject constructor(
             }
         }
         failures += failuresCounter.get()
+        // Only what actually arrived: this used to stay at the total even when files failed.
+        transferredCount = totalCount - failuresCounter.get()
         lastErrorRef.get()?.let { lastErrorMessage = it }
         if (isMove) {
             // Delete each top-level source (file or folder) as one unit once its whole
@@ -971,6 +973,7 @@ class CloudStorageUseCase @Inject constructor(
 
         // 1. Resolve destination targets and recursively flatten any directories
         val validTopSources = mutableListOf<String>()
+        val overwriteTopSources = remotePaths.filter { File(it).name in overwriteNames }.toSet()
         for (remotePath in remotePaths) {
             kotlinx.coroutines.currentCoroutineContext().ensureActive()
             val name = File(remotePath).name
@@ -1040,7 +1043,19 @@ class CloudStorageUseCase @Inject constructor(
                 if (result.isSuccess) {
                     val downloaded = result.getOrNull()
                     if (downloaded != null && downloaded.exists() && downloaded.isFile) {
-                        val finalFile = item.localFile
+                        // A Google Docs/Sheets/Slides file is exported as .docx/.xlsx/.pptx/.pdf;
+                        // it used to be saved under its bare Drive name, with no extension, so
+                        // nothing on the phone could open it. Keep the export's extension.
+                        val exportExt = downloaded.extension
+                        val finalFile = if (exportExt.isNotEmpty() &&
+                            !item.localFile.name.endsWith(".$exportExt", ignoreCase = true) &&
+                            downloaded.name.equals("${File(item.remotePath).name}.$exportExt", ignoreCase = true)
+                        ) {
+                            val withExt = File(item.localFile.parentFile, "${item.localFile.name}.$exportExt")
+                            if (withExt.exists() && item.topSourcePath !in overwriteTopSources) {
+                                com.antigravity.filemanager.data.local.storage.uniqueFile(withExt.parentFile!!, withExt.name)
+                            } else withExt
+                        } else item.localFile
                         finalFile.parentFile?.mkdirs()
                         if (finalFile.exists()) {
                             finalFile.delete()
