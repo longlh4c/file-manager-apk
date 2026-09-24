@@ -457,9 +457,6 @@ class StorageAnalysisViewModel @Inject constructor(
             // needs patching, since the moved items (including any nested under a deleted
             // folder) should no longer show up in it.
             val deletedDirPrefixes = paths.filter { File(it).isDirectory }.map { if (it.endsWith("/")) it else "$it/" }
-            fun isRemoved(itemPath: String) = itemPath in paths || deletedDirPrefixes.any { itemPath.startsWith(it) }
-
-            val matchedLargeBytes = currentData.largeFiles.filter { isRemoved(it.path) }.sumOf { it.sizeBytes }
 
             fileOperationsUseCase.delete(paths, moveToRecycleBin = true).let { result ->
                 val deleted = result.getOrNull()
@@ -467,6 +464,11 @@ class StorageAnalysisViewModel @Inject constructor(
                     _uiState.update { old -> old.copy(toastMessage = result.exceptionOrNull()?.let { "Delete failed: ${it.message}" } ?: "$deleted of ${paths.size} item(s) deleted") }
                 }
             }
+            // Checked on disk after the delete: a partly failed delete used to drop every selected
+            // item from the list, so files that were never deleted vanished from the screen.
+            fun isRemoved(itemPath: String) =
+                (itemPath in paths || deletedDirPrefixes.any { itemPath.startsWith(it) }) && !File(itemPath).exists()
+            val matchedLargeBytes = currentData.largeFiles.filter { isRemoved(it.path) }.sumOf { it.sizeBytes }
 
             _uiState.update { old -> old.copy(
                 data = currentData.copy(

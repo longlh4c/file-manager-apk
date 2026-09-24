@@ -359,6 +359,36 @@ private fun ConflictChoiceChip(
 }
 
 @Composable
+fun LocalDeleteConfirmDialog(
+    paths: Collection<String>,
+    onConfirm: (moveToTrash: Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    // Files on a USB drive or SD card are always deleted permanently (see
+    // FileOperationsUseCase.delete), so the dialog mustn't promise the Recycle Bin for them.
+    val external = remember(paths) {
+        paths.count { com.antigravity.filemanager.data.local.storage.isOutsidePrimaryStorage(it) }
+    }
+    when {
+        external == 0 -> DeleteConfirmDialog(itemCount = paths.size, onConfirm = onConfirm, onDismiss = onDismiss)
+        external == paths.size -> DeleteConfirmDialog(
+            itemCount = paths.size,
+            onConfirm = onConfirm,
+            onDismiss = onDismiss,
+            showMoveToTrashOption = false,
+            title = "Delete permanently",
+            message = "Permanently delete ${paths.size} item(s)? Files on a USB drive or SD card can't be moved to the Recycle Bin."
+        )
+        else -> DeleteConfirmDialog(
+            itemCount = paths.size,
+            onConfirm = onConfirm,
+            onDismiss = onDismiss,
+            message = "Are you sure you want to delete ${paths.size} item(s)?\n\n$external of them are on a USB drive or SD card and will be deleted permanently."
+        )
+    }
+}
+
+@Composable
 fun DeleteConfirmDialog(
     itemCount: Int,
     onConfirm: (moveToTrash: Boolean) -> Unit,

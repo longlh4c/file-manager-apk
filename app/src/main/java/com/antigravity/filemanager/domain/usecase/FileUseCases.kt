@@ -147,8 +147,39 @@ class FileOperationsUseCase @Inject constructor(
             // here; it only falls back to a real recursive copy+delete on a renameTo() failure
             // (cross-filesystem, permission issue), same unavoidable gap as extracting a single
             // zip archive.
-            recycleBinRepository.moveToTrash(paths, onProgress)
-        } else withContext(Dispatchers.IO) {
+            //
+            // Files on a USB drive or SD card are always deleted permanently: the Recycle Bin is
+            // on main storage, so "moving" them there meant copying every byte across, which
+            // failed (and left the file in place) as soon as main storage was nearly full.
+            val (external, onMain) = paths.partition {
+                com.antigravity.filemanager.data.local.storage.isOutsidePrimaryStorage(it)
+            }
+            val trashed = if (onMain.isEmpty()) Result.success(0) else recycleBinRepository.moveToTrash(onMain, onProgress)
+            if (external.isEmpty()) trashed else {
+                val removed = deletePermanently(external, onProgress)
+                when {
+                    trashed.isFailure -> trashed
+                    removed.isFailure -> removed
+                    else -> Result.success(trashed.getOrThrow() + removed.getOrThrow())
+                }
+            }
+        } else deletePermanently(paths, onProgress)
+        // A delete only ever shrinks folders that are already cached — unlike copy/move/rename,
+        // it can't land a file in a folder the cache doesn't know about yet — so it can patch
+        // just the affected bucket(s) instead of invalidateMediaFolders()'s blanket "drop every
+        // category" (which otherwise forced Images AND Videos AND Audio AND Documents to all redo
+        // a full MediaStore rescan on their next open just because one photo was deleted).
+        if (result.isSuccess) {
+            folderCacheManager.removeFromMediaFolders(paths)
+            mediaChangeSignal.notifyChanged()
+        }
+        return result
+    }
+
+    private suspend fun deletePermanently(
+        paths: List<String>,
+        onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)?
+    ): Result<Int> = withContext(Dispatchers.IO) {
             // Permanent delete has no such shortcut — File.deleteRecursively() really does walk
             // the whole tree for each top-level path, so a single large folder used to report
             // "1/1" for the entire operation (see zipFiles' addFolder() replacement above for the
@@ -184,17 +215,6 @@ class FileOperationsUseCase @Inject constructor(
             }
             Result.success(paths.indices.count { !topLevelFailed[it] })
         }
-        // A delete only ever shrinks folders that are already cached — unlike copy/move/rename,
-        // it can't land a file in a folder the cache doesn't know about yet — so it can patch
-        // just the affected bucket(s) instead of invalidateMediaFolders()'s blanket "drop every
-        // category" (which otherwise forced Images AND Videos AND Audio AND Documents to all redo
-        // a full MediaStore rescan on their next open just because one photo was deleted).
-        if (result.isSuccess) {
-            folderCacheManager.removeFromMediaFolders(paths)
-            mediaChangeSignal.notifyChanged()
-        }
-        return result
-    }
 
     suspend fun compress(
         sourcePaths: List<String>,

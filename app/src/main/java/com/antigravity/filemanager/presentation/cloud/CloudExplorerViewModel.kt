@@ -242,7 +242,9 @@ class CloudExplorerViewModel @Inject constructor(
                             totalFiles = it.totalFiles,
                             bytesTransferred = it.bytesTransferred,
                             totalBytes = it.totalBytes,
-                            isIndeterminate = it.totalBytes <= 0,
+                            // A per-file count (local copy/move) is real progress too; treating it as
+                            // indeterminate made the bar flip between the two with every update.
+                            isIndeterminate = it.totalBytes <= 0 && it.totalFiles <= 0,
                             isUpload = it.isUpload,
                             operationLabel = it.operationLabel
                         )

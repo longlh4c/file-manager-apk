@@ -130,6 +130,15 @@ class DualPaneDropViewModel @Inject constructor(
 
     fun trash(items: GlobalClipboardState) {
         if (items.paths.isEmpty()) return
+        // Files on a USB drive or SD card can only be deleted permanently; a drag onto the Recycle
+        // Bin card shouldn't do that behind a "move to trash" gesture with no permanent-delete
+        // confirmation, so point to the folder's own Delete instead.
+        if (items.sourceCloudAccountId == null &&
+            items.paths.any { com.antigravity.filemanager.data.local.storage.isOutsidePrimaryStorage(it) }
+        ) {
+            _uiState.update { it.copy(message = "Files on a USB drive or SD card can't go to the Recycle Bin. Delete them from their folder instead.") }
+            return
+        }
         if (isBusy()) return
         job = viewModelScope.launch {
             val accountId = items.sourceCloudAccountId

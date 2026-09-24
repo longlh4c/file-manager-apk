@@ -62,6 +62,16 @@ fun archiveTargetConflictReason(targetArchivePath: String, sourcePaths: List<Str
     else "The archive can't be saved inside \"${clash.name}\", which is being compressed."
 }
 
+/** True for a path outside the device's main shared storage, such as a USB drive or SD card.
+ * The Recycle Bin lives on main storage, so moving such a file there really means copying all of
+ * it across (which fails on a nearly full phone); files there are deleted permanently instead. */
+fun isOutsidePrimaryStorage(path: String): Boolean {
+    val primary = android.os.Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
+    val p = File(path).absolutePath
+    val onPrimary = p == primary || p.startsWith("$primary/") || p == "/sdcard" || p.startsWith("/sdcard/")
+    return !onPrimary
+}
+
 /** Why [name] can't be used as a single file/folder name, or null when it's fine. */
 fun invalidFileNameReason(name: String): String? = when {
     name.isBlank() -> "Name cannot be empty"

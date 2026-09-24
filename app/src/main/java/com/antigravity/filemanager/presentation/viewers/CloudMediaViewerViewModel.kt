@@ -31,7 +31,8 @@ class CloudMediaViewerViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val cloudUseCase: CloudStorageUseCase,
     private val fileOperationsUseCase: FileOperationsUseCase,
-    private val preferenceManager: com.antigravity.filemanager.data.local.preferences.PreferenceManager
+    private val preferenceManager: com.antigravity.filemanager.data.local.preferences.PreferenceManager,
+    private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager
 ) : ViewModel() {
 
     suspend fun saveLastViewedImage(
@@ -50,10 +51,20 @@ class CloudMediaViewerViewModel @Inject constructor(
 
     /** Deletes a local file straight to the recycle bin — used by the image/video viewer's
      * Delete action, whether the file was already local or just got downloaded here for viewing. */
-    suspend fun deleteLocalFile(path: String): Result<Int> = fileOperationsUseCase.delete(listOf(path), moveToRecycleBin = true)
+    suspend fun deleteLocalFile(path: String): Result<Unit> =
+        // The recycle bin reports how many items it took, and 0 still came back as a success:
+        // the viewer then dropped the page as deleted while the file stayed where it was.
+        fileOperationsUseCase.delete(listOf(path), moveToRecycleBin = true).mapCatching { moved ->
+            if (moved < 1) throw java.io.IOException("Couldn't move \"${File(path).name}\" to the recycle bin")
+        }
 
     /** Deletes a cloud item straight from the viewer, same delete path as the folder browser uses. */
-    suspend fun deleteCloudFile(accountId: String, remotePath: String): Result<Unit> = cloudUseCase.deleteItem(accountId, remotePath)
+    suspend fun deleteCloudFile(accountId: String, remotePath: String): Result<Unit> =
+        cloudUseCase.deleteItem(accountId, remotePath).onSuccess {
+            // The folder behind the viewer kept listing the deleted file on return.
+            val parent = remotePath.substringBeforeLast('/', "/").ifEmpty { "/" }
+            folderCacheManager.notifyCloudFilesRemoved(accountId, parent, setOf(remotePath))
+        }
 
     suspend fun resolveMedia(accountId: String, file: FileItem, allowStreaming: Boolean = true): Result<ResolvedMedia> = withContext(Dispatchers.IO) {
         val targetDir = com.antigravity.filemanager.utils.CloudDownloadCache.dirFor(context, accountId, file.path).apply { mkdirs() }
