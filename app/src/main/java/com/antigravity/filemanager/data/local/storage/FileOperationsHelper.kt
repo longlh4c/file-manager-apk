@@ -119,6 +119,7 @@ class FileOperationsHelper @Inject constructor(
             // (internal storage <-> SD card, say) falls through to it failing, handled for real
             // in phase 2 below.
             val renameFailures = mutableListOf<FileCopyEntry>()
+            val mergedSources = mutableListOf<File>()
             for (path in sourcePaths) {
                 currentCoroutineContext().ensureActive()
                 val source = File(path)
@@ -127,6 +128,16 @@ class FileOperationsHelper @Inject constructor(
                 // "name (1)" by the keep-both naming below.
                 if (source.canonicalFile.parentFile == targetCanonical) continue
                 val dest = resolveDestination(targetFolder, source, overwriteNames)
+                if (dest.isDirectory && source.isDirectory) {
+                    // Overwriting a folder merges into it, as copy does: only same-named files
+                    // are replaced. It used to delete the whole existing folder first, losing
+                    // everything in it that the moved folder didn't have.
+                    mergeByRename(source, dest, renameFailures)
+                    mergedSources.add(source)
+                    scannedPaths.add(source.absolutePath)
+                    scannedPaths.add(dest.absolutePath)
+                    continue
+                }
                 if (dest.exists()) {
                     if (dest.isDirectory) dest.deleteRecursively() else dest.delete()
                 }
@@ -155,6 +166,12 @@ class FileOperationsHelper @Inject constructor(
                 scannedPaths.add(item.source.absolutePath)
                 scannedPaths.add(item.dest.absolutePath)
             }
+            // A merged folder is left holding only empty subfolders once all its contents moved;
+            // anything that failed to move keeps it (and the failed files) in place.
+            for (source in mergedSources) {
+                val prefix = source.absolutePath + File.separator
+                if (outcome.failedSources.none { it.startsWith(prefix) } && source.exists()) source.deleteRecursively()
+            }
             scanMedia(scannedPaths)
             if (outcome.failedSources.isNotEmpty()) {
                 Result.failure(IOException("Failed to move ${outcome.failedSources.size} file(s)"))
@@ -164,6 +181,24 @@ class FileOperationsHelper @Inject constructor(
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Result.failure(e)
+        }
+    }
+
+    /** Moves the contents of folder [source] into the existing folder [dest]: subfolders present
+     * in both are merged the same way, anything else replaces its same-named counterpart. Items
+     * renameTo() can't move (another filesystem) are queued in [fallbacks] for copy-then-delete. */
+    private suspend fun mergeByRename(source: File, dest: File, fallbacks: MutableList<FileCopyEntry>) {
+        for (child in source.listFiles().orEmpty()) {
+            currentCoroutineContext().ensureActive()
+            val target = File(dest, child.name)
+            if (child.isDirectory && target.isDirectory) {
+                mergeByRename(child, target, fallbacks)
+                continue
+            }
+            if (target.exists()) {
+                if (target.isDirectory) target.deleteRecursively() else target.delete()
+            }
+            if (!child.renameTo(target)) fallbacks.add(FileCopyEntry(child, target))
         }
     }
 
@@ -929,6 +964,29 @@ class FileOperationsHelper @Inject constructor(
         }
     }
 
+    /** Where an entry for [dest] is written: [dest] itself when it's new, a temp file beside it
+     * when it already exists. Writing straight over an existing file truncated it first, so a
+     * cancelled or failed extraction (disk full, corrupt entry) destroyed the file being
+     * overwritten, and the cleanup then deleted what was left of it. */
+    private fun stagingFileFor(dest: File): File =
+        if (dest.exists()) File(dest.parentFile, ".${dest.name}.extracting") else dest
+
+    /** Puts a completely written [staged] file in place of [dest]. */
+    private fun commitStaged(staged: File, dest: File) {
+        if (staged == dest) return
+        if (dest.isDirectory) dest.deleteRecursively() else dest.delete()
+        if (!staged.renameTo(dest)) {
+            staged.copyTo(dest, overwrite = true)
+            staged.delete()
+        }
+    }
+
+    /** Cleans up after a failed entry: removes the partial [staged] file, but never when it is
+     * the only copy left (commitStaged failed after the old [dest] was already gone). */
+    private fun discardStaged(staged: File, dest: File) {
+        if (staged.exists() && (staged == dest || dest.exists())) staged.delete()
+    }
+
     suspend fun extractArchive(
         archiveFilePath: String,
         targetDir: String,
@@ -1021,8 +1079,9 @@ class FileOperationsHelper @Inject constructor(
                             createdFiles.add(destFile)
                         }
                         destFile.parentFile?.mkdirs()
+                        val staged = stagingFileFor(destFile)
                         try {
-                            FileOutputStream(destFile).use { out ->
+                            FileOutputStream(staged).use { out ->
                                 var count: Int
                                 while (archive.read(buffer).also { count = it } != -1) {
                                     currentCoroutineContext().ensureActive()
@@ -1035,16 +1094,17 @@ class FileOperationsHelper @Inject constructor(
                                     }
                                 }
                             }
+                            commitStaged(staged, destFile)
                             extractedCount++
                             onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
                         } catch (e: org.apache.commons.compress.PasswordRequiredException) {
-                            if (destFile.exists()) destFile.delete()
+                            discardStaged(staged, destFile)
                             throw ArchivePasswordRequiredException(archiveFile.absolutePath)
                         } catch (t: Throwable) {
                             // The password was already validated up front, so any other I/O
                             // failure here (disk full, permission, corrupt entry) is reported as
                             // itself rather than as "incorrect password".
-                            if (destFile.exists()) destFile.delete()
+                            discardStaged(staged, destFile)
                             throw t
                         }
                     }
@@ -1118,9 +1178,10 @@ class FileOperationsHelper @Inject constructor(
                             createdFiles.add(destFile)
                         }
                         destFile.parentFile?.mkdirs()
+                        val staged = stagingFileFor(destFile)
                         try {
                             val countingOut = object : java.io.OutputStream() {
-                                private val fos = FileOutputStream(destFile)
+                                private val fos = FileOutputStream(staged)
                                 override fun write(b: Int) {
                                     job.ensureActive()
                                     fos.write(b)
@@ -1146,10 +1207,11 @@ class FileOperationsHelper @Inject constructor(
                             countingOut.use { out ->
                                 arc.extractFile(header, out)
                             }
+                            commitStaged(staged, destFile)
                             extractedCount++
                             onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
                         } catch (t: Throwable) {
-                            if (destFile.exists()) destFile.delete()
+                            discardStaged(staged, destFile)
                             throw t
                         }
                     }
@@ -1223,9 +1285,10 @@ class FileOperationsHelper @Inject constructor(
                         createdFiles.add(destFile)
                     }
                     destFile.parentFile?.mkdirs()
+                    val staged = stagingFileFor(destFile)
                     try {
                         zipFile.getInputStream(header).use { inStream ->
-                            FileOutputStream(destFile).use { outStream ->
+                            FileOutputStream(staged).use { outStream ->
                                 var count: Int
                                 while (inStream.read(buffer).also { count = it } != -1) {
                                     currentCoroutineContext().ensureActive()
@@ -1239,16 +1302,17 @@ class FileOperationsHelper @Inject constructor(
                                 }
                             }
                         }
+                        commitStaged(staged, destFile)
                         extractedCount++
                         onProgress?.invoke(normName, currentIndex, totalEntries, bytesProcessed, totalBytes)
                     } catch (e: ZipException) {
-                        if (destFile.exists()) destFile.delete()
+                        discardStaged(staged, destFile)
                         if (isZipPasswordError(e)) {
                             throw ArchiveInvalidPasswordException(archiveFile.absolutePath)
                         }
                         throw e
                     } catch (t: Throwable) {
-                        if (destFile.exists()) destFile.delete()
+                        discardStaged(staged, destFile)
                         throw t
                     }
                 }

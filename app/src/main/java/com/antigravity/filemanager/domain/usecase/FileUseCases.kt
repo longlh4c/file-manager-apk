@@ -715,15 +715,42 @@ class CloudStorageUseCase @Inject constructor(
             // "Skip" on every conflict still reported "Transferred N file(s) successfully" for
             // zero real uploads. Track what actually went out and hand that back instead.
             var uploadedCount = 0
+            val provider = if (flatFiles.any { it.overwrite }) {
+                cloudRepository.getConnectedAccounts().find { it.id == accountId }?.provider
+            } else null
             flatFiles.forEachIndexed { index, (file, targetDir, overwrite) ->
                 val existingNames = existingNamesFor(targetDir)
                 val conflictItem = existingItemsByDir[targetDir]?.find { it.name == file.name }
                 var uploadSource = file
                 var tempDir: File? = null
+                // Overwrite used to delete the existing remote item first, so an upload that then
+                // failed (lost connection, full quota) left neither copy in place. The old item is
+                // now removed only once the new one is up, in whatever way the provider allows.
+                var replaceAfterUpload: com.antigravity.filemanager.domain.model.FileItem? = null
+                var renameAfterUpload = false
                 if (conflictItem != null) {
                     if (overwrite) {
-                        cloudRepository.deleteCloudFile(accountId, conflictItem.path)
-                        existingNames.remove(file.name)
+                        when {
+                            // A file replacing a folder: nothing can be swapped in one step.
+                            conflictItem.isDirectory -> cloudRepository.deleteCloudFile(accountId, conflictItem.path)
+                                .getOrElse { throw java.io.IOException("Couldn't replace \"${conflictItem.name}\": ${it.message}", it) }
+                            // Uploads use WriteMode.OVERWRITE: the new file replaces the old in one step.
+                            provider == CloudProvider.DROPBOX -> Unit
+                            // Same-named siblings are allowed: upload next to it, then remove the
+                            // old one by its id (its path now also names the new file). A cached
+                            // entry may carry a path instead of a real id; fall back for those.
+                            (provider == CloudProvider.GOOGLE_DRIVE || provider == CloudProvider.MEGA) &&
+                                !conflictItem.id.startsWith("/") -> replaceAfterUpload = conflictItem
+                            // Otherwise upload under a temporary name, then remove the old item and
+                            // give the new one its real name.
+                            else -> {
+                                val dir = File(System.getProperty("java.io.tmpdir"), "upload_${System.nanoTime()}").apply { mkdirs() }
+                                tempDir = dir
+                                uploadSource = file.copyTo(File(dir, uniqueCloudName(existingNames, "${file.name}.uploading")), overwrite = true)
+                                replaceAfterUpload = conflictItem
+                                renameAfterUpload = true
+                            }
+                        }
                     } else {
                         // "Keep both": the providers name the upload after the local file, so it
                         // needs a renamed copy — made in app cache, never next to the user's own
@@ -753,6 +780,18 @@ class CloudStorageUseCase @Inject constructor(
                     // Every remaining file would fail for the same reason (same account/target),
                     // so stop here instead of silently reporting success for a partial batch.
                     throw uploadResult.exceptionOrNull() ?: Exception("Upload failed for ${uploadSource.name}")
+                }
+                replaceAfterUpload?.let { old ->
+                    val target = if (renameAfterUpload) old.path else old.id
+                    cloudRepository.deleteCloudFile(accountId, target).getOrElse {
+                        throw java.io.IOException("Uploaded \"${uploadSource.name}\" but couldn't remove the old \"${old.name}\": ${it.message}", it)
+                    }
+                    if (renameAfterUpload) {
+                        val tempPath = if (targetDir == "/" || targetDir.isBlank()) "/${uploadSource.name}" else "${targetDir.trimEnd('/')}/${uploadSource.name}"
+                        cloudRepository.renameCloudFile(accountId, tempPath, file.name).getOrElse {
+                            throw java.io.IOException("Uploaded as \"${uploadSource.name}\" but couldn't rename it to \"${file.name}\": ${it.message}", it)
+                        }
+                    }
                 }
                 uploadedCount++
             }

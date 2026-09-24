@@ -136,6 +136,49 @@ class FileOperationsHelperTest {
         assertTrue(result.isSuccess)
         assertEquals("from-archive", File(out, "FolderA/inner.txt").readText())
         assertFalse(File(out, "FolderA (1)").exists())
+        assertEquals(listOf("inner.txt", "sub"), File(out, "FolderA").list()!!.sorted())
+    }
+
+    @Test
+    fun failedOverwriteExtractionKeepsTheExistingFile() = runBlocking {
+        val src = File(root, "src/FolderA").apply { mkdirs() }
+        File(src, "inner.txt").writeBytes(java.util.Random(1).let { r -> ByteArray(200_000).also { r.nextBytes(it) } })
+        val archive = File(root, "FolderA.zip")
+        assertTrue(helper.compressFiles(listOf(src.absolutePath), archive.absolutePath).isSuccess)
+        // Corrupt the entry's data (not the headers) so extraction fails partway through it.
+        val bytes = archive.readBytes()
+        for (i in 5_000 until 5_100) bytes[i] = (bytes[i].toInt() xor 0xFF).toByte()
+        archive.writeBytes(bytes)
+        val out = File(root, "out/FolderA").apply { mkdirs() }
+        File(out, "inner.txt").writeText("existing")
+
+        val result = helper.extractArchive(archive.absolutePath, out.parent, overwriteNames = setOf("FolderA"))
+
+        assertTrue(result.isFailure)
+        assertEquals("existing", File(out, "inner.txt").readText())
+        assertEquals(listOf("inner.txt"), out.list()!!.toList())
+    }
+
+    @Test
+    fun moveWithOverwriteMergesFoldersAndReplacesOnlySameNamedFiles() = runBlocking {
+        val src = File(root, "src/Folder").apply { mkdirs() }
+        File(src, "same.txt").writeText("new")
+        File(src, "sub").mkdirs()
+        File(src, "sub/n.txt").writeText("n")
+        val dst = File(root, "dst/Folder").apply { mkdirs() }
+        File(dst, "same.txt").writeText("old")
+        File(dst, "keep.txt").writeText("keep")
+        File(dst, "sub").mkdirs()
+        File(dst, "sub/k.txt").writeText("k")
+
+        val result = helper.move(listOf(src.absolutePath), dst.parent, overwriteNames = setOf("Folder"))
+
+        assertTrue(result.isSuccess)
+        assertEquals("new", File(dst, "same.txt").readText())
+        assertEquals("keep", File(dst, "keep.txt").readText())
+        assertEquals("n", File(dst, "sub/n.txt").readText())
+        assertEquals("k", File(dst, "sub/k.txt").readText())
+        assertFalse(src.exists())
     }
 
     @Test

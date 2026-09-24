@@ -1649,9 +1649,12 @@ class CloudExplorerViewModel @Inject constructor(
                     // Same-account Move: every provider has a real server-side move (change
                     // parent/path), so route through that instead of the generic cross-provider
                     // round trip below — no data ever needs to leave the provider's own servers.
-                    // Items with an Overwrite decision still need the existing target cleared
-                    // first (a plain server-side move doesn't merge/replace on its own); anything
-                    // with no conflict just moves directly.
+                    // Items with an Overwrite decision go through copyBetweenClouds instead: it
+                    // merges a folder into the existing one (overwriting only same-named files)
+                    // and removes an old file only after its replacement is up. A server-side
+                    // move can't merge, and deleting the target first lost it whenever the move
+                    // then failed.
+                    val overwriteSources = sources.filter { File(it).name in overwriteNames && File(it).name !in skipNames }
                     var moved = 0
                     // A server-side move only ever gets refresh()'d into the DESTINATION folder
                     // (the one this screen has open right now, via the unconditional refresh() at
@@ -1663,11 +1666,7 @@ class CloudExplorerViewModel @Inject constructor(
                     for (sourcePath in sources) {
                         kotlinx.coroutines.currentCoroutineContext().ensureActive()
                         val name = File(sourcePath).name
-                        if (name in skipNames) continue
-                        if (name in overwriteNames) {
-                            val existingPath = if (targetPath == "/" || targetPath.isBlank()) "/$name" else "${targetPath.trimEnd('/')}/$name"
-                            cloudUseCase.deleteItem(accountId, existingPath)
-                        }
+                        if (name in skipNames || sourcePath in overwriteSources) continue
                         setTransferProgress(currentFileName = name, currentIndex = moved + 1, totalFiles = sources.size, isUpload = true, operationLabel = "Moving")
                         val moveResult = cloudUseCase.moveWithinAccount(accountId, sourcePath, targetPath)
                         if (moveResult.isFailure) {
@@ -1678,6 +1677,17 @@ class CloudExplorerViewModel @Inject constructor(
                             movedFromFolders.getOrPut(parentPath) { mutableSetOf() }.add(sourcePath)
                         }
                         moved++
+                    }
+                    if (overwriteSources.isNotEmpty()) {
+                        val merged = cloudUseCase.copyBetweenClouds(
+                            context, accountId, overwriteSources, clip.itemIsDirectory, accountId, targetPath,
+                            isMove = true, overwriteNames = overwriteNames, skipNames = skipNames
+                        ) { p -> setTransferProgress(p.currentFileName, p.currentIndex, p.totalFiles, p.isUpload, p.bytesTransferred, p.totalBytes, p.operationLabel) }
+                        failures += merged.failures
+                        merged.lastError?.let { lastErrorMessage = it }
+                        moved += overwriteSources.size
+                        overwriteSources.map { it.substringBeforeLast('/', "/").ifEmpty { "/" } }.distinct()
+                            .forEach { folderCacheManager.invalidateCloud(accountId, it) }
                     }
                     movedFromFolders.forEach { (parentPath, removedPaths) ->
                         folderCacheManager.notifyCloudFilesRemoved(accountId, parentPath, removedPaths)

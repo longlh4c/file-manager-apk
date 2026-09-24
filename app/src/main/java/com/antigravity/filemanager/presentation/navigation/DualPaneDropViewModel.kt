@@ -63,7 +63,7 @@ class DualPaneDropViewModel @Inject constructor(
     fun dropInto(location: String, dropped: GlobalClipboardState) {
         if (dropped.paths.isEmpty()) return
         val requested = parse(location)
-        job?.cancel()
+        if (isBusy()) return
         job = viewModelScope.launch {
             // A Google Drive account's root is a virtual menu; a drop there lands in My Drive.
             val dest = requested.accountId
@@ -111,6 +111,14 @@ class DualPaneDropViewModel @Inject constructor(
         job = viewModelScope.launch { run(overwriteNames, skipNames) }
     }
 
+    /** A drop while another one is still running (or waiting on its conflict dialog) used to
+     * cancel that one silently, cutting a copy or move off halfway. It is refused instead. */
+    private fun isBusy(): Boolean {
+        if (job?.isActive != true && pendingRun == null) return false
+        _uiState.update { it.copy(message = "Another transfer is still running") }
+        return true
+    }
+
     fun cancelConflicts() {
         pendingRun = null
         _uiState.update { it.copy(conflicts = emptyList()) }
@@ -122,6 +130,7 @@ class DualPaneDropViewModel @Inject constructor(
 
     fun trash(items: GlobalClipboardState) {
         if (items.paths.isEmpty()) return
+        if (isBusy()) return
         job = viewModelScope.launch {
             val accountId = items.sourceCloudAccountId
             val trashed = if (accountId == null) {
@@ -190,17 +199,30 @@ class DualPaneDropViewModel @Inject constructor(
                 // Cloud -> same account, move: server-side, nothing downloaded
                 val account = targetAccount!!
                 val moved = mutableListOf<String>()
+                // Overwritten items merge into the existing ones and replace a file only once its
+                // replacement is up (see copyBetweenClouds); the rest move server-side.
+                val overwritten = paths.filter { File(it).name in overwrite && File(it).name !in skip }
+                var failures = 0
+                if (overwritten.isNotEmpty()) {
+                    val merged = cloudUseCase.copyBetweenClouds(
+                        context, account, overwritten, items.itemIsDirectory, account, dest.path,
+                        isMove = true, overwriteNames = overwrite, skipNames = skip
+                    ) { p -> _uiState.update { it.copy(progress = p) } }
+                    failures += merged.failures
+                    folderCacheManager.invalidateCloud(account, dest.path)
+                    overwritten.map { it.substringBeforeLast('/', "/").ifEmpty { "/" } }.distinct()
+                        .forEach { folderCacheManager.invalidateCloud(account, it) }
+                }
                 for ((index, path) in paths.withIndex()) {
                     currentCoroutineContext().ensureActive()
                     val name = File(path).name
-                    if (name in skip) continue
-                    if (name in overwrite) cloudUseCase.deleteItem(account, childPath(dest.path, name))
+                    if (name in skip || path in overwritten) continue
                     _uiState.update { it.copy(progress = CloudTransferProgress.forItemCount(name, index + 1, paths.size, isUpload = true, operationLabel = "Moving")) }
-                    if (cloudUseCase.moveWithinAccount(account, path, dest.path).isSuccess) moved += path
+                    if (cloudUseCase.moveWithinAccount(account, path, dest.path).isSuccess) moved += path else failures++
                 }
                 notifyCloudRemoved(account, moved)
                 folderCacheManager.invalidateCloud(account, dest.path)
-                "Moved ${moved.size} item(s)"
+                if (failures == 0) "Moved ${moved.size + overwritten.size} item(s)" else "Finished with $failures failure(s)"
             } else {
                 // Cloud -> cloud: another account, or a copy within one
                 val result = cloudUseCase.copyBetweenClouds(
@@ -219,7 +241,6 @@ class DualPaneDropViewModel @Inject constructor(
         }
     }
 
-    private fun childPath(dir: String, name: String) = if (dir == "/" || dir.isBlank()) "/$name" else "${dir.trimEnd('/')}/$name"
 
     /** Lets a pane still showing moved or trashed cloud items drop them without a re-list. */
     private suspend fun notifyCloudRemoved(accountId: String, paths: List<String>) {
