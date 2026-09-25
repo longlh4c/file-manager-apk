@@ -376,25 +376,49 @@ class FileOperationsHelper @Inject constructor(
             archiveTargetConflictReason(targetArchivePath, sourcePaths)?.let {
                 return@withContext Result.failure(IOException(it))
             }
-            if (targetArchivePath.endsWith(".7z", ignoreCase = true)) {
-                compress7z(sourcePaths, targetArchivePath, onProgress)
-            } else {
-                compressZip(sourcePaths, targetArchivePath, onProgress)
+            // Written beside the target and swapped in only once complete: deleting an existing
+            // archive up front (the overwrite case) lost it whenever compressing was then
+            // cancelled or failed.
+            val target = File(targetArchivePath)
+            target.parentFile?.mkdirs()
+            val staging = uniqueFile(target.parentFile ?: File("."), ".${target.name}.compressing")
+            var committing = false
+            try {
+                if (targetArchivePath.endsWith(".7z", ignoreCase = true)) {
+                    compress7z(sourcePaths, staging, onProgress)
+                } else {
+                    compressZip(sourcePaths, staging, onProgress)
+                }
+                committing = true
+                commitStaged(staging, target)
+            } catch (t: Throwable) {
+                // A failed swap keeps the finished staging file: the old archive may be gone.
+                if (!committing) staging.delete()
+                throw t
             }
+            Result.success(
+                FileItem(
+                    id = target.absolutePath,
+                    name = target.name,
+                    path = target.absolutePath,
+                    size = target.length(),
+                    lastModified = target.lastModified(),
+                    isDirectory = false,
+                    extension = target.extension.lowercase(Locale.ROOT)
+                )
+            )
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             Result.failure(e)
         }
     }
 
+    /** Writes the zip to [targetFile], which the caller deletes on failure. */
     private suspend fun compressZip(
         sourcePaths: List<String>,
-        targetZipPath: String,
+        targetFile: File,
         onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)?
-    ): Result<FileItem> {
-        val targetFile = File(targetZipPath)
-        targetFile.parentFile?.mkdirs()
-        if (targetFile.exists()) targetFile.delete()
+    ) {
 
         data class FileEntry(val file: File, val entryPathInZip: String)
         val fileEntries = mutableListOf<FileEntry>()
@@ -474,30 +498,16 @@ class FileOperationsHelper @Inject constructor(
         } catch (e: Exception) {
             try { zos.close() } catch (_: Throwable) {}
             try { fos.close() } catch (_: Throwable) {}
-            if (targetFile.exists()) targetFile.delete()
             throw e
         }
-
-        val item = FileItem(
-            id = targetFile.absolutePath,
-            name = targetFile.name,
-            path = targetFile.absolutePath,
-            size = targetFile.length(),
-            lastModified = targetFile.lastModified(),
-            isDirectory = false,
-            extension = "zip"
-        )
-        return Result.success(item)
     }
 
+    /** Writes the 7z archive to [targetFile], which the caller deletes on failure. */
     private suspend fun compress7z(
         sourcePaths: List<String>,
-        target7zPath: String,
+        targetFile: File,
         onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int, bytesProcessed: Long, totalBytes: Long) -> Unit)?
-    ): Result<FileItem> {
-        val targetFile = File(target7zPath)
-        targetFile.parentFile?.mkdirs()
-        if (targetFile.exists()) targetFile.delete()
+    ) {
 
         data class FileEntry7z(val file: File, val entryPath: String, val isDirectory: Boolean)
         val entries = mutableListOf<FileEntry7z>()
@@ -567,20 +577,8 @@ class FileOperationsHelper @Inject constructor(
             sevenZOutput.close()
         } catch (e: Exception) {
             try { sevenZOutput.close() } catch (_: Throwable) {}
-            if (targetFile.exists()) targetFile.delete()
             throw e
         }
-
-        val item = FileItem(
-            id = targetFile.absolutePath,
-            name = targetFile.name,
-            path = targetFile.absolutePath,
-            size = targetFile.length(),
-            lastModified = targetFile.lastModified(),
-            isDirectory = false,
-            extension = "7z"
-        )
-        return Result.success(item)
     }
 
     fun isArchiveEncrypted(archiveFilePath: String): Boolean {

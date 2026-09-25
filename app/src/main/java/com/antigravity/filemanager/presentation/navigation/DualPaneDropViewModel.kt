@@ -98,7 +98,10 @@ class DualPaneDropViewModel @Inject constructor(
             if (conflicts.isEmpty()) {
                 transfer(dest, items, emptySet(), emptySet())
             } else {
-                pendingRun = { overwrite, skip -> transfer(dest, items, overwrite, skip) }
+                pendingRun = { overwrite, skip ->
+                    val keepBoth = conflicts.map { it.name }.filterTo(mutableSetOf()) { it !in overwrite && it !in skip }
+                    transfer(dest, items, overwrite, skip, keepBoth)
+                }
                 _uiState.update { it.copy(conflicts = conflicts) }
             }
         }
@@ -160,7 +163,14 @@ class DualPaneDropViewModel @Inject constructor(
         }
     }
 
-    private suspend fun transfer(dest: Destination, items: GlobalClipboardState, overwrite: Set<String>, skip: Set<String>) {
+    /** [keepBoth]: conflicting names the user chose to keep both of (neither overwritten nor skipped). */
+    private suspend fun transfer(
+        dest: Destination,
+        items: GlobalClipboardState,
+        overwrite: Set<String>,
+        skip: Set<String>,
+        keepBoth: Set<String> = emptySet()
+    ) {
         val source = items.sourceCloudAccountId
         val targetAccount = dest.accountId
         val paths = items.paths
@@ -183,8 +193,9 @@ class DualPaneDropViewModel @Inject constructor(
                 val result = cloudUseCase.downloadFilesToLocal(
                     context, source, paths, dest.path, items.itemSizes, isMove, overwrite, skip, items.itemIsDirectory
                 ) { p -> _uiState.update { it.copy(progress = p) } }
+                // The moved sources that were really deleted are already dropped from the cloud
+                // listings by downloadFilesToLocal.
                 folderCacheManager.invalidateLocal(dest.path)
-                if (isMove) notifyCloudRemoved(source, paths.filter { File(it).name !in skip && File(it).name !in result.failedNames })
                 if (result.failedNames.isEmpty()) "$verb ${result.scannedPaths.size} item(s)"
                 else "Finished with ${result.failedNames.size} failure(s)"
             } else if (targetAccount != null && source == null) {
@@ -209,8 +220,11 @@ class DualPaneDropViewModel @Inject constructor(
                 val account = targetAccount!!
                 val moved = mutableListOf<String>()
                 // Overwritten items merge into the existing ones and replace a file only once its
-                // replacement is up (see copyBetweenClouds); the rest move server-side.
-                val overwritten = paths.filter { File(it).name in overwrite && File(it).name !in skip }
+                // replacement is up (see copyBetweenClouds); "Keep both" items go the same way,
+                // since a server-side move can't rename (Drive and MEGA ended up with two items of
+                // the same name, Dropbox refused the move). The rest move server-side.
+                val overwritten = paths.filter { File(it).name in overwrite || File(it).name in keepBoth }
+                    .filter { File(it).name !in skip }
                 var failures = 0
                 if (overwritten.isNotEmpty()) {
                     val merged = cloudUseCase.copyBetweenClouds(
@@ -237,7 +251,7 @@ class DualPaneDropViewModel @Inject constructor(
                 val result = cloudUseCase.copyBetweenClouds(
                     context, source!!, paths, items.itemIsDirectory, targetAccount!!, dest.path, isMove, overwrite, skip
                 ) { p -> _uiState.update { it.copy(progress = p) } }
-                if (isMove) notifyCloudRemoved(source, paths.filter { File(it).name !in skip })
+                // Removed sources are dropped from their listings by copyBetweenClouds itself.
                 folderCacheManager.invalidateCloud(targetAccount, dest.path)
                 if (result.failures == 0) "$verb ${result.transferred} item(s)" else "Finished with ${result.failures} failure(s)"
             }

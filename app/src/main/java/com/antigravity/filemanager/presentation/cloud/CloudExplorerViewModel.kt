@@ -1520,20 +1520,27 @@ class CloudExplorerViewModel @Inject constructor(
             setTransferProgress(currentFileName = "", currentIndex = 0, totalFiles = toRestore.size, isUpload = true, operationLabel = "Restoring")
             // Same sequential-is-too-slow-for-a-big-selection fix as deleteSelected above.
             val restoreCompleted = java.util.concurrent.atomic.AtomicInteger(0)
+            val restoreFailures = java.util.concurrent.atomic.AtomicInteger(0)
             val restoreSemaphore = kotlinx.coroutines.sync.Semaphore(8)
             kotlinx.coroutines.coroutineScope {
                 toRestore.forEach { item ->
                     launch {
                         restoreSemaphore.withPermit {
                             kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                            cloudUseCase.restoreItem(accountId, item.path)
+                            if (cloudUseCase.restoreItem(accountId, item.path).isFailure) restoreFailures.incrementAndGet()
                             val done = restoreCompleted.incrementAndGet()
                             setTransferProgress(currentFileName = item.name, currentIndex = done, totalFiles = toRestore.size, isUpload = true, operationLabel = "Restoring")
                         }
                     }
                 }
             }
-            _uiState.update { old -> old.copy(isLoading = true, downloadProgress = null) }
+            // Failed restores used to finish silently; refresh() below brings those items back.
+            val failed = restoreFailures.get()
+            _uiState.update { old -> old.copy(
+                isLoading = true,
+                downloadProgress = null,
+                toastMessage = if (failed > 0) "$failed of ${toRestore.size} item(s) could not be restored" else old.toastMessage
+            ) }
             refresh()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 _uiState.update { old -> old.copy(downloadProgress = null, isLoading = false, toastMessage = "Cancelled") }
@@ -1592,8 +1599,9 @@ class CloudExplorerViewModel @Inject constructor(
         // A drop onto a folder row targets that folder rather than the one on screen.
         val targetIsShown = targetPath == _uiState.value.currentPath
 
-        // keptBoth: some clash was resolved "Keep both", so an upload went up under a new name.
-        suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>, keptBoth: Boolean = false) {
+        // keepBothNames: clashes resolved "Keep both", which land under a new name.
+        suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>, keepBothNames: Set<String> = emptySet()) {
+            val keptBoth = keepBothNames.isNotEmpty()
             try {
                 _uiState.update { old -> old.copy(isLoading = true) }
                 var failures = 0
@@ -1655,8 +1663,12 @@ class CloudExplorerViewModel @Inject constructor(
                     // merges a folder into the existing one (overwriting only same-named files)
                     // and removes an old file only after its replacement is up. A server-side
                     // move can't merge, and deleting the target first lost it whenever the move
-                    // then failed.
-                    val overwriteSources = sources.filter { File(it).name in overwriteNames && File(it).name !in skipNames }
+                    // then failed. "Keep both" items go the same way: a server-side move can't
+                    // rename, so Drive and MEGA ended up with two same-named items and Dropbox
+                    // refused the move; copyBetweenClouds gives them a "(1)" name.
+                    val overwriteSources = sources.filter {
+                        (File(it).name in overwriteNames || File(it).name in keepBothNames) && File(it).name !in skipNames
+                    }
                     var moved = 0
                     // A server-side move only ever gets refresh()'d into the DESTINATION folder
                     // (the one this screen has open right now, via the unconditional refresh() at
@@ -1747,7 +1759,7 @@ class CloudExplorerViewModel @Inject constructor(
                 .filterNot { it.name in alreadyHereNames }
             if (conflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames ->
-                    doPaste(overwriteNames, skipNames, keptBoth = conflicts.any { it.name !in overwriteNames && it.name !in skipNames })
+                    doPaste(overwriteNames, skipNames, conflicts.map { it.name }.filterTo(mutableSetOf()) { it !in overwriteNames && it !in skipNames })
                 }
                 _uiState.update { old -> old.copy(isLoading = false, overwriteConflicts = conflicts) }
             } else {

@@ -273,8 +273,9 @@ class FileRepositoryImpl @Inject constructor(
     override suspend fun getFilesInDirectory(
         directoryPath: String,
         sortOption: FileSortOption,
-        showHidden: Boolean
-    ): List<FileItem> = scanner.listFilesInDir(directoryPath, sortOption, showHidden)
+        showHidden: Boolean,
+        mergeCloneDownloads: Boolean
+    ): List<FileItem> = scanner.listFilesInDir(directoryPath, sortOption, showHidden, mergeCloneDownloads)
 
     override suspend fun getMediaFolders(categoryType: CategoryType, sortOption: FileSortOption): List<MediaFolder> =
         scanner.getMediaFolders(categoryType, sortOption)
@@ -644,6 +645,14 @@ class RecycleBinRepositoryImpl @Inject constructor(
                     onProgress?.invoke(entry.source.name, current, total)
                     entry.dest.parentFile?.mkdirs()
                     entry.source.copyTo(entry.dest, overwrite = true)
+                }
+                // A source that can't be removed at all (read-only storage, such as another
+                // profile's) was still counted as moved, leaving it in place plus a copy in the
+                // trash; it now fails and its copy is dropped. Once any original is gone the copy
+                // is kept whatever else happens, so nothing is lost.
+                val removed = fileEntries.count { it.source.delete() || !it.source.exists() }
+                if (removed == 0 && fileEntries.isNotEmpty()) {
+                    throw java.io.IOException("Couldn't remove ${source.absolutePath}")
                 }
                 source.deleteRecursively()
                 true

@@ -69,8 +69,40 @@ fun isOutsidePrimaryStorage(path: String): Boolean {
     val primary = android.os.Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
     val p = File(path).absolutePath
     val onPrimary = p == primary || p.startsWith("$primary/") || p == "/sdcard" || p.startsWith("/sdcard/")
-    return !onPrimary
+    // The app-clone space shares the phone's own storage, so trashing from it costs no space.
+    return !onPrimary && !isCloneStoragePath(p)
 }
+
+/** User ids of the "App clone" / "Dual apps" space: 999 on Vivo, Xiaomi, OPPO and realme, 95 for
+ * Samsung's Dual Messenger. Private spaces (Vivo XSpace, Xiaomi Second Space) are deliberately not
+ * listed: their files belong to a separate, locked profile. */
+private val CLONE_USER_IDS = listOf("999", "95")
+
+/** Storage roots of the app-clone space that exist beside this user's storage, e.g.
+ * /storage/emulated/999 next to /storage/emulated/0. */
+private fun cloneStorageRoots(): List<File> {
+    val primary = android.os.Environment.getExternalStorageDirectory()
+    val parent = primary.parentFile ?: return emptyList()
+    return CLONE_USER_IDS.filter { it != primary.name }.map { File(parent, it) }
+}
+
+/** True for a path inside the app-clone space's storage. */
+fun isCloneStoragePath(path: String): Boolean {
+    val p = File(path).absolutePath
+    return cloneStorageRoots().any { p.startsWith(it.absolutePath + "/") }
+}
+
+/** The app-clone space's Download folders that can be read. A cloned app (a second Messenger or
+ * Zalo, say) saves its downloads there instead of in the main Download folder, where they were
+ * only ever found through the Documents/Images category lists. */
+fun cloneDownloadDirs(): List<File> = cloneStorageRoots()
+    .map { File(it, android.os.Environment.DIRECTORY_DOWNLOADS) }
+    .filter { it.isDirectory && it.canRead() }
+
+/** The main Download folder, whose listing also shows [cloneDownloadDirs]. */
+fun isPrimaryDownloadDir(path: String): Boolean =
+    File(path).absolutePath.trimEnd('/') ==
+        android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS).absolutePath.trimEnd('/')
 
 /** Why [name] can't be used as a single file/folder name, or null when it's fine. */
 fun invalidFileNameReason(name: String): String? = when {

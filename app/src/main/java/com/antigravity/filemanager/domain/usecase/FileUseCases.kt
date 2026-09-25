@@ -50,8 +50,12 @@ class FileOperationsUseCase @Inject constructor(
     private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
     private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal
 ) {
-    suspend fun getFiles(directoryPath: String, sort: FileSortOption, showHidden: Boolean): List<FileItem> =
-        fileRepository.getFilesInDirectory(directoryPath, sort, showHidden)
+    suspend fun getFiles(
+        directoryPath: String,
+        sort: FileSortOption,
+        showHidden: Boolean,
+        mergeCloneDownloads: Boolean = false
+    ): List<FileItem> = fileRepository.getFilesInDirectory(directoryPath, sort, showHidden, mergeCloneDownloads)
 
     suspend fun copy(
         sourcePaths: List<String>,
@@ -389,6 +393,31 @@ class CloudStorageUseCase @Inject constructor(
         skipNames: Set<String>,
         onProgress: (CloudTransferProgress) -> Unit
     ): CloudCopyResult {
+        // Held for the whole operation, not just each file's download/upload: the listing and
+        // source-removal steps in between are part of the transfer too.
+        transferGuard.begin(initialLabel = if (isMove) "Moving" else "Copying")
+        try {
+            return copyBetweenCloudsGuarded(
+                context, sourceCloudAccountId, sources, isDirectoryByPath, accountId, targetDir,
+                isMove, overwriteNames, skipNames, onProgress
+            )
+        } finally {
+            transferGuard.end()
+        }
+    }
+
+    private suspend fun copyBetweenCloudsGuarded(
+        context: android.content.Context,
+        sourceCloudAccountId: String,
+        sources: List<String>,
+        isDirectoryByPath: Map<String, Boolean>,
+        accountId: String,
+        targetDir: String,
+        isMove: Boolean,
+        overwriteNames: Set<String>,
+        skipNames: Set<String>,
+        onProgress: (CloudTransferProgress) -> Unit
+    ): CloudCopyResult {
         val targetPath = resolveWriteDir(accountId, targetDir)
         // Copying a folder into itself kept finding the copy it had just made inside the source
         // and descending into it: /X/X, /X/X/X, ... without end.
@@ -434,7 +463,8 @@ class CloudStorageUseCase @Inject constructor(
         val flat = mutableListOf<FlatEntry>()
         // Tracks whether every file under a given top-level source transferred
         // successfully, so a move only deletes that source once nothing was lost.
-        val topLevelSucceeded = sources.associateWith { true }.toMutableMap()
+        // Concurrent: the parallel transfers below write to it.
+        val topLevelSucceeded = java.util.concurrent.ConcurrentHashMap(sources.associateWith { true })
 
         // Same-shape "(1)" suffixing as FileUseCases.uniqueCloudName, used below to
         // give a top-level "Keep Both" folder its own new name at the destination
@@ -477,8 +507,11 @@ class CloudStorageUseCase @Inject constructor(
                 }
                 val childTargetDir = if (targetDir == "/" || targetDir.isBlank()) "/$name" else "${targetDir.trimEnd('/')}/$name"
                 val children = getFiles(sourceCloudAccountId, remotePath).getOrElse {
+                    // Everything inside this folder is missing from the copy; it used to end up
+                    // reported as a clean "Pasted N item(s)".
                     topLevelSucceeded[topSource] = false
-                    lastErrorMessage = it.message
+                    failures++
+                    lastErrorMessage = "Couldn't read \"$name\": ${it.message}"
                     emptyList()
                 }
                 for (child in children) {
@@ -571,6 +604,7 @@ class CloudStorageUseCase @Inject constructor(
                         } else {
                             entryDir.deleteRecursively()
                             failuresCounter.incrementAndGet()
+                            lastErrorRef.set(dlResult.exceptionOrNull()?.message)
                             topLevelSucceeded[entry.topSource] = false
                         }
                         completedCounter.incrementAndGet()
@@ -595,17 +629,23 @@ class CloudStorageUseCase @Inject constructor(
             val toDelete = sources.filter { topLevelSucceeded[it] == true && File(it).name !in skipNames }
             val deleteCompleted = java.util.concurrent.atomic.AtomicInteger(0)
             val deleteSemaphore = kotlinx.coroutines.sync.Semaphore(8)
+            val removed = java.util.concurrent.ConcurrentLinkedQueue<String>()
             kotlinx.coroutines.coroutineScope {
                 toDelete.forEach { sourcePath ->
                     launch {
                         deleteSemaphore.withPermit {
                             kotlinx.coroutines.currentCoroutineContext().ensureActive()
                             setTransferProgress(currentFileName = File(sourcePath).name, currentIndex = deleteCompleted.get() + 1, totalFiles = toDelete.size, isUpload = false, operationLabel = "Removing source")
-                            deleteItem(sourceCloudAccountId, sourcePath)
+                            if (deleteItem(sourceCloudAccountId, sourcePath).isSuccess) removed.add(sourcePath)
                             deleteCompleted.incrementAndGet()
                         }
                     }
                 }
+            }
+            // Only what was really removed leaves the source folders' listings; screens used to
+            // drop every moved source, including those kept because part of them failed.
+            removed.groupBy { it.substringBeforeLast('/', "/").ifEmpty { "/" } }.forEach { (parent, paths) ->
+                folderCacheManager.notifyCloudFilesRemoved(sourceCloudAccountId, parent, paths.toSet())
             }
         }
         tempDir.deleteRecursively()
@@ -1076,19 +1116,36 @@ class CloudStorageUseCase @Inject constructor(
                                 com.antigravity.filemanager.data.local.storage.uniqueFile(withExt.parentFile!!, withExt.name)
                             } else withExt
                         } else item.localFile
-                        finalFile.parentFile?.mkdirs()
-                        if (finalFile.exists()) {
-                            finalFile.delete()
-                        }
-                        downloaded.inputStream().use { input ->
-                            finalFile.outputStream().use { output ->
-                                val buf = ByteArray(64 * 1024)
-                                var read: Int
-                                while (input.read(buf).also { read = it } != -1) {
-                                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                                    output.write(buf, 0, read)
+                        val parent = finalFile.parentFile ?: targetFolder
+                        parent.mkdirs()
+                        // Written beside the destination and swapped in only once complete:
+                        // deleting an overwritten file first, or writing straight to its name, left
+                        // a truncated file (and no old one) whenever the copy failed or was cancelled.
+                        val staging = com.antigravity.filemanager.data.local.storage.uniqueFile(parent, ".${finalFile.name}.downloading")
+                        var committing = false
+                        try {
+                            downloaded.inputStream().use { input ->
+                                staging.outputStream().use { output ->
+                                    val buf = ByteArray(64 * 1024)
+                                    var read: Int
+                                    while (input.read(buf).also { read = it } != -1) {
+                                        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                                        output.write(buf, 0, read)
+                                    }
                                 }
                             }
+                            committing = true
+                            if (finalFile.exists()) {
+                                if (finalFile.isDirectory) finalFile.deleteRecursively() else finalFile.delete()
+                            }
+                            if (!staging.renameTo(finalFile)) {
+                                staging.copyTo(finalFile, overwrite = true)
+                                staging.delete()
+                            }
+                        } catch (t: Throwable) {
+                            // A failed swap keeps the finished staging copy: the old file may be gone.
+                            if (!committing) staging.delete()
+                            throw t
                         }
                         scannedPaths.add(finalFile.absolutePath)
                     } else {
@@ -1121,8 +1178,8 @@ class CloudStorageUseCase @Inject constructor(
         // 4. If move operation, delete successfully transferred top-level sources
         if (isMove) {
             for (topSource in validTopSources) {
-                if (topSource !in failedTopSources) {
-                    deleteItem(accountId, topSource)
+                // A source whose delete failed is still in the cloud and must stay listed there.
+                if (topSource !in failedTopSources && deleteItem(accountId, topSource).isSuccess) {
                     val parentPath = topSource.substringBeforeLast('/', "/").ifEmpty { "/" }
                     movedFromFolders.getOrPut(parentPath) { mutableSetOf() }.add(topSource)
                 }

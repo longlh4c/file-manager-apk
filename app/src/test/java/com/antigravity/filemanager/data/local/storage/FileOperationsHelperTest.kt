@@ -43,6 +43,34 @@ class FileOperationsHelperTest {
     }
 
     @Test
+    fun failedCompressOverAnExistingArchiveKeepsTheOldOne() = runBlocking {
+        val src = File(root, "src").apply { mkdirs() }
+        File(src, "a.txt").writeText("A")
+        val archive = File(root, "backup.zip").apply { writeText("old archive") }
+
+        val result = helper.compressFiles(listOf(src.absolutePath), archive.absolutePath) { _, _, _, _, _ ->
+            throw java.io.IOException("disk full")
+        }
+
+        assertTrue(result.isFailure)
+        assertEquals("old archive", archive.readText())
+        assertEquals(listOf("backup.zip", "src"), root.list()!!.sorted())
+    }
+
+    @Test
+    fun compressOverAnExistingArchiveReplacesIt() = runBlocking {
+        val src = File(root, "src").apply { mkdirs() }
+        File(src, "a.txt").writeText("A")
+        val archive = File(root, "backup.zip").apply { writeText("old archive") }
+
+        val result = helper.compressFiles(listOf(src.absolutePath), archive.absolutePath)
+
+        assertTrue(result.isSuccess)
+        assertEquals(listOf("src/a.txt"), ZipFile(archive).fileHeaders.map { it.fileName })
+        assertEquals(listOf("backup.zip", "src"), root.list()!!.sorted())
+    }
+
+    @Test
     fun copyKeepsBothOnNameClash() = runBlocking {
         val src = File(root, "src").apply { mkdirs() }
         val dst = File(root, "dst").apply { mkdirs() }

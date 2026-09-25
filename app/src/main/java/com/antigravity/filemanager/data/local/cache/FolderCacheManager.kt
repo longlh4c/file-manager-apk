@@ -716,13 +716,18 @@ class FolderCacheManager @Inject constructor(
     suspend fun notifyCloudFilesAdded(accountId: String, path: String, addedFiles: List<FileItem>) {
         if (addedFiles.isEmpty()) return
         val cached = getCloudFolder(accountId, path)
-        val currentFiles = cached?.files ?: emptyList()
-        val existingNames = currentFiles.map { it.name }.toSet()
-        val newOnes = addedFiles.filter { it.name !in existingNames }
-        if (newOnes.isNotEmpty()) {
-            putCloudFolder(accountId, path, currentFiles + newOnes)
-            markParentStale(accountId, path)
+        // Nothing cached: writing just the new files made the folder look as if they were all it
+        // held, trusted for the rest of the session. The next open lists it for real instead.
+        if (cached != null) {
+            val existingNames = cached.files.map { it.name }.toSet()
+            val newOnes = addedFiles.filter { it.name !in existingNames }
+            if (newOnes.isNotEmpty()) {
+                putCloudFolder(accountId, path, cached.files + newOnes)
+                // Merging into a listing that was still due a re-check doesn't make it checked.
+                if (!cached.isFresh) reconciledOnceKeys.remove(getCloudKey(accountId, path))
+            }
         }
+        markParentStale(accountId, path)
         _cloudFolderEvents.tryEmit(CloudFolderEvent.FilesAdded(accountId, path, addedFiles))
     }
 

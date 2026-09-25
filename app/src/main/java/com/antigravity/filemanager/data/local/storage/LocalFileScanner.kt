@@ -93,12 +93,17 @@ class LocalFileScanner @Inject constructor(
     suspend fun listFilesInDir(
         dirPath: String,
         sortOption: FileSortOption = FileSortOption.BY_NAME_ASC,
-        showHidden: Boolean = false
+        showHidden: Boolean = false,
+        /** Also list the app-clone space's Download folders when [dirPath] is the main one. */
+        mergeCloneDownloads: Boolean = false
     ): List<FileItem> = withContext(Dispatchers.IO) {
         val dir = File(dirPath)
         if (!dir.exists() || !dir.isDirectory) return@withContext emptyList()
 
-        val files = dir.listFiles() ?: return@withContext emptyList()
+        val own = dir.listFiles()?.toList() ?: return@withContext emptyList()
+        val files: List<File> = if (mergeCloneDownloads && isPrimaryDownloadDir(dirPath)) {
+            own + cloneDownloadDirs().flatMap { it.listFiles()?.toList().orEmpty() }
+        } else own
         val isDateSort = sortOption == FileSortOption.BY_DATE_DESC || sortOption == FileSortOption.BY_DATE_ASC
         val isSizeSort = sortOption == FileSortOption.BY_SIZE_DESC || sortOption == FileSortOption.BY_SIZE_ASC
 
@@ -1164,7 +1169,9 @@ class LocalFileScanner @Inject constructor(
 
     private suspend fun queryDownloadsFolder(): List<MediaFolder> = coroutineScope {
         val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val files = downloadDir.listFiles()?.filter { !it.name.startsWith(".") } ?: emptyList()
+        // The Downloads screen also lists the app-clone space's downloads; count them here too.
+        val files = (listOf(downloadDir) + cloneDownloadDirs())
+            .flatMap { dir -> dir.listFiles()?.filter { !it.name.startsWith(".") }.orEmpty() }
         val totalSize = files.sumOf { if (it.isDirectory) 0L else it.length() }
         // getFolderEffectiveLastModified recurses the whole subtree (maxDepth 2) on one thread to
         // find the latest-modified file — for a Downloads folder with many subfolders (browsers

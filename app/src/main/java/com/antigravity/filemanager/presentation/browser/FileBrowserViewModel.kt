@@ -337,7 +337,8 @@ class FileBrowserViewModel @Inject constructor(
             val files = fileOperationsUseCase.getFiles(
                 directoryPath = path,
                 sort = savedSort,
-                showHidden = savedHidden
+                showHidden = savedHidden,
+                mergeCloneDownloads = true
             )
 
             // Save to cache for next time
@@ -388,13 +389,18 @@ class FileBrowserViewModel @Inject constructor(
             // Short debounce, not a "wait and see" delay — a single file write still fires
             // CREATE followed by MODIFY a moment later, so this only exists to coalesce that
             // pair into one rescan rather than two, not to sit on the update.
-            observeDirectoryChanges(path).debounce(150).collect {
+            // The main Download folder's listing includes the app-clone space's downloads too.
+            val watched = listOf(path) +
+                if (com.antigravity.filemanager.data.local.storage.isPrimaryDownloadDir(path)) {
+                    com.antigravity.filemanager.data.local.storage.cloneDownloadDirs().map { it.absolutePath }
+                } else emptyList()
+            kotlinx.coroutines.flow.merge(*watched.map { observeDirectoryChanges(it) }.toTypedArray()).debounce(150).collect {
                 // The user may have navigated elsewhere by the time this fires (or several
                 // change events piled up) — only apply the result if still viewing this path.
                 if (_uiState.value.currentPath != path) return@collect
                 val sort = _uiState.value.sortOption
                 val hidden = _uiState.value.showHiddenFiles
-                val files = fileOperationsUseCase.getFiles(path, sort, showHidden = hidden)
+                val files = fileOperationsUseCase.getFiles(path, sort, showHidden = hidden, mergeCloneDownloads = true)
                 folderCacheManager.putLocalFolder(path, sort, hidden, files)
                 if (_uiState.value.currentPath == path) {
                     _uiState.update { old -> old.copy(files = files) }
@@ -463,7 +469,7 @@ class FileBrowserViewModel @Inject constructor(
                 // CloudExplorerViewModel.onSearchQueryChanged for why holding it across the whole
                 // call (including waiting on this folder's own children) can deadlock a wide/deep
                 // tree with only 4 permits.
-                val children = semaphore.withPermit { fileOperationsUseCase.getFiles(path, FileSortOption.BY_NAME_ASC, showHidden) }
+                val children = semaphore.withPermit { fileOperationsUseCase.getFiles(path, FileSortOption.BY_NAME_ASC, showHidden, mergeCloneDownloads = true) }
                 val matches = children.filter { it.name.contains(query, ignoreCase = true) }
                 if (matches.isNotEmpty()) {
                     resultsMutex.withLock {
@@ -772,6 +778,11 @@ class FileBrowserViewModel @Inject constructor(
             ) }
         } catch (e: kotlinx.coroutines.CancellationException) {
             _uiState.update { old -> old.copy(downloadProgress = null, toastMessage = "Transfer cancelled") }
+            // Rethrown so the caller stops here: it went on to clear the clipboard, so a
+            // cancelled paste couldn't be retried without copying again.
+            folderCacheManager.invalidateLocal(targetDir)
+            loadDirectory(_uiState.value.currentPath)
+            throw e
         }
     }
 
@@ -1130,7 +1141,7 @@ class FileBrowserViewModel @Inject constructor(
         val targetArchive = File(_uiState.value.currentPath, name).absolutePath
         val sources = _uiState.value.selectedPaths.toList()
         _uiState.update { old -> old.copy(showCompressDialog = false) }
-        // Checked before the overwrite prompt, whose confirmation deletes the existing file.
+        // Checked before the overwrite prompt: the archive would replace one of its own sources.
         com.antigravity.filemanager.data.local.storage.archiveTargetConflictReason(targetArchive, sources)?.let { reason ->
             _uiState.update { old -> old.copy(toastMessage = reason) }
             return
@@ -1150,7 +1161,7 @@ class FileBrowserViewModel @Inject constructor(
         val sources = pendingCompressSources ?: return
         pendingCompressSources = null
         _uiState.update { old -> old.copy(pendingOverwriteZipPath = null) }
-        File(targetArchive).delete()
+        // The old archive is replaced only once the new one is complete (see compressFiles).
         runCompress(sources, targetArchive)
     }
 
@@ -1207,6 +1218,7 @@ class FileBrowserViewModel @Inject constructor(
 
         // If single archive selected and encrypted, prompt immediately for password
         if (selected.size == 1 && fileOperationsUseCase.isArchiveEncrypted(selected[0])) {
+            awaitPassword(selected, targetDir, emptyMap())
             _uiState.update { old -> old.copy(
                 pendingPasswordArchive = selected[0],
                 passwordError = null
@@ -1217,19 +1229,38 @@ class FileBrowserViewModel @Inject constructor(
         checkExtractConflictsAndRun(selected, targetDir)
     }
 
+    // Archives of an extraction waiting on a password, and the passwords entered so far (per
+    // archive). Entering one used to extract only that archive and drop the rest of the selection.
+    private var pendingExtractBatch: List<String>? = null
+    private var pendingExtractDir: String? = null
+    private var extractPasswords: Map<String, String> = emptyMap()
+
+    private fun awaitPassword(batch: List<String>, targetDir: String, passwords: Map<String, String>) {
+        pendingExtractBatch = batch
+        pendingExtractDir = targetDir
+        extractPasswords = passwords
+    }
+
+    private fun clearPendingExtract() {
+        pendingExtractBatch = null
+        pendingExtractDir = null
+        extractPasswords = emptyMap()
+    }
+
     private fun checkExtractConflictsAndRun(
         selected: List<String>,
         targetDir: String,
-        password: String? = null
+        passwords: Map<String, String> = emptyMap()
     ) {
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
             val allConflicts = mutableListOf<com.antigravity.filemanager.domain.model.OverwriteConflict>()
             for (path in selected) {
                 try {
-                    val conflicts = fileOperationsUseCase.getArchiveConflicts(path, targetDir, password)
+                    val conflicts = fileOperationsUseCase.getArchiveConflicts(path, targetDir, passwords[path])
                     allConflicts.addAll(conflicts)
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
+                    awaitPassword(selected, targetDir, passwords)
                     _uiState.update { old -> old.copy(
                         isLoading = false,
                         downloadProgress = null,
@@ -1238,6 +1269,7 @@ class FileBrowserViewModel @Inject constructor(
                     ) }
                     return@launch
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
+                    awaitPassword(selected, targetDir, passwords)
                     _uiState.update { old -> old.copy(
                         isLoading = false,
                         downloadProgress = null,
@@ -1259,11 +1291,11 @@ class FileBrowserViewModel @Inject constructor(
 
             if (allConflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames ->
-                    runExtract(selected, targetDir, password, overwriteNames, skipNames)
+                    runExtract(selected, targetDir, passwords, overwriteNames, skipNames)
                 }
                 _uiState.update { old -> old.copy(overwriteConflicts = allConflicts) }
             } else {
-                runExtract(selected, targetDir, password)
+                runExtract(selected, targetDir, passwords)
             }
         }
     }
@@ -1271,7 +1303,7 @@ class FileBrowserViewModel @Inject constructor(
     private fun runExtract(
         selected: List<String>,
         targetDir: String,
-        password: String? = null,
+        passwords: Map<String, String> = emptyMap(),
         overwriteNames: Set<String> = emptySet(),
         skipNames: Set<String> = emptySet()
     ) {
@@ -1299,7 +1331,7 @@ class FileBrowserViewModel @Inject constructor(
                     val res = fileOperationsUseCase.extract(
                         archivePath = path,
                         targetDir = targetDir,
-                        password = password,
+                        password = passwords[path],
                         overwriteNames = overwriteNames,
                         skipNames = skipNames
                     ) { currentEntry, currentIndex, totalEntries, bytesProcessed, totalBytes ->
@@ -1336,6 +1368,8 @@ class FileBrowserViewModel @Inject constructor(
                             break
                         }
                         if (ex is com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
+                            // The archives already extracted aren't redone after the password.
+                            awaitPassword(selected.drop(index), targetDir, passwords)
                             _uiState.update { old -> old.copy(
                                 isLoading = false,
                                 downloadProgress = null,
@@ -1344,6 +1378,7 @@ class FileBrowserViewModel @Inject constructor(
                             ) }
                             return@launch
                         } else if (ex is com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
+                            awaitPassword(selected.drop(index), targetDir, passwords)
                             _uiState.update { old -> old.copy(
                                 isLoading = false,
                                 downloadProgress = null,
@@ -1383,7 +1418,9 @@ class FileBrowserViewModel @Inject constructor(
                         transferCancelledByUser = false
                     ) }
                     folderCacheManager.invalidateLocal(targetDir)
-                    loadDirectory(targetDir)
+                    // The folder on screen now, which may no longer be targetDir: reloading
+                    // targetDir navigated back to it after the user had moved on.
+                    loadDirectory(_uiState.value.currentPath)
                 }
             }
         }
@@ -1391,13 +1428,17 @@ class FileBrowserViewModel @Inject constructor(
 
     fun submitArchivePassword(password: String) {
         val archivePath = _uiState.value.pendingPasswordArchive ?: return
-        val targetDir = _uiState.value.currentPath
+        val targetDir = pendingExtractDir ?: _uiState.value.currentPath
+        val batch = pendingExtractBatch ?: listOf(archivePath)
+        val passwords = extractPasswords + (archivePath to password)
+        clearPendingExtract()
         // Dismiss password dialog immediately
         _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
-        checkExtractConflictsAndRun(listOf(archivePath), targetDir, password)
+        checkExtractConflictsAndRun(batch, targetDir, passwords)
     }
 
     fun dismissPasswordDialog() {
+        clearPendingExtract()
         _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
     }
 
