@@ -115,6 +115,17 @@ class EmbeddedHttpServer @Inject constructor(
                 }
             }
 
+            // Cross-site request forgery: any web page someone on the LAN opens could POST a plain
+            // form to /api/delete (and, with no password set, succeed) without ever reading the
+            // reply. A browser only sends a custom header cross-origin after a CORS preflight,
+            // which this server never approves, so requiring one blocks those requests. The web
+            // UI sends it; for curl etc. add -H "X-WebShare: 1".
+            if (method == Method.POST && uri.startsWith("/api/") && session.headers["x-webshare"] != "1") {
+                return finalizeResponse(newFixedLengthResponse(
+                    Response.Status.FORBIDDEN, "application/json", "{\"error\":\"Missing X-WebShare header\"}"
+                ))
+            }
+
             return try {
                 when {
                     uri == "/" || uri == "/index.html" -> {

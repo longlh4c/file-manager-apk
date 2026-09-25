@@ -55,6 +55,9 @@ fun DuplicateFilesScreen(
     }
 
     if (showDeleteDialog) {
+        // Selecting every copy of a file (the original included) removes it completely; say so
+        // rather than presenting it like an ordinary duplicate clean-up.
+        val allCopiesGone = groups.count { g -> g.items.isNotEmpty() && g.items.all { it.path in selectedPaths } }
         DeleteConfirmDialog(
             itemCount = selectedPaths.size,
             onConfirm = {
@@ -65,7 +68,8 @@ fun DuplicateFilesScreen(
             // These screens always move to the Recycle Bin; the checkbox was shown but ignored.
             showMoveToTrashOption = false,
             defaultMoveToTrash = true,
-            message = "Move ${selectedPaths.size} item(s) to the Recycle Bin?"
+            message = "Move ${selectedPaths.size} item(s) to the Recycle Bin?" +
+                if (allCopiesGone > 0) "\n\nEvery copy of $allCopiesGone file(s) is selected, including the original — none of them will be left." else ""
         )
     }
 

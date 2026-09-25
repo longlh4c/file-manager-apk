@@ -284,6 +284,11 @@ private fun parentPathLabel(path: String): String {
     return parent.ifEmpty { "/" }
 }
 
+/** Marks items that live in the app-clone space's storage (merged into the Downloads listing, or
+ * found by a category), which otherwise look exactly like the main storage's own. */
+private fun cloneSuffix(file: FileItem): String =
+    if (com.antigravity.filemanager.data.local.storage.isCloneStoragePath(file.path)) " • App clone" else ""
+
 private fun folderItemCountLabel(file: FileItem): String {
     // The Trash/Rubbish Bin badge is a synthetic, flat listing of deleted entries scattered
     // across the whole account (see DropboxApiClient.listTrash / GoogleDriveApiClient.listTrash)
@@ -389,7 +394,7 @@ fun FileListItem(
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
-                text = if (file.isDirectory) folderItemCountLabel(file) else file.formattedSize,
+                text = (if (file.isDirectory) folderItemCountLabel(file) else file.formattedSize) + cloneSuffix(file),
                 color = TextSecondary,
                 fontSize = 13.sp
             )
@@ -670,7 +675,7 @@ fun FileGridCard(
         Spacer(modifier = Modifier.height(2.dp))
 
         Text(
-            text = if (file.isDirectory) folderItemCountLabel(file) else file.formattedSize,
+            text = (if (file.isDirectory) folderItemCountLabel(file) else file.formattedSize) + cloneSuffix(file),
             color = TextSecondary,
             fontSize = 11.sp,
             textAlign = TextAlign.Center,
@@ -747,7 +752,7 @@ fun FileDetailedListItem(
             Spacer(modifier = Modifier.height(3.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = if (file.isDirectory) "Directory • ${folderItemCountLabel(file)}" else "${file.extension.uppercase()} • ${file.formattedSize}",
+                    text = (if (file.isDirectory) "Directory • ${folderItemCountLabel(file)}" else "${file.extension.uppercase()} • ${file.formattedSize}") + cloneSuffix(file),
                     color = TextSecondary,
                     fontSize = 12.sp
                 )

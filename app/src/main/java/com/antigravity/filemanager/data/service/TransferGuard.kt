@@ -54,6 +54,10 @@ class TransferGuard @Inject constructor(
     /** Reports current-file progress for the notification's progress bar. Safe to call from any
      * throttled progress callback — this is just a StateFlow write, no I/O. */
     fun updateProgress(info: TransferProgressInfo) {
+        // Only while something is running: nothing clears a value written after the last end(),
+        // so a late update (a move's "Removing source" step, after its transfers had ended) stayed
+        // on every screen that mirrors this as a progress dialog stuck at 100%.
+        if (activeCount.get() <= 0) return
         _progress.value = info
     }
 

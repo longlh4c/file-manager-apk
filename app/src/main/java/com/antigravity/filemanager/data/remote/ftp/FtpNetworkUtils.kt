@@ -78,5 +78,7 @@ fun resolveLocalIpAddress(context: Context): String {
 
 fun generateRandomFtpPassword(): String {
     val chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    return (1..6).map { chars.random() }.joinToString("")
+    // SecureRandom: kotlin's default Random is not meant for secrets.
+    val random = java.security.SecureRandom()
+    return (1..6).map { chars[random.nextInt(chars.length)] }.joinToString("")
 }

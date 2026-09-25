@@ -67,7 +67,10 @@ class MainActivity : ComponentActivity() {
         setTheme(R.style.Theme_FileManager)
         super.onCreate(savedInstanceState)
         checkAndRequestStoragePermissions()
-        handleIncomingShareIntent(intent)
+        // A restored activity (e.g. after the system killed the app in the background) comes back
+        // with its original share intent: handling it again copied the files once more and
+        // replaced whatever the user had put on the clipboard since.
+        if (savedInstanceState == null) handleIncomingShareIntent(intent)
 
         setContent {
             FileManagerTheme {
@@ -115,7 +118,10 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val copiedPaths = mutableListOf<String>()
-                val cacheDir = File(cacheDir, "shared_incoming").apply { mkdirs() }
+                // One folder per share, so the previous share's files (possibly still on the
+                // clipboard) are only removed once this one has replaced them.
+                val incomingRoot = File(cacheDir, "shared_incoming")
+                val cacheDir = File(incomingRoot, System.currentTimeMillis().toString()).apply { mkdirs() }
                 for (uri in uris) {
                     try {
                         // The sending app controls both the URI and the display name. A file://
@@ -141,8 +147,11 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                if (copiedPaths.isEmpty()) cacheDir.deleteRecursively()
                 if (copiedPaths.isNotEmpty()) {
                     clipboardManager.copy(copiedPaths)
+                    // Earlier shares are off the clipboard now; they used to pile up here forever.
+                    incomingRoot.listFiles()?.filter { it != cacheDir }?.forEach { it.deleteRecursively() }
                     withContext(Dispatchers.Main) {
                         Toast.makeText(
                             this@MainActivity,

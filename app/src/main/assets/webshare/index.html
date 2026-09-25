@@ -760,7 +760,7 @@
     try {
       const res = await fetch('/api/delete?path=' + encodeURIComponent(path), {
         method: 'POST',
-        headers: authToken ? { 'X-Auth-Token': authToken } : {}
+        headers: authToken ? { 'X-Auth-Token': authToken, 'X-WebShare': '1' } : { 'X-WebShare': '1' }
       });
       if (res.ok) {
         loadDirectory(currentPath);
@@ -784,7 +784,7 @@
     try {
       const res = await fetch('/api/mkdir?path=' + encodeURIComponent(currentPath) + '&name=' + encodeURIComponent(name), {
         method: 'POST',
-        headers: authToken ? { 'X-Auth-Token': authToken } : {}
+        headers: authToken ? { 'X-Auth-Token': authToken, 'X-WebShare': '1' } : { 'X-WebShare': '1' }
       });
       if (res.ok) {
         closeModal('newFolderModal');
@@ -819,6 +819,7 @@
         const xhr = new XMLHttpRequest();
         xhr.open('POST', uploadUrl);
         if (authToken) xhr.setRequestHeader('X-Auth-Token', authToken);
+        xhr.setRequestHeader('X-WebShare', '1');
         xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
 
         xhr.upload.onprogress = (e) => {

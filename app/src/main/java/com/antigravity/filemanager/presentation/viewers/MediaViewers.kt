@@ -266,7 +266,16 @@ fun ImageViewerScreen(
         AlertDialog(
             onDismissRequest = { if (!isDeleting) showDeleteConfirm = false },
             title = { Text("Delete", color = TextPrimary, fontWeight = FontWeight.SemiBold) },
-            text = { Text("Delete \"$currentName\"? It will be moved to the recycle bin.", color = TextSecondary) },
+            text = {
+                // Files on a USB drive or SD card skip the Recycle Bin (see FileOperationsUseCase.delete).
+                val permanent = (currentEntry as? ViewerEntry.Local)?.file?.absolutePath
+                    ?.let { com.antigravity.filemanager.data.local.storage.isOutsidePrimaryStorage(it) } == true
+                Text(
+                    if (permanent) "Permanently delete \"$currentName\"? Files on a USB drive or SD card can't be moved to the recycle bin."
+                    else "Delete \"$currentName\"? It will be moved to the recycle bin.",
+                    color = TextSecondary
+                )
+            },
             confirmButton = {
                 TextButton(
                     enabled = !isDeleting,
@@ -279,6 +288,8 @@ fun ImageViewerScreen(
                             }
                             isDeleting = false
                             showDeleteConfirm = false
+                            // A failed delete used to just close the dialog with no word.
+                            result.exceptionOrNull()?.let { android.widget.Toast.makeText(context, "Delete failed: ${it.message}", android.widget.Toast.LENGTH_SHORT).show() }
                             if (result.isSuccess) {
                                 // Drop the deleted page and land on the next one (or the new
                                 // last page, if it was the last one) instead of closing the
@@ -693,7 +704,16 @@ fun VideoPlayerScreen(
         AlertDialog(
             onDismissRequest = { if (!isDeleting) showDeleteConfirm = false },
             title = { Text("Delete", color = TextPrimary, fontWeight = FontWeight.SemiBold) },
-            text = { Text("Delete \"$currentName\"? It will be moved to the recycle bin.", color = TextSecondary) },
+            text = {
+                // Files on a USB drive or SD card skip the Recycle Bin (see FileOperationsUseCase.delete).
+                val permanent = (currentEntry as? ViewerEntry.Local)?.file?.absolutePath
+                    ?.let { com.antigravity.filemanager.data.local.storage.isOutsidePrimaryStorage(it) } == true
+                Text(
+                    if (permanent) "Permanently delete \"$currentName\"? Files on a USB drive or SD card can't be moved to the recycle bin."
+                    else "Delete \"$currentName\"? It will be moved to the recycle bin.",
+                    color = TextSecondary
+                )
+            },
             confirmButton = {
                 TextButton(
                     enabled = !isDeleting,
@@ -706,6 +726,8 @@ fun VideoPlayerScreen(
                             }
                             isDeleting = false
                             showDeleteConfirm = false
+                            // A failed delete used to just close the dialog with no word.
+                            result.exceptionOrNull()?.let { android.widget.Toast.makeText(context, "Delete failed: ${it.message}", android.widget.Toast.LENGTH_SHORT).show() }
                             if (result.isSuccess) {
                                 // See ImageViewerScreen's matching delete handler.
                                 val deletedIndex = pagerState.currentPage
@@ -908,6 +930,17 @@ fun VideoPlayerScreen(
                             exoPlayer.removeListener(listener)
                             exoPlayer.release()
                         }
+                    }
+                    // Nothing paused playback when the app went to the background, so a video kept
+                    // playing (with sound) after Home or switching apps. Pause on ON_PAUSE; the
+                    // user resumes with the player's own controls.
+                    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+                    DisposableEffect(exoPlayer, lifecycleOwner) {
+                        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                            if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE) exoPlayer.pause()
+                        }
+                        lifecycleOwner.lifecycle.addObserver(observer)
+                        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                     }
 
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

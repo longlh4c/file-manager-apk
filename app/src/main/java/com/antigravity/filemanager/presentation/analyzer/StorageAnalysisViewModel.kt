@@ -169,6 +169,11 @@ class StorageAnalysisViewModel @Inject constructor(
             "$archiveName.zip"
         }
         val targetArchive = "$targetDir/$name"
+        // Checked before the overwrite prompt: the archive would replace one of its own sources.
+        com.antigravity.filemanager.data.local.storage.archiveTargetConflictReason(targetArchive, paths)?.let { reason ->
+            _uiState.update { old -> old.copy(toastMessage = reason) }
+            return
+        }
         if (File(targetArchive).exists()) {
             pendingCompress = Triple(paths, targetArchive, onComplete)
             _uiState.update { old -> old.copy(pendingOverwriteZipPath = targetArchive) }
@@ -181,7 +186,7 @@ class StorageAnalysisViewModel @Inject constructor(
         val (paths, targetArchive, onComplete) = pendingCompress ?: return
         pendingCompress = null
         _uiState.update { old -> old.copy(pendingOverwriteZipPath = null) }
-        File(targetArchive).delete()
+        // The old archive is replaced only once the new one is complete (see compressFiles).
         runCompress(paths, targetArchive, onComplete)
     }
 
@@ -194,7 +199,9 @@ class StorageAnalysisViewModel @Inject constructor(
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
             try {
-                fileOperationsUseCase.compress(paths, targetArchive) { currentFile, currentIndex, totalFiles, bytesProcessed, totalBytes ->
+                // An archive being overwritten already takes up its old size.
+                val previousSize = File(targetArchive).takeIf { it.isFile }?.length() ?: 0L
+                val result = fileOperationsUseCase.compress(paths, targetArchive) { currentFile, currentIndex, totalFiles, bytesProcessed, totalBytes ->
                     if (!this@launch.isActive || _uiState.value.transferCancelledByUser) return@compress
                     val p = if (totalBytes > 0L) {
                         ((bytesProcessed.toDouble() / totalBytes.toDouble()) * 100).toInt().coerceIn(0, 100)
@@ -218,9 +225,10 @@ class StorageAnalysisViewModel @Inject constructor(
                     _uiState.update { old -> old.copy(toastMessage = "Compress failed: ${e.message}") }
                 }
                 val archiveFile = File(targetArchive)
-                if (archiveFile.exists()) {
+                // A failed overwrite leaves the old archive in place, which adds nothing.
+                if (result.isSuccess && archiveFile.exists()) {
                     val currentData = _uiState.value.data
-                    val archiveSize = archiveFile.length()
+                    val archiveSize = archiveFile.length() - previousSize
                     _uiState.update { old -> old.copy(
                         data = currentData.copy(
                             volumeInfo = currentData.volumeInfo.copy(
@@ -245,6 +253,17 @@ class StorageAnalysisViewModel @Inject constructor(
 
     private var pendingExtractDir: String? = null
     private var pendingExtractOnComplete: (() -> Unit)? = null
+    // Archives of an extraction waiting on a password, and the passwords entered so far (per
+    // archive). Entering one used to extract only that archive and drop the rest of the selection.
+    private var pendingExtractBatch: List<String>? = null
+    private var extractPasswords: Map<String, String> = emptyMap()
+
+    private fun awaitPassword(batch: List<String>, targetDir: String, passwords: Map<String, String>, onComplete: () -> Unit) {
+        pendingExtractBatch = batch
+        pendingExtractDir = targetDir
+        extractPasswords = passwords
+        pendingExtractOnComplete = onComplete
+    }
     private var pendingOverwriteAction: (suspend (overwriteNames: Set<String>, skipNames: Set<String>) -> Unit)? = null
 
     fun resolveOverwriteConflict(overwriteNames: Set<String>, skipNames: Set<String>) {
@@ -264,8 +283,7 @@ class StorageAnalysisViewModel @Inject constructor(
 
     fun extract(paths: List<String>, targetDir: String, onComplete: () -> Unit = {}) {
         if (paths.isEmpty()) return
-        pendingExtractDir = targetDir
-        pendingExtractOnComplete = onComplete
+        awaitPassword(paths, targetDir, emptyMap(), onComplete)
         if (paths.size == 1 && fileOperationsUseCase.isArchiveEncrypted(paths[0])) {
             _uiState.update { old -> old.copy(
                 pendingPasswordArchive = paths[0],
@@ -273,13 +291,13 @@ class StorageAnalysisViewModel @Inject constructor(
             ) }
             return
         }
-        checkExtractConflictsAndRun(paths, targetDir, null, onComplete)
+        checkExtractConflictsAndRun(paths, targetDir, emptyMap(), onComplete)
     }
 
     private fun checkExtractConflictsAndRun(
         paths: List<String>,
         targetDir: String,
-        password: String?,
+        passwords: Map<String, String>,
         onComplete: () -> Unit
     ) {
         activeTransferJob?.cancel()
@@ -287,11 +305,10 @@ class StorageAnalysisViewModel @Inject constructor(
             val allConflicts = mutableListOf<com.antigravity.filemanager.domain.model.OverwriteConflict>()
             for (path in paths) {
                 try {
-                    val conflicts = fileOperationsUseCase.getArchiveConflicts(path, targetDir, password)
+                    val conflicts = fileOperationsUseCase.getArchiveConflicts(path, targetDir, passwords[path])
                     allConflicts.addAll(conflicts)
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
-                    pendingExtractDir = targetDir
-                    pendingExtractOnComplete = onComplete
+                    awaitPassword(paths, targetDir, passwords, onComplete)
                     _uiState.update { old -> old.copy(
                         transferProgress = null,
                         pendingPasswordArchive = path,
@@ -299,8 +316,7 @@ class StorageAnalysisViewModel @Inject constructor(
                     ) }
                     return@launch
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
-                    pendingExtractDir = targetDir
-                    pendingExtractOnComplete = onComplete
+                    awaitPassword(paths, targetDir, passwords, onComplete)
                     _uiState.update { old -> old.copy(
                         transferProgress = null,
                         pendingPasswordArchive = path,
@@ -314,11 +330,11 @@ class StorageAnalysisViewModel @Inject constructor(
 
             if (allConflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames ->
-                    runExtract(paths, targetDir, password, overwriteNames, skipNames, onComplete)
+                    runExtract(paths, targetDir, passwords, overwriteNames, skipNames, onComplete)
                 }
                 _uiState.update { old -> old.copy(overwriteConflicts = allConflicts) }
             } else {
-                runExtract(paths, targetDir, password, emptySet(), emptySet(), onComplete)
+                runExtract(paths, targetDir, passwords, emptySet(), emptySet(), onComplete)
             }
         }
     }
@@ -326,7 +342,7 @@ class StorageAnalysisViewModel @Inject constructor(
     private fun runExtract(
         paths: List<String>,
         targetDir: String,
-        password: String?,
+        passwords: Map<String, String>,
         overwriteNames: Set<String> = emptySet(),
         skipNames: Set<String> = emptySet(),
         onComplete: () -> Unit
@@ -352,7 +368,7 @@ class StorageAnalysisViewModel @Inject constructor(
                     val res = fileOperationsUseCase.extract(
                         archivePath = p,
                         targetDir = targetDir,
-                        password = password,
+                        password = passwords[p],
                         overwriteNames = overwriteNames,
                         skipNames = skipNames
                     ) { currentEntry, currentIndex, totalEntries, bytesProcessed, totalBytes ->
@@ -387,8 +403,8 @@ class StorageAnalysisViewModel @Inject constructor(
                             break
                         }
                         if (ex is com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
-                            pendingExtractDir = targetDir
-                            pendingExtractOnComplete = onComplete
+                            // The archives already extracted aren't redone after the password.
+                            awaitPassword(paths.drop(index), targetDir, passwords, onComplete)
                             _uiState.update { old -> old.copy(
                                 transferProgress = null,
                                 pendingPasswordArchive = p,
@@ -396,8 +412,7 @@ class StorageAnalysisViewModel @Inject constructor(
                             ) }
                             return@launch
                         } else if (ex is com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
-                            pendingExtractDir = targetDir
-                            pendingExtractOnComplete = onComplete
+                            awaitPassword(paths.drop(index), targetDir, passwords, onComplete)
                             _uiState.update { old -> old.copy(
                                 transferProgress = null,
                                 pendingPasswordArchive = p,
@@ -432,15 +447,21 @@ class StorageAnalysisViewModel @Inject constructor(
         val archivePath = _uiState.value.pendingPasswordArchive ?: return
         val targetDir = pendingExtractDir ?: return
         val onComplete = pendingExtractOnComplete ?: {}
+        val batch = pendingExtractBatch ?: listOf(archivePath)
+        val passwords = extractPasswords + (archivePath to password)
+        pendingExtractBatch = null
+        extractPasswords = emptyMap()
         // Dismiss password dialog immediately
         _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
-        checkExtractConflictsAndRun(listOf(archivePath), targetDir, password, onComplete)
+        checkExtractConflictsAndRun(batch, targetDir, passwords, onComplete)
     }
 
     fun dismissPasswordDialog() {
         _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
         pendingExtractDir = null
         pendingExtractOnComplete = null
+        pendingExtractBatch = null
+        extractPasswords = emptyMap()
     }
 
     fun deleteSelected(paths: List<String>, onComplete: () -> Unit = {}) {
@@ -452,9 +473,6 @@ class StorageAnalysisViewModel @Inject constructor(
             // needs patching, since the moved items (including any nested under a deleted
             // folder) should no longer show up in it.
             val deletedDirPrefixes = paths.filter { File(it).isDirectory }.map { if (it.endsWith("/")) it else "$it/" }
-            fun isRemoved(itemPath: String) = itemPath in paths || deletedDirPrefixes.any { itemPath.startsWith(it) }
-
-            val matchedLargeBytes = currentData.largeFiles.filter { isRemoved(it.path) }.sumOf { it.sizeBytes }
 
             fileOperationsUseCase.delete(paths, moveToRecycleBin = true).let { result ->
                 val deleted = result.getOrNull()
@@ -462,6 +480,11 @@ class StorageAnalysisViewModel @Inject constructor(
                     _uiState.update { old -> old.copy(toastMessage = result.exceptionOrNull()?.let { "Delete failed: ${it.message}" } ?: "$deleted of ${paths.size} item(s) deleted") }
                 }
             }
+            // Checked on disk after the delete: a partly failed delete used to drop every selected
+            // item from the list, so files that were never deleted vanished from the screen.
+            fun isRemoved(itemPath: String) =
+                (itemPath in paths || deletedDirPrefixes.any { itemPath.startsWith(it) }) && !File(itemPath).exists()
+            val matchedLargeBytes = currentData.largeFiles.filter { isRemoved(it.path) }.sumOf { it.sizeBytes }
 
             _uiState.update { old -> old.copy(
                 data = currentData.copy(

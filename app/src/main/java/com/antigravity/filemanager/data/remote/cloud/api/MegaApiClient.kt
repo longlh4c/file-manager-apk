@@ -45,13 +45,17 @@ class MegaApiClient @Inject constructor(
 ) {
     private val megaApiUrl = "https://g.api.mega.co.nz/cs"
 
+    private companion object {
+        const val NODE_TREE_TTL_MS = 5 * 60 * 1000L
+    }
+
     // The MEGA "f" command always returns the ENTIRE account node tree (there is no
     // "children of X" endpoint), so every listFiles() call pays a full download + AES
-    // decrypt of every node name. Cache the parsed tree per account indefinitely so
-    // repeated navigation (and the N+1 folder-item-count lookups) reuse it instead of
-    // re-fetching/re-decrypting the whole account on every call. The cache is only
-    // dropped when the caller explicitly asks for a refresh (see [invalidateNodeTreeCache]),
-    // typically a manual pull-to-refresh at the account root.
+    // decrypt of every node name. Cache the parsed tree per account so repeated navigation
+    // (and the N+1 folder-item-count lookups) reuse it instead of re-fetching/re-decrypting the
+    // whole account on every call. It used to be kept until a manual refresh at the account root,
+    // so changes made from another device or the MEGA app never showed up; it now expires after
+    // [NODE_TREE_TTL_MS] (this app's own changes patch or invalidate it immediately).
     private data class NodeTreeCache(val allNodes: List<MegaNode>, val rootHandle: String, val timestamp: Long)
     private val nodeTreeCache = ConcurrentHashMap<String, NodeTreeCache>()
     private val nodeTreeMutexes = ConcurrentHashMap<String, Mutex>()
@@ -92,7 +96,7 @@ class MegaApiClient @Inject constructor(
             keyStr = encodedKey
         )
         val updated = cached.allNodes.filterNot { it.handle == handle } + newNode
-        nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, System.currentTimeMillis())
+        nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, cached.timestamp)
     }
 
     /** Same idea for a freshly uploaded file — this one matters even more than the folder-create
@@ -123,7 +127,7 @@ class MegaApiClient @Inject constructor(
             fileAttrStr = fileAttrStr
         )
         val updated = cached.allNodes.filterNot { it.handle == handle } + newNode
-        nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, System.currentTimeMillis())
+        nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, cached.timestamp)
     }
 
     fun resolveSid(account: CloudAccount): String {
@@ -369,23 +373,26 @@ class MegaApiClient @Inject constructor(
      * cold cache — the cache never expires on its own, callers must [invalidateNodeTreeCache]
      * (a manual refresh at the account root) to force a re-fetch. */
     private suspend fun getOrFetchNodeTree(account: CloudAccount): Result<Pair<List<MegaNode>, String>> {
-        nodeTreeCache[account.id]?.let { cached ->
+        fun isFresh(cache: NodeTreeCache) = System.currentTimeMillis() - cache.timestamp < NODE_TREE_TTL_MS
+        nodeTreeCache[account.id]?.takeIf(::isFresh)?.let { cached ->
             android.util.Log.d("MegaApiClient", "getOrFetchNodeTree: cache HIT (${cached.allNodes.size} nodes) for ${account.id}")
             return Result.success(cached.allNodes to cached.rootHandle)
         }
         // Serialize concurrent misses for the same account (e.g. N+1 folder-count lookups)
         // so they share one network fetch instead of each re-downloading the whole tree.
         return nodeTreeMutexFor(account.id).withLock {
-            nodeTreeCache[account.id]?.let { recheck ->
+            val stale = nodeTreeCache[account.id]
+            stale?.takeIf(::isFresh)?.let { recheck ->
                 android.util.Log.d("MegaApiClient", "getOrFetchNodeTree: cache HIT after lock (${recheck.allNodes.size} nodes) for ${account.id}")
                 return@withLock Result.success(recheck.allNodes to recheck.rootHandle)
             }
-            android.util.Log.d("MegaApiClient", "getOrFetchNodeTree: cache MISS — fetching fresh tree from network for ${account.id}")
+            android.util.Log.d("MegaApiClient", "getOrFetchNodeTree: cache ${if (stale == null) "MISS" else "EXPIRED"} — fetching tree from network for ${account.id}")
             val fetched = fetchNodeTreeFromNetwork(account)
             fetched.onSuccess { (nodes, root) ->
                 nodeTreeCache[account.id] = NodeTreeCache(nodes, root, System.currentTimeMillis())
             }
-            fetched
+            // An expired tree still beats an error while offline or rate-limited.
+            if (fetched.isFailure && stale != null) Result.success(stale.allNodes to stale.rootHandle) else fetched
         }
     }
 
@@ -981,8 +988,8 @@ class MegaApiClient @Inject constructor(
             }.toString()
 
             val response = sendMegaPost(url, commandJson)
-            val bodyStr = (response.getOrNull() ?: "[]").trim()
-            if (bodyStr.startsWith("-")) {
+            val bodyStr = response.getOrElse { return@withContext Result.failure(it) }.trim()
+            if (megaErrorCode(bodyStr) != null) {
                 return@withContext Result.failure(Exception("MEGA rename failed: $bodyStr"))
             }
             invalidateNodeTreeCache(account.id)
@@ -1011,8 +1018,8 @@ class MegaApiClient @Inject constructor(
             }.toString()
 
             val response = sendMegaPost(url, commandJson)
-            val bodyStr = (response.getOrNull() ?: "[]").trim()
-            if (bodyStr.startsWith("-")) {
+            val bodyStr = response.getOrElse { return@withContext Result.failure(it) }.trim()
+            if (megaErrorCode(bodyStr) != null) {
                 return@withContext Result.failure(Exception("MEGA delete failed: $bodyStr"))
             }
             invalidateNodeTreeCache(account.id)
@@ -1103,8 +1110,8 @@ class MegaApiClient @Inject constructor(
             }.toString()
 
             val response = sendMegaPost(url, commandJson)
-            val bodyStr = (response.getOrNull() ?: "[]").trim()
-            if (bodyStr.startsWith("-")) {
+            val bodyStr = response.getOrElse { return@withContext Result.failure(it) }.trim()
+            if (megaErrorCode(bodyStr) != null) {
                 return@withContext Result.failure(Exception("MEGA move failed: $bodyStr"))
             }
             invalidateNodeTreeCache(account.id)
@@ -1143,6 +1150,16 @@ class MegaApiClient @Inject constructor(
      * the moment MEGA returns one -3 under load. Retry with backoff at this lowest layer so every
      * caller gets a real response instead.
      */
+    /** The MEGA error code in a command's reply, or null when it succeeded. A single command
+     * answers either a bare "-N" or, as usual, a one-element array "[-N]"; rename, delete and move
+     * only checked for the bare form, so a failed command in the array form (e.g. "[-9]" for a
+     * node that no longer exists) was reported as success. */
+    internal fun megaErrorCode(body: String): Int? {
+        val trimmed = body.trim()
+        val first = if (trimmed.startsWith("[")) trimmed.removePrefix("[").substringBefore(']').substringBefore(',').trim() else trimmed
+        return first.toIntOrNull()?.takeIf { it < 0 }
+    }
+
     private fun sendMegaPost(url: String, json: String, retriesLeft: Int = 4): Result<String> {
         return try {
             val request = Request.Builder()
@@ -1150,6 +1167,16 @@ class MegaApiClient @Inject constructor(
                 .post(json.toRequestBody("application/json".toMediaTypeOrNull()))
                 .build()
             val response = okHttpClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                // An error page used to be handed on as the reply and fail later as unparseable JSON.
+                val code = response.code
+                response.close()
+                if (retriesLeft > 0 && code >= 500) {
+                    Thread.sleep((500L * (5 - retriesLeft)).coerceAtMost(3000L))
+                    return sendMegaPost(url, json, retriesLeft - 1)
+                }
+                return Result.failure(java.io.IOException("MEGA request failed: HTTP $code"))
+            }
             val body = (response.body?.string() ?: "[]").trim()
             if (retriesLeft > 0 && (body == "-3" || body == "[-3]")) {
                 Thread.sleep((500L * (5 - retriesLeft)).coerceAtMost(3000L))
@@ -1406,6 +1433,13 @@ class MegaApiClient @Inject constructor(
             }
             if (completionHandleBytes.isEmpty()) {
                 return@withContext Result.failure(Exception("MEGA upload did not return a completion handle"))
+            }
+            // A failed upload answers with an error code in plain text ("-4") instead of the binary
+            // completion token; that text used to be sent on as if it were the token.
+            if (completionHandleBytes.size < 16) {
+                String(completionHandleBytes, StandardCharsets.US_ASCII).trim().toIntOrNull()?.let { code ->
+                    return@withContext Result.failure(Exception("MEGA upload failed (error $code)"))
+                }
             }
             val fileHandleB64 = base64UrlEncode(completionHandleBytes)
 

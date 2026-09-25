@@ -105,12 +105,18 @@ class TransferService : Service() {
                 .setContentText(getString(R.string.transfer_running_notification_text))
         } else {
             val verb = info.operationLabel ?: if (info.isUpload) "Uploading" else "Downloading"
-            val percent = if (info.totalBytes > 0) (info.bytesTransferred * 100 / info.totalBytes).toInt() else 0
+            // A local copy/move reports only a file count (no bytes), so the percentage used to
+            // read 0% with an indeterminate bar for the whole operation. Fall back to the count.
+            val percent = when {
+                info.totalBytes > 0 -> (info.bytesTransferred * 100 / info.totalBytes).toInt()
+                info.totalFiles > 0 -> (info.currentIndex * 100L / info.totalFiles).toInt()
+                else -> 0
+            }.coerceIn(0, 100)
             if (info.totalFiles > 0) {
                 builder
                     .setContentTitle("$verb ${info.currentIndex}/${info.totalFiles} — $percent%")
                     .setContentText(info.currentFileName)
-                    .setProgress(100, percent, info.totalBytes <= 0)
+                    .setProgress(100, percent, false)
             } else {
                 // TransferGuard.begin()'s initial-label state: an operation just started and knows
                 // what it's doing (Deleting/Uploading/...) but not yet how many items or bytes —

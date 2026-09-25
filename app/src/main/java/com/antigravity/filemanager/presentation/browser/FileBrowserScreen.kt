@@ -252,8 +252,8 @@ fun FileBrowserScreen(
     }
 
     if (uiState.showDeleteDialog) {
-        DeleteConfirmDialog(
-            itemCount = uiState.selectedPaths.size,
+        com.antigravity.filemanager.presentation.components.LocalDeleteConfirmDialog(
+            paths = uiState.selectedPaths,
             onConfirm = { moveToTrash ->
                 viewModel.deleteSelected(moveToTrash)
             },

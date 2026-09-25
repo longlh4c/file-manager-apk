@@ -14,6 +14,9 @@ import com.antigravity.filemanager.domain.usecase.CloudStorageUseCase
 import com.antigravity.filemanager.domain.usecase.FileOperationsUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardManager
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardState
+import com.antigravity.filemanager.domain.usecase.cloudWriteDir
+import com.antigravity.filemanager.domain.usecase.isCloudFolderOrInside
+import com.antigravity.filemanager.domain.usecase.isInCloudFolder
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -239,7 +242,9 @@ class CloudExplorerViewModel @Inject constructor(
                             totalFiles = it.totalFiles,
                             bytesTransferred = it.bytesTransferred,
                             totalBytes = it.totalBytes,
-                            isIndeterminate = it.totalBytes <= 0,
+                            // A per-file count (local copy/move) is real progress too; treating it as
+                            // indeterminate made the bar flip between the two with every update.
+                            isIndeterminate = it.totalBytes <= 0 && it.totalFiles <= 0,
                             isUpload = it.isUpload,
                             operationLabel = it.operationLabel
                         )
@@ -1515,20 +1520,27 @@ class CloudExplorerViewModel @Inject constructor(
             setTransferProgress(currentFileName = "", currentIndex = 0, totalFiles = toRestore.size, isUpload = true, operationLabel = "Restoring")
             // Same sequential-is-too-slow-for-a-big-selection fix as deleteSelected above.
             val restoreCompleted = java.util.concurrent.atomic.AtomicInteger(0)
+            val restoreFailures = java.util.concurrent.atomic.AtomicInteger(0)
             val restoreSemaphore = kotlinx.coroutines.sync.Semaphore(8)
             kotlinx.coroutines.coroutineScope {
                 toRestore.forEach { item ->
                     launch {
                         restoreSemaphore.withPermit {
                             kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                            cloudUseCase.restoreItem(accountId, item.path)
+                            if (cloudUseCase.restoreItem(accountId, item.path).isFailure) restoreFailures.incrementAndGet()
                             val done = restoreCompleted.incrementAndGet()
                             setTransferProgress(currentFileName = item.name, currentIndex = done, totalFiles = toRestore.size, isUpload = true, operationLabel = "Restoring")
                         }
                     }
                 }
             }
-            _uiState.update { old -> old.copy(isLoading = true, downloadProgress = null) }
+            // Failed restores used to finish silently; refresh() below brings those items back.
+            val failed = restoreFailures.get()
+            _uiState.update { old -> old.copy(
+                isLoading = true,
+                downloadProgress = null,
+                toastMessage = if (failed > 0) "$failed of ${toRestore.size} item(s) could not be restored" else old.toastMessage
+            ) }
             refresh()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 _uiState.update { old -> old.copy(downloadProgress = null, isLoading = false, toastMessage = "Cancelled") }
@@ -1557,18 +1569,39 @@ class CloudExplorerViewModel @Inject constructor(
     /** Items dropped onto this folder from the other dual-panel pane (local or cloud); the same
      * flow as paste, leaving the clipboard alone. */
     fun dropItems(items: GlobalClipboardState, targetPath: String = _uiState.value.currentPath) =
-        pasteItems(items, fromClipboard = false, targetPath = targetPath)
+        pasteItems(items, fromClipboard = false, requestedTarget = targetPath)
 
-    private fun pasteItems(clip: GlobalClipboardState, fromClipboard: Boolean, targetPath: String = _uiState.value.currentPath) {
-        val sources = clip.paths
+    private fun pasteItems(clip: GlobalClipboardState, fromClipboard: Boolean, requestedTarget: String = _uiState.value.currentPath) {
         // The loading guard stops a double-tapped Paste; a drop is one deliberate action.
-        if (sources.isEmpty() || (fromClipboard && _uiState.value.isLoading)) return
+        if (clip.paths.isEmpty() || (fromClipboard && _uiState.value.isLoading)) return
+        // Google Drive's root is a virtual menu; what is pasted there lands in My Drive.
+        val targetPath = cloudWriteDir(_uiState.value.account?.provider, requestedTarget)
         val sourceCloudAccountId = clip.sourceCloudAccountId
         val isMove = clip.isCut
+        val sameAccount = sourceCloudAccountId == accountId
+        if (sameAccount) {
+            clip.paths.firstOrNull { isCloudFolderOrInside(targetPath, it) }?.let {
+                _uiState.update { old -> old.copy(toastMessage = "Cannot ${if (isMove) "move" else "copy"} a folder into itself: ${File(it).name}") }
+                return
+            }
+        }
+        // Items of this account already in the target folder clash with nothing but themselves:
+        // "Overwrite" there deleted the item before moving/re-uploading it. A move leaves them
+        // where they are; a copy lands next to them under a new name.
+        val alreadyHere = if (sameAccount) clip.paths.filter { isInCloudFolder(it, targetPath) } else emptyList()
+        val alreadyHereNames = alreadyHere.map { File(it).name }.toSet()
+        val sources = if (isMove) clip.paths - alreadyHere.toSet() else clip.paths
+        if (sources.isEmpty()) {
+            if (fromClipboard) globalClipboardManager.clear()
+            _uiState.update { old -> old.copy(toastMessage = "Already in this folder") }
+            return
+        }
         // A drop onto a folder row targets that folder rather than the one on screen.
         val targetIsShown = targetPath == _uiState.value.currentPath
 
-        suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>) {
+        // keepBothNames: clashes resolved "Keep both", which land under a new name.
+        suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>, keepBothNames: Set<String> = emptySet()) {
+            val keptBoth = keepBothNames.isNotEmpty()
             try {
                 _uiState.update { old -> old.copy(isLoading = true) }
                 var failures = 0
@@ -1605,7 +1638,7 @@ class CloudExplorerViewModel @Inject constructor(
                         // skipNames, so "Skip" on every conflict still said "Pasted N item(s)"
                         // for zero real uploads.
                         transferredCount = result.getOrDefault(0)
-                        if (targetIsShown && overwriteNames.isEmpty() && sources.none { File(it).isDirectory }) {
+                        if (targetIsShown && overwriteNames.isEmpty() && !keptBoth && sources.none { File(it).isDirectory }) {
                             // The common case: a flat set of plain local files, no name clash to
                             // resolve, nothing renamed/merged by uploadFiles(). We already know
                             // exactly what landed where, so patch the current listing + cache in
@@ -1626,9 +1659,16 @@ class CloudExplorerViewModel @Inject constructor(
                     // Same-account Move: every provider has a real server-side move (change
                     // parent/path), so route through that instead of the generic cross-provider
                     // round trip below — no data ever needs to leave the provider's own servers.
-                    // Items with an Overwrite decision still need the existing target cleared
-                    // first (a plain server-side move doesn't merge/replace on its own); anything
-                    // with no conflict just moves directly.
+                    // Items with an Overwrite decision go through copyBetweenClouds instead: it
+                    // merges a folder into the existing one (overwriting only same-named files)
+                    // and removes an old file only after its replacement is up. A server-side
+                    // move can't merge, and deleting the target first lost it whenever the move
+                    // then failed. "Keep both" items go the same way: a server-side move can't
+                    // rename, so Drive and MEGA ended up with two same-named items and Dropbox
+                    // refused the move; copyBetweenClouds gives them a "(1)" name.
+                    val overwriteSources = sources.filter {
+                        (File(it).name in overwriteNames || File(it).name in keepBothNames) && File(it).name !in skipNames
+                    }
                     var moved = 0
                     // A server-side move only ever gets refresh()'d into the DESTINATION folder
                     // (the one this screen has open right now, via the unconditional refresh() at
@@ -1640,11 +1680,7 @@ class CloudExplorerViewModel @Inject constructor(
                     for (sourcePath in sources) {
                         kotlinx.coroutines.currentCoroutineContext().ensureActive()
                         val name = File(sourcePath).name
-                        if (name in skipNames) continue
-                        if (name in overwriteNames) {
-                            val existingPath = if (targetPath == "/" || targetPath.isBlank()) "/$name" else "${targetPath.trimEnd('/')}/$name"
-                            cloudUseCase.deleteItem(accountId, existingPath)
-                        }
+                        if (name in skipNames || sourcePath in overwriteSources) continue
                         setTransferProgress(currentFileName = name, currentIndex = moved + 1, totalFiles = sources.size, isUpload = true, operationLabel = "Moving")
                         val moveResult = cloudUseCase.moveWithinAccount(accountId, sourcePath, targetPath)
                         if (moveResult.isFailure) {
@@ -1655,6 +1691,17 @@ class CloudExplorerViewModel @Inject constructor(
                             movedFromFolders.getOrPut(parentPath) { mutableSetOf() }.add(sourcePath)
                         }
                         moved++
+                    }
+                    if (overwriteSources.isNotEmpty()) {
+                        val merged = cloudUseCase.copyBetweenClouds(
+                            context, accountId, overwriteSources, clip.itemIsDirectory, accountId, targetPath,
+                            isMove = true, overwriteNames = overwriteNames, skipNames = skipNames
+                        ) { p -> setTransferProgress(p.currentFileName, p.currentIndex, p.totalFiles, p.isUpload, p.bytesTransferred, p.totalBytes, p.operationLabel) }
+                        failures += merged.failures
+                        merged.lastError?.let { lastErrorMessage = it }
+                        moved += overwriteSources.size
+                        overwriteSources.map { it.substringBeforeLast('/', "/").ifEmpty { "/" } }.distinct()
+                            .forEach { folderCacheManager.invalidateCloud(accountId, it) }
                     }
                     movedFromFolders.forEach { (parentPath, removedPaths) ->
                         folderCacheManager.notifyCloudFilesRemoved(accountId, parentPath, removedPaths)
@@ -1709,8 +1756,11 @@ class CloudExplorerViewModel @Inject constructor(
                 name to size
             }
             val conflicts = cloudUseCase.findConflicts(accountId, targetPath, items)
+                .filterNot { it.name in alreadyHereNames }
             if (conflicts.isNotEmpty()) {
-                pendingOverwriteAction = { overwriteNames, skipNames -> doPaste(overwriteNames, skipNames) }
+                pendingOverwriteAction = { overwriteNames, skipNames ->
+                    doPaste(overwriteNames, skipNames, conflicts.map { it.name }.filterTo(mutableSetOf()) { it !in overwriteNames && it !in skipNames })
+                }
                 _uiState.update { old -> old.copy(isLoading = false, overwriteConflicts = conflicts) }
             } else {
                 doPaste(emptySet(), emptySet())

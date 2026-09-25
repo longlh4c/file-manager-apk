@@ -204,6 +204,15 @@ class CategoriesViewModel @Inject constructor(
         }
     }
 
+    /** Re-shows whatever is open now once an operation changed [changedDir]. Reopening the
+     * folder the operation started in pulled the user back there (under the name of the folder
+     * they had moved on to) whenever they navigated while it ran. */
+    private fun reloadAfterChange(changedDir: String?) {
+        if (changedDir != null) folderCacheManager.invalidateCategorySubfolder(categoryType, changedDir)
+        val current = _uiState.value.currentSubfolderPath
+        if (current != null) openSubfolder(current, _uiState.value.currentSubfolderName) else loadFolders()
+    }
+
     private var navigationJob: kotlinx.coroutines.Job? = null
 
     // Loading the root grid, opening a subfolder and going back all replace what is on screen;
@@ -492,9 +501,8 @@ class CategoriesViewModel @Inject constructor(
             // own — without this, openSubfolder() below just re-painted the same
             // already-"reconciled" cached list, and the new folder never appeared until something
             // else happened to invalidate it (e.g. the app process restarting).
-            folderCacheManager.invalidateCategorySubfolder(categoryType, currentDir)
             _uiState.update { old -> old.copy(showNewFolderDialog = false) }
-            openSubfolder(currentDir, _uiState.value.currentSubfolderName)
+            reloadAfterChange(currentDir)
         }
     }
 
@@ -588,8 +596,7 @@ class CategoriesViewModel @Inject constructor(
             suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>) {
                 // Keep the clipboard after a failed paste so the user can retry without re-copying.
                 if (runLocalCopyOrMove(sources, targetDir, isMove, overwriteNames, skipNames).isSuccess) globalClipboardManager.clear()
-                val currentName = _uiState.value.currentSubfolderName
-                openSubfolder(targetDir, currentName)
+                reloadAfterChange(targetDir)
             }
 
             val conflicts = fileOperationsUseCase.findConflicts(sources, targetDir)
@@ -641,10 +648,10 @@ class CategoriesViewModel @Inject constructor(
                     else -> "Pasted ${result.scannedPaths.size} item(s)"
                 }
             ) }
-            val currentName = _uiState.value.currentSubfolderName
-            openSubfolder(targetDir, currentName)
+            reloadAfterChange(targetDir)
         } catch (e: kotlinx.coroutines.CancellationException) {
             _uiState.update { old -> old.copy(downloadProgress = null, toastMessage = "Transfer cancelled") }
+            reloadAfterChange(targetDir)
         }
     }
 
@@ -771,11 +778,7 @@ class CategoriesViewModel @Inject constructor(
         viewModelScope.launch {
             suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>) {
                 val result = runLocalCopyOrMove(selected, destPath, isMove, overwriteNames, skipNames)
-                if (currentDir != null) {
-                    openSubfolder(currentDir, _uiState.value.currentSubfolderName)
-                } else {
-                    loadFolders()
-                }
+                reloadAfterChange(currentDir)
                 _uiState.update { old -> old.copy(
                     selectedPaths = emptySet(),
                     isSelectionMode = false,
@@ -872,7 +875,9 @@ class CategoriesViewModel @Inject constructor(
         transferToCloud(account, destPath)
     }
 
-    fun transferToCloud(account: CloudAccount, destPath: String = "/") {
+    fun transferToCloud(account: CloudAccount, requestedDestPath: String = "/") {
+        // Google Drive's root is a virtual menu; what is sent there lands in My Drive.
+        val destPath = com.antigravity.filemanager.domain.usecase.cloudWriteDir(account.provider, requestedDestPath)
         val selected = _uiState.value.selectedPaths.toList()
         val isMove = _uiState.value.isCloudMoveOperation
         val count = selected.size
@@ -882,7 +887,8 @@ class CategoriesViewModel @Inject constructor(
             _uiState.update { old -> old.copy(showCloudDestinationDialog = false) }
 
             val progressThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
-            suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>) {
+            // keptBoth: some clash was resolved "Keep both", so an upload went up under a new name.
+            suspend fun doTransfer(overwriteNames: Set<String>, skipNames: Set<String>, keptBoth: Boolean = false) {
                 try {
                     val result = cloudStorageUseCase.uploadFiles(
                         accountId = account.id,
@@ -926,7 +932,7 @@ class CategoriesViewModel @Inject constructor(
                     // in live instead of paying for a refetch. Anything less certain (a folder in
                     // the selection, or an overwrite that deleted+replaced a remote item) falls
                     // back to the generic invalidate, which only triggers a real refresh().
-                    if (overwriteNames.isEmpty() && selected.none { File(it).isDirectory }) {
+                    if (overwriteNames.isEmpty() && !keptBoth && selected.none { File(it).isDirectory }) {
                         val addedFiles = folderCacheManager.buildUploadedFileItems(selected, skipNames, destPath)
                         folderCacheManager.notifyCloudFilesAdded(account.id, destPath, addedFiles)
                     } else {
@@ -937,11 +943,7 @@ class CategoriesViewModel @Inject constructor(
                         // left this device, so deleting it here would just lose the file outright.
                         val movedSources = selected.filter { File(it).name !in skipNames }
                         fileOperationsUseCase.delete(movedSources, moveToRecycleBin = false)
-                        if (currentDir != null) {
-                            openSubfolder(currentDir, _uiState.value.currentSubfolderName)
-                        } else {
-                            loadFolders()
-                        }
+                        reloadAfterChange(currentDir)
                     }
                     _uiState.update { old -> old.copy(
                         selectedPaths = emptySet(),
@@ -960,7 +962,9 @@ class CategoriesViewModel @Inject constructor(
             val items = selected.map { java.io.File(it).name to java.io.File(it).length() }
             val conflicts = cloudStorageUseCase.findConflicts(account.id, destPath, items)
             if (conflicts.isNotEmpty()) {
-                pendingOverwriteAction = { overwriteNames, skipNames -> doTransfer(overwriteNames, skipNames) }
+                pendingOverwriteAction = { overwriteNames, skipNames ->
+                    doTransfer(overwriteNames, skipNames, keptBoth = conflicts.any { it.name !in overwriteNames && it.name !in skipNames })
+                }
                 _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
             } else {
                 doTransfer(emptySet(), emptySet())
@@ -1036,6 +1040,11 @@ class CategoriesViewModel @Inject constructor(
         val archivePath = "$targetDir/$name"
         val sources = _uiState.value.selectedPaths.toList()
         _uiState.update { old -> old.copy(showCompressDialog = false) }
+        // Checked before the overwrite prompt: the archive would replace one of its own sources.
+        com.antigravity.filemanager.data.local.storage.archiveTargetConflictReason(archivePath, sources)?.let { reason ->
+            _uiState.update { old -> old.copy(toastMessage = reason) }
+            return
+        }
         if (File(archivePath).exists()) {
             pendingCompressSources = sources
             _uiState.update { old -> old.copy(pendingOverwriteZipPath = archivePath) }
@@ -1050,7 +1059,7 @@ class CategoriesViewModel @Inject constructor(
         val sources = pendingCompressSources ?: return
         pendingCompressSources = null
         _uiState.update { old -> old.copy(pendingOverwriteZipPath = null) }
-        File(archivePath).delete()
+        // The old archive is replaced only once the new one is complete (see compressFiles).
         runCompress(sources, archivePath, targetDir)
     }
 
@@ -1092,7 +1101,7 @@ class CategoriesViewModel @Inject constructor(
                         downloadProgress = null,
                         transferCancelledByUser = false
                     ) }
-                    openSubfolder(targetDir, _uiState.value.currentSubfolderName)
+                    reloadAfterChange(targetDir)
                 }
             }
         }
@@ -1104,6 +1113,7 @@ class CategoriesViewModel @Inject constructor(
         if (selected.isEmpty()) return
 
         if (selected.size == 1 && fileOperationsUseCase.isArchiveEncrypted(selected[0])) {
+            awaitPassword(selected, targetDir, emptyMap())
             _uiState.update { old -> old.copy(
                 pendingPasswordArchive = selected[0],
                 passwordError = null
@@ -1114,19 +1124,38 @@ class CategoriesViewModel @Inject constructor(
         checkExtractConflictsAndRun(selected, targetDir)
     }
 
+    // Archives of an extraction waiting on a password, and the passwords entered so far (per
+    // archive). Entering one used to extract only that archive and drop the rest of the selection.
+    private var pendingExtractBatch: List<String>? = null
+    private var pendingExtractDir: String? = null
+    private var extractPasswords: Map<String, String> = emptyMap()
+
+    private fun awaitPassword(batch: List<String>, targetDir: String, passwords: Map<String, String>) {
+        pendingExtractBatch = batch
+        pendingExtractDir = targetDir
+        extractPasswords = passwords
+    }
+
+    private fun clearPendingExtract() {
+        pendingExtractBatch = null
+        pendingExtractDir = null
+        extractPasswords = emptyMap()
+    }
+
     private fun checkExtractConflictsAndRun(
         selected: List<String>,
         targetDir: String,
-        password: String? = null
+        passwords: Map<String, String> = emptyMap()
     ) {
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
             val allConflicts = mutableListOf<com.antigravity.filemanager.domain.model.OverwriteConflict>()
             for (path in selected) {
                 try {
-                    val conflicts = fileOperationsUseCase.getArchiveConflicts(path, targetDir, password)
+                    val conflicts = fileOperationsUseCase.getArchiveConflicts(path, targetDir, passwords[path])
                     allConflicts.addAll(conflicts)
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
+                    awaitPassword(selected, targetDir, passwords)
                     _uiState.update { old -> old.copy(
                         isLoading = false,
                         downloadProgress = null,
@@ -1135,6 +1164,7 @@ class CategoriesViewModel @Inject constructor(
                     ) }
                     return@launch
                 } catch (e: com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
+                    awaitPassword(selected, targetDir, passwords)
                     _uiState.update { old -> old.copy(
                         isLoading = false,
                         downloadProgress = null,
@@ -1156,11 +1186,11 @@ class CategoriesViewModel @Inject constructor(
 
             if (allConflicts.isNotEmpty()) {
                 pendingOverwriteAction = { overwriteNames, skipNames ->
-                    runExtract(selected, targetDir, password, overwriteNames, skipNames)
+                    runExtract(selected, targetDir, passwords, overwriteNames, skipNames)
                 }
                 _uiState.update { old -> old.copy(overwriteConflicts = allConflicts) }
             } else {
-                runExtract(selected, targetDir, password)
+                runExtract(selected, targetDir, passwords)
             }
         }
     }
@@ -1168,7 +1198,7 @@ class CategoriesViewModel @Inject constructor(
     private fun runExtract(
         selected: List<String>,
         targetDir: String,
-        password: String? = null,
+        passwords: Map<String, String> = emptyMap(),
         overwriteNames: Set<String> = emptySet(),
         skipNames: Set<String> = emptySet()
     ) {
@@ -1196,7 +1226,7 @@ class CategoriesViewModel @Inject constructor(
                     val res = fileOperationsUseCase.extract(
                         archivePath = path,
                         targetDir = targetDir,
-                        password = password,
+                        password = passwords[path],
                         overwriteNames = overwriteNames,
                         skipNames = skipNames
                     ) { currentEntry, currentIndex, totalEntries, bytesProcessed, totalBytes ->
@@ -1233,6 +1263,8 @@ class CategoriesViewModel @Inject constructor(
                             break
                         }
                         if (ex is com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException) {
+                            // The archives already extracted aren't redone after the password.
+                            awaitPassword(selected.drop(index), targetDir, passwords)
                             _uiState.update { old -> old.copy(
                                 isLoading = false,
                                 downloadProgress = null,
@@ -1241,6 +1273,7 @@ class CategoriesViewModel @Inject constructor(
                             ) }
                             return@launch
                         } else if (ex is com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException) {
+                            awaitPassword(selected.drop(index), targetDir, passwords)
                             _uiState.update { old -> old.copy(
                                 isLoading = false,
                                 downloadProgress = null,
@@ -1279,7 +1312,7 @@ class CategoriesViewModel @Inject constructor(
                         isLoading = false,
                         transferCancelledByUser = false
                     ) }
-                    openSubfolder(targetDir, _uiState.value.currentSubfolderName)
+                    reloadAfterChange(targetDir)
                 }
             }
         }
@@ -1287,13 +1320,17 @@ class CategoriesViewModel @Inject constructor(
 
     fun submitArchivePassword(password: String) {
         val archivePath = _uiState.value.pendingPasswordArchive ?: return
-        val targetDir = _uiState.value.currentSubfolderPath ?: return
+        val targetDir = pendingExtractDir ?: _uiState.value.currentSubfolderPath ?: return
+        val batch = pendingExtractBatch ?: listOf(archivePath)
+        val passwords = extractPasswords + (archivePath to password)
+        clearPendingExtract()
         // Dismiss password dialog immediately
         _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
-        checkExtractConflictsAndRun(listOf(archivePath), targetDir, password)
+        checkExtractConflictsAndRun(batch, targetDir, passwords)
     }
 
     fun dismissPasswordDialog() {
+        clearPendingExtract()
         _uiState.update { old -> old.copy(pendingPasswordArchive = null, passwordError = null) }
     }
 

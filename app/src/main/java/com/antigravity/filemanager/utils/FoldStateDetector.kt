@@ -15,6 +15,8 @@ import androidx.window.layout.WindowLayoutInfo
 @Immutable
 data class FoldablePosture(
     val isUnfolded: Boolean,
+    /** False until the window's first layout info arrives; [isUnfolded] is meaningless until then. */
+    val isKnown: Boolean = true,
     val isSeparating: Boolean = false,
     val hingeOrientation: FoldingFeature.Orientation? = null,
     val foldingFeature: FoldingFeature? = null
@@ -42,24 +44,27 @@ fun rememberFoldablePosture(): FoldablePosture {
         ?.filterIsInstance<FoldingFeature>()
         ?.firstOrNull()
 
-    // Dual-layer detection:
-    // 1) Hardware hinge state: FoldingFeature is FLAT or HALF_OPENED
-    // 2) Display width: screenWidthDp >= 600dp (on foldables like Vivo X Fold, inner display is ~770dp wide, outer display is ~390-410dp)
-    // Only a VERTICAL hinge splits the screen into side-by-side halves. A clamshell flip phone
-    // reports its horizontal hinge as FLAT/HALF_OPENED too whenever it is open, which made a
-    // ~400dp-wide phone count as "unfolded" and allowed two panels on it.
-    val isHingeUnfolded = foldingFeature != null &&
-        foldingFeature.orientation == FoldingFeature.Orientation.VERTICAL && (
-            foldingFeature.state == FoldingFeature.State.FLAT ||
+    // Unfolded means a real foldable whose hinge is open (FLAT or HALF_OPENED). A wide screen on
+    // its own used to count as well, so any phone turned sideways, a tablet, or a folded foldable's
+    // outer screen in landscape could open two panels. A book-style foldable turned sideways
+    // reports its hinge as HORIZONTAL but is still open, so a horizontal hinge counts only on a
+    // wide screen; that keeps out clamshell flip phones, whose open hinge is horizontal on a
+    // ~400dp-wide screen.
+    val isHingeOpen = foldingFeature != null && (
+        foldingFeature.state == FoldingFeature.State.FLAT ||
             foldingFeature.state == FoldingFeature.State.HALF_OPENED
         )
-    val isWideScreen = configuration.screenWidthDp >= 600
+    val isUnfolded = isHingeOpen && (
+        foldingFeature?.orientation == FoldingFeature.Orientation.VERTICAL ||
+            configuration.screenWidthDp >= 600
+        )
 
-    val isUnfolded = isHingeUnfolded || isWideScreen
-
-    return remember(isUnfolded, foldingFeature) {
+    return remember(isUnfolded, foldingFeature, windowLayoutInfo != null) {
         FoldablePosture(
             isUnfolded = isUnfolded,
+            // Nothing is known before the first window layout arrives; treating that moment as
+            // "folded" would close dual panel on every app start or activity recreation.
+            isKnown = windowLayoutInfo != null,
             isSeparating = foldingFeature?.isSeparating == true,
             hingeOrientation = foldingFeature?.orientation,
             foldingFeature = foldingFeature

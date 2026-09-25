@@ -9,6 +9,8 @@ import com.antigravity.filemanager.domain.model.OverwriteConflict
 import com.antigravity.filemanager.domain.usecase.CloudStorageUseCase
 import com.antigravity.filemanager.domain.usecase.FileOperationsUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardState
+import com.antigravity.filemanager.domain.usecase.isCloudFolderOrInside
+import com.antigravity.filemanager.domain.usecase.isInCloudFolder
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -58,11 +60,32 @@ class DualPaneDropViewModel @Inject constructor(
         return Destination(rest.substring(0, split), rest.substring(split + 1))
     }
 
-    fun dropInto(location: String, items: GlobalClipboardState) {
-        if (items.paths.isEmpty()) return
-        val dest = parse(location)
-        job?.cancel()
+    fun dropInto(location: String, dropped: GlobalClipboardState) {
+        if (dropped.paths.isEmpty()) return
+        val requested = parse(location)
+        if (isBusy()) return
         job = viewModelScope.launch {
+            // A Google Drive account's root is a virtual menu; a drop there lands in My Drive.
+            val dest = requested.accountId
+                ?.let { requested.copy(path = cloudUseCase.resolveWriteDir(it, requested.path)) }
+                ?: requested
+            // Same guards as a paste in the cloud explorer: never into a dragged folder itself,
+            // and items of this account already in the destination clash only with themselves
+            // (a move leaves them be, a copy lands under a new name, neither offers "Overwrite").
+            val sameAccount = dest.accountId != null && dest.accountId == dropped.sourceCloudAccountId
+            if (sameAccount) {
+                dropped.paths.firstOrNull { isCloudFolderOrInside(dest.path, it) }?.let {
+                    _uiState.update { s -> s.copy(message = "Cannot ${if (dropped.isCut) "move" else "copy"} a folder into itself: ${File(it).name}") }
+                    return@launch
+                }
+            }
+            val alreadyHere = if (sameAccount) dropped.paths.filter { isInCloudFolder(it, dest.path) } else emptyList()
+            val alreadyHereNames = alreadyHere.map { File(it).name }.toSet()
+            val items = if (dropped.isCut && alreadyHere.isNotEmpty()) dropped.copy(paths = dropped.paths - alreadyHere.toSet()) else dropped
+            if (items.paths.isEmpty()) {
+                _uiState.update { it.copy(message = "Already in this folder") }
+                return@launch
+            }
             val source = items.sourceCloudAccountId
             val conflicts = when {
                 dest.accountId != null -> cloudUseCase.findConflicts(
@@ -71,11 +94,14 @@ class DualPaneDropViewModel @Inject constructor(
                 )
                 source == null -> fileOperationsUseCase.findConflicts(items.paths, dest.path)
                 else -> cloudUseCase.findLocalConflicts(items.paths, dest.path, items.itemSizes, items.itemIsDirectory)
-            }
+            }.filterNot { it.name in alreadyHereNames }
             if (conflicts.isEmpty()) {
                 transfer(dest, items, emptySet(), emptySet())
             } else {
-                pendingRun = { overwrite, skip -> transfer(dest, items, overwrite, skip) }
+                pendingRun = { overwrite, skip ->
+                    val keepBoth = conflicts.map { it.name }.filterTo(mutableSetOf()) { it !in overwrite && it !in skip }
+                    transfer(dest, items, overwrite, skip, keepBoth)
+                }
                 _uiState.update { it.copy(conflicts = conflicts) }
             }
         }
@@ -86,6 +112,14 @@ class DualPaneDropViewModel @Inject constructor(
         pendingRun = null
         _uiState.update { it.copy(conflicts = emptyList()) }
         job = viewModelScope.launch { run(overwriteNames, skipNames) }
+    }
+
+    /** A drop while another one is still running (or waiting on its conflict dialog) used to
+     * cancel that one silently, cutting a copy or move off halfway. It is refused instead. */
+    private fun isBusy(): Boolean {
+        if (job?.isActive != true && pendingRun == null) return false
+        _uiState.update { it.copy(message = "Another transfer is still running") }
+        return true
     }
 
     fun cancelConflicts() {
@@ -99,6 +133,16 @@ class DualPaneDropViewModel @Inject constructor(
 
     fun trash(items: GlobalClipboardState) {
         if (items.paths.isEmpty()) return
+        // Files on a USB drive or SD card can only be deleted permanently; a drag onto the Recycle
+        // Bin card shouldn't do that behind a "move to trash" gesture with no permanent-delete
+        // confirmation, so point to the folder's own Delete instead.
+        if (items.sourceCloudAccountId == null &&
+            items.paths.any { com.antigravity.filemanager.data.local.storage.isOutsidePrimaryStorage(it) }
+        ) {
+            _uiState.update { it.copy(message = "Files on a USB drive or SD card can't go to the Recycle Bin. Delete them from their folder instead.") }
+            return
+        }
+        if (isBusy()) return
         job = viewModelScope.launch {
             val accountId = items.sourceCloudAccountId
             val trashed = if (accountId == null) {
@@ -119,7 +163,14 @@ class DualPaneDropViewModel @Inject constructor(
         }
     }
 
-    private suspend fun transfer(dest: Destination, items: GlobalClipboardState, overwrite: Set<String>, skip: Set<String>) {
+    /** [keepBoth]: conflicting names the user chose to keep both of (neither overwritten nor skipped). */
+    private suspend fun transfer(
+        dest: Destination,
+        items: GlobalClipboardState,
+        overwrite: Set<String>,
+        skip: Set<String>,
+        keepBoth: Set<String> = emptySet()
+    ) {
         val source = items.sourceCloudAccountId
         val targetAccount = dest.accountId
         val paths = items.paths
@@ -142,8 +193,9 @@ class DualPaneDropViewModel @Inject constructor(
                 val result = cloudUseCase.downloadFilesToLocal(
                     context, source, paths, dest.path, items.itemSizes, isMove, overwrite, skip, items.itemIsDirectory
                 ) { p -> _uiState.update { it.copy(progress = p) } }
+                // The moved sources that were really deleted are already dropped from the cloud
+                // listings by downloadFilesToLocal.
                 folderCacheManager.invalidateLocal(dest.path)
-                if (isMove) notifyCloudRemoved(source, paths.filter { File(it).name !in skip && File(it).name !in result.failedNames })
                 if (result.failedNames.isEmpty()) "$verb ${result.scannedPaths.size} item(s)"
                 else "Finished with ${result.failedNames.size} failure(s)"
             } else if (targetAccount != null && source == null) {
@@ -167,23 +219,39 @@ class DualPaneDropViewModel @Inject constructor(
                 // Cloud -> same account, move: server-side, nothing downloaded
                 val account = targetAccount!!
                 val moved = mutableListOf<String>()
+                // Overwritten items merge into the existing ones and replace a file only once its
+                // replacement is up (see copyBetweenClouds); "Keep both" items go the same way,
+                // since a server-side move can't rename (Drive and MEGA ended up with two items of
+                // the same name, Dropbox refused the move). The rest move server-side.
+                val overwritten = paths.filter { File(it).name in overwrite || File(it).name in keepBoth }
+                    .filter { File(it).name !in skip }
+                var failures = 0
+                if (overwritten.isNotEmpty()) {
+                    val merged = cloudUseCase.copyBetweenClouds(
+                        context, account, overwritten, items.itemIsDirectory, account, dest.path,
+                        isMove = true, overwriteNames = overwrite, skipNames = skip
+                    ) { p -> _uiState.update { it.copy(progress = p) } }
+                    failures += merged.failures
+                    folderCacheManager.invalidateCloud(account, dest.path)
+                    overwritten.map { it.substringBeforeLast('/', "/").ifEmpty { "/" } }.distinct()
+                        .forEach { folderCacheManager.invalidateCloud(account, it) }
+                }
                 for ((index, path) in paths.withIndex()) {
                     currentCoroutineContext().ensureActive()
                     val name = File(path).name
-                    if (name in skip) continue
-                    if (name in overwrite) cloudUseCase.deleteItem(account, childPath(dest.path, name))
+                    if (name in skip || path in overwritten) continue
                     _uiState.update { it.copy(progress = CloudTransferProgress.forItemCount(name, index + 1, paths.size, isUpload = true, operationLabel = "Moving")) }
-                    if (cloudUseCase.moveWithinAccount(account, path, dest.path).isSuccess) moved += path
+                    if (cloudUseCase.moveWithinAccount(account, path, dest.path).isSuccess) moved += path else failures++
                 }
                 notifyCloudRemoved(account, moved)
                 folderCacheManager.invalidateCloud(account, dest.path)
-                "Moved ${moved.size} item(s)"
+                if (failures == 0) "Moved ${moved.size + overwritten.size} item(s)" else "Finished with $failures failure(s)"
             } else {
                 // Cloud -> cloud: another account, or a copy within one
                 val result = cloudUseCase.copyBetweenClouds(
                     context, source!!, paths, items.itemIsDirectory, targetAccount!!, dest.path, isMove, overwrite, skip
                 ) { p -> _uiState.update { it.copy(progress = p) } }
-                if (isMove) notifyCloudRemoved(source, paths.filter { File(it).name !in skip })
+                // Removed sources are dropped from their listings by copyBetweenClouds itself.
                 folderCacheManager.invalidateCloud(targetAccount, dest.path)
                 if (result.failures == 0) "$verb ${result.transferred} item(s)" else "Finished with ${result.failures} failure(s)"
             }
@@ -196,7 +264,6 @@ class DualPaneDropViewModel @Inject constructor(
         }
     }
 
-    private fun childPath(dir: String, name: String) = if (dir == "/" || dir.isBlank()) "/$name" else "${dir.trimEnd('/')}/$name"
 
     /** Lets a pane still showing moved or trashed cloud items drop them without a re-list. */
     private suspend fun notifyCloudRemoved(accountId: String, paths: List<String>) {

@@ -61,10 +61,18 @@ class CloudManager @Inject constructor(
         cache[id] = id
     }
 
+    /** Forgets [displayPath] and everything cached below it: after a folder was renamed, moved
+     * or deleted, its children's ids stayed cached under the old path, so a new folder later
+     * created with the old name resolved "Old/child" to the renamed folder's files. */
     private fun forgetId(accountId: String, displayPath: String, id: String? = null) {
         val cache = ids(accountId)
+        val withSlash = displayPath.trimEnd('/')
+        val bare = withSlash.trimStart('/')
         cache.remove(displayPath)
-        cache.remove(displayPath.trimStart('/'))
+        cache.remove(bare)
+        if (withSlash.isNotEmpty() && bare.isNotEmpty()) {
+            cache.keys.removeAll { it.startsWith("$withSlash/") || it.startsWith("$bare/") }
+        }
         if (id != null) cache.remove(id)
     }
 

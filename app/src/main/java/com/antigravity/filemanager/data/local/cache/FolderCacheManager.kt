@@ -606,7 +606,11 @@ class FolderCacheManager @Inject constructor(
 
     fun invalidateLocal(path: String) {
         val prefix = "local_${path}_"
-        val keysToRemove = cacheRemoveByPrefix(prefix)
+        // Also every sort/hidden variant's disk copy, which stays behind (and paints stale
+        // contents first) once the in-memory LRU has evicted that key.
+        val keysToRemove = (cacheRemoveByPrefix(prefix) + FileSortOption.values().flatMap { sort ->
+            listOf(true, false).map { hidden -> getLocalKey(path, sort, hidden) }
+        }).distinct()
         ioScope.launch {
             keysToRemove.forEach { key ->
                 val hashed = hashKey(key)
@@ -687,7 +691,13 @@ class FolderCacheManager @Inject constructor(
 
     fun invalidateCloud(accountId: String, path: String? = null, notify: Boolean = true) {
         val prefix = if (path != null) "cloud_${accountId}_$path" else "cloud_${accountId}_"
-        val keysToRemove = cacheRemoveByPrefix(prefix)
+        // Only keys still held in memory are found above; a folder the LRU had already evicted
+        // kept its disk copy AND its reconciled flag, so the next read trusted the stale disk copy
+        // as fresh for the rest of the session. Clearing the flags makes any leftover copy under
+        // this prefix revalidate, and the exact key's disk copy is removed directly.
+        reconciledOnceKeys.removeAll { it.startsWith(prefix) }
+        val keysToRemove = cacheRemoveByPrefix(prefix) +
+            listOfNotNull(path?.let { getCloudKey(accountId, it) })
         ioScope.launch {
             keysToRemove.forEach { key ->
                 val hashed = hashKey(key)
@@ -706,13 +716,18 @@ class FolderCacheManager @Inject constructor(
     suspend fun notifyCloudFilesAdded(accountId: String, path: String, addedFiles: List<FileItem>) {
         if (addedFiles.isEmpty()) return
         val cached = getCloudFolder(accountId, path)
-        val currentFiles = cached?.files ?: emptyList()
-        val existingNames = currentFiles.map { it.name }.toSet()
-        val newOnes = addedFiles.filter { it.name !in existingNames }
-        if (newOnes.isNotEmpty()) {
-            putCloudFolder(accountId, path, currentFiles + newOnes)
-            markParentStale(accountId, path)
+        // Nothing cached: writing just the new files made the folder look as if they were all it
+        // held, trusted for the rest of the session. The next open lists it for real instead.
+        if (cached != null) {
+            val existingNames = cached.files.map { it.name }.toSet()
+            val newOnes = addedFiles.filter { it.name !in existingNames }
+            if (newOnes.isNotEmpty()) {
+                putCloudFolder(accountId, path, cached.files + newOnes)
+                // Merging into a listing that was still due a re-check doesn't make it checked.
+                if (!cached.isFresh) reconciledOnceKeys.remove(getCloudKey(accountId, path))
+            }
         }
+        markParentStale(accountId, path)
         _cloudFolderEvents.tryEmit(CloudFolderEvent.FilesAdded(accountId, path, addedFiles))
     }
 

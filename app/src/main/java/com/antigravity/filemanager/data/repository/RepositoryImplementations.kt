@@ -273,8 +273,9 @@ class FileRepositoryImpl @Inject constructor(
     override suspend fun getFilesInDirectory(
         directoryPath: String,
         sortOption: FileSortOption,
-        showHidden: Boolean
-    ): List<FileItem> = scanner.listFilesInDir(directoryPath, sortOption, showHidden)
+        showHidden: Boolean,
+        mergeCloneDownloads: Boolean
+    ): List<FileItem> = scanner.listFilesInDir(directoryPath, sortOption, showHidden, mergeCloneDownloads)
 
     override suspend fun getMediaFolders(categoryType: CategoryType, sortOption: FileSortOption): List<MediaFolder> =
         scanner.getMediaFolders(categoryType, sortOption)
@@ -645,6 +646,14 @@ class RecycleBinRepositoryImpl @Inject constructor(
                     entry.dest.parentFile?.mkdirs()
                     entry.source.copyTo(entry.dest, overwrite = true)
                 }
+                // A source that can't be removed at all (read-only storage, such as another
+                // profile's) was still counted as moved, leaving it in place plus a copy in the
+                // trash; it now fails and its copy is dropped. Once any original is gone the copy
+                // is kept whatever else happens, so nothing is lost.
+                val removed = fileEntries.count { it.source.delete() || !it.source.exists() }
+                if (removed == 0 && fileEntries.isNotEmpty()) {
+                    throw java.io.IOException("Couldn't remove ${source.absolutePath}")
+                }
                 source.deleteRecursively()
                 true
             } catch (e: Exception) {
@@ -664,12 +673,16 @@ class RecycleBinRepositoryImpl @Inject constructor(
             var deleted = 0
             for ((index, entity) in entities.withIndex()) {
                 onProgress?.invoke(entity.fileName, index + 1, entities.size)
+                // A row whose file couldn't be removed is kept: dropping it anyway left the file
+                // in the hidden trash folder, using space and never shown again.
                 val trashFile = File(entity.trashPath)
-                if (trashFile.exists()) {
-                    if (trashFile.isDirectory) trashFile.deleteRecursively() else trashFile.delete()
+                if (deleteTrashFile(trashFile)) {
+                    database.trashDao().deleteByIds(listOf(entity.id))
+                    deleted++
+                } else if (trashFile.isDirectory) {
+                    // Partly deleted: show what is actually left.
+                    database.trashDao().updateFileSize(entity.id, directorySize(trashFile))
                 }
-                database.trashDao().deleteByIds(listOf(entity.id))
-                deleted++
             }
             if (deleted > 0) mediaChangeSignal.notifyChanged()
             Result.success(deleted)
@@ -681,19 +694,30 @@ class RecycleBinRepositoryImpl @Inject constructor(
     override suspend fun emptyTrash(onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)?): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             val all = database.trashDao().getAll()
+            val removedIds = mutableListOf<Long>()
             for ((index, item) in all.withIndex()) {
                 onProgress?.invoke(item.fileName, index + 1, all.size)
-                val f = File(item.trashPath)
-                if (f.exists()) {
-                    if (f.isDirectory) f.deleteRecursively() else f.delete()
-                }
+                val trashFile = File(item.trashPath)
+                if (deleteTrashFile(trashFile)) removedIds += item.id
+                else if (trashFile.isDirectory) database.trashDao().updateFileSize(item.id, directorySize(trashFile))
             }
-            database.trashDao().clearAll()
+            // Same as deletePermanently: only rows whose file is really gone are dropped.
+            if (removedIds.isNotEmpty()) database.trashDao().deleteByIds(removedIds)
             mediaChangeSignal.notifyChanged()
-            Result.success(Unit)
+            val failed = all.size - removedIds.size
+            if (failed > 0) Result.failure(java.io.IOException("$failed item(s) couldn't be deleted"))
+            else Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    /** Deletes a trashed file or folder; true once nothing is left at [file]. */
+    private fun deleteTrashFile(file: File): Boolean {
+        if (file.exists()) {
+            if (file.isDirectory) file.deleteRecursively() else file.delete()
+        }
+        return !file.exists()
     }
 
     override suspend fun getTrashTotalSize(): Long = withContext(Dispatchers.IO) {

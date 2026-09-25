@@ -19,7 +19,9 @@ interface IFileRepository {
     suspend fun getFilesInDirectory(
         directoryPath: String,
         sortOption: FileSortOption = FileSortOption.BY_NAME_ASC,
-        showHidden: Boolean = false
+        showHidden: Boolean = false,
+        /** See LocalFileScanner.listFilesInDir. */
+        mergeCloneDownloads: Boolean = false
     ): List<FileItem>
 
     suspend fun getMediaFolders(

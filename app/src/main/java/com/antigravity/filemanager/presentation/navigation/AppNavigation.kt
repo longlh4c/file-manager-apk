@@ -108,12 +108,14 @@ fun AppNavigation(
 ) {
     val context = LocalContext.current
     val foldablePosture = rememberFoldablePosture()
-    val isUnfolded = foldablePosture.isUnfolded
     val isDualPanelActive by dualPanelManager.isDualPanelActive.collectAsStateWithLifecycle()
+    // Until the first window layout arrives the posture is unknown; keep whatever split was in
+    // place rather than collapsing it for that first frame.
+    val isUnfolded = if (foldablePosture.isKnown) foldablePosture.isUnfolded else isDualPanelActive
 
     // Auto-collapse to single screen when device is folded shut to avoid cramped UI on outer display
-    LaunchedEffect(isUnfolded) {
-        dualPanelManager.onFoldPostureChanged(isUnfolded)
+    LaunchedEffect(foldablePosture.isKnown, foldablePosture.isUnfolded) {
+        if (foldablePosture.isKnown) dualPanelManager.onFoldPostureChanged(foldablePosture.isUnfolded)
     }
 
     val onToggleDualPanel = {
@@ -153,14 +155,11 @@ fun AppNavigation(
         }
     }
 
-    // Reset the right pane in the background only when dual panel is closed
-    LaunchedEffect(isDualSplit) {
-        if (!isDualSplit) {
-            runCatching {
-                rightNavController.popBackStack(Screen.Dashboard.route, inclusive = false)
-            }
-        }
-    }
+    // The right pane is no longer reset when dual panel closes (folding the device closes it):
+    // popping its back stack destroyed its screens' ViewModels, which cancelled a copy, move or
+    // upload still running there halfway, without a word. It stays composed at zero width below,
+    // so its work carries on (progress shows in the transfer notification) and reopening dual
+    // panel brings it back as it was.
 
     val createOpenFileHandler: (NavHostController) -> (FileItem, FileSortOption, String?) -> Unit = { controller ->
         { file, sortOption, cloudAccountId ->
@@ -216,6 +215,9 @@ fun AppNavigation(
     )
 
     val isTransitioningOrActive = isDualSplit || animProgress > 0.001f
+    // Set once dual panel has been shown: from then on the right pane stays composed.
+    var rightPaneStarted by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(isTransitioningOrActive) { if (isTransitioningOrActive) rightPaneStarted = true }
 
     val leftScale = if (isTransitioningOrActive) 1f + (1f - animProgress) * 0.025f else 1f
     val rightScale = 0.95f + animProgress * 0.05f
@@ -358,9 +360,13 @@ fun AppNavigation(
                     }
                     .background(DividerDark)
             )
+        }
+        // Composed from the first time dual panel opens, and kept (at zero width while closed) so
+        // whatever runs in it survives a close or a fold.
+        if (rightPaneStarted) {
             Box(
                 modifier = Modifier
-                    .weight(1f)
+                    .then(if (isTransitioningOrActive) Modifier.weight(1f) else Modifier.width(0.dp))
                     .fillMaxHeight()
                     .then(rightPointerModifier)
             ) {

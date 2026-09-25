@@ -50,8 +50,12 @@ class FileOperationsUseCase @Inject constructor(
     private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
     private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal
 ) {
-    suspend fun getFiles(directoryPath: String, sort: FileSortOption, showHidden: Boolean): List<FileItem> =
-        fileRepository.getFilesInDirectory(directoryPath, sort, showHidden)
+    suspend fun getFiles(
+        directoryPath: String,
+        sort: FileSortOption,
+        showHidden: Boolean,
+        mergeCloneDownloads: Boolean = false
+    ): List<FileItem> = fileRepository.getFilesInDirectory(directoryPath, sort, showHidden, mergeCloneDownloads)
 
     suspend fun copy(
         sourcePaths: List<String>,
@@ -147,8 +151,39 @@ class FileOperationsUseCase @Inject constructor(
             // here; it only falls back to a real recursive copy+delete on a renameTo() failure
             // (cross-filesystem, permission issue), same unavoidable gap as extracting a single
             // zip archive.
-            recycleBinRepository.moveToTrash(paths, onProgress)
-        } else withContext(Dispatchers.IO) {
+            //
+            // Files on a USB drive or SD card are always deleted permanently: the Recycle Bin is
+            // on main storage, so "moving" them there meant copying every byte across, which
+            // failed (and left the file in place) as soon as main storage was nearly full.
+            val (external, onMain) = paths.partition {
+                com.antigravity.filemanager.data.local.storage.isOutsidePrimaryStorage(it)
+            }
+            val trashed = if (onMain.isEmpty()) Result.success(0) else recycleBinRepository.moveToTrash(onMain, onProgress)
+            if (external.isEmpty()) trashed else {
+                val removed = deletePermanently(external, onProgress)
+                when {
+                    trashed.isFailure -> trashed
+                    removed.isFailure -> removed
+                    else -> Result.success(trashed.getOrThrow() + removed.getOrThrow())
+                }
+            }
+        } else deletePermanently(paths, onProgress)
+        // A delete only ever shrinks folders that are already cached — unlike copy/move/rename,
+        // it can't land a file in a folder the cache doesn't know about yet — so it can patch
+        // just the affected bucket(s) instead of invalidateMediaFolders()'s blanket "drop every
+        // category" (which otherwise forced Images AND Videos AND Audio AND Documents to all redo
+        // a full MediaStore rescan on their next open just because one photo was deleted).
+        if (result.isSuccess) {
+            folderCacheManager.removeFromMediaFolders(paths)
+            mediaChangeSignal.notifyChanged()
+        }
+        return result
+    }
+
+    private suspend fun deletePermanently(
+        paths: List<String>,
+        onProgress: ((currentName: String, currentIndex: Int, total: Int) -> Unit)?
+    ): Result<Int> = withContext(Dispatchers.IO) {
             // Permanent delete has no such shortcut — File.deleteRecursively() really does walk
             // the whole tree for each top-level path, so a single large folder used to report
             // "1/1" for the entire operation (see zipFiles' addFolder() replacement above for the
@@ -184,17 +219,6 @@ class FileOperationsUseCase @Inject constructor(
             }
             Result.success(paths.indices.count { !topLevelFailed[it] })
         }
-        // A delete only ever shrinks folders that are already cached — unlike copy/move/rename,
-        // it can't land a file in a folder the cache doesn't know about yet — so it can patch
-        // just the affected bucket(s) instead of invalidateMediaFolders()'s blanket "drop every
-        // category" (which otherwise forced Images AND Videos AND Audio AND Documents to all redo
-        // a full MediaStore rescan on their next open just because one photo was deleted).
-        if (result.isSuccess) {
-            folderCacheManager.removeFromMediaFolders(paths)
-            mediaChangeSignal.notifyChanged()
-        }
-        return result
-    }
 
     suspend fun compress(
         sourcePaths: List<String>,
@@ -299,6 +323,32 @@ class FtpServerUseCase @Inject constructor(
         ftpRepository.updateConfig(port, pass, random, httpPort)
 }
 
+/** A cloud folder's display path in one spelling: root is "/", no trailing slash. */
+private fun normalizeCloudDir(path: String): String = path.trimEnd('/').ifEmpty { "/" }
+
+/** True when the cloud item at [path] sits directly inside the cloud folder [dir]. */
+fun isInCloudFolder(path: String, dir: String): Boolean =
+    normalizeCloudDir(path.substringBeforeLast('/', "")) == normalizeCloudDir(dir)
+
+/** True when the cloud folder [dir] is [folder] itself or anywhere below it. */
+fun isCloudFolderOrInside(dir: String, folder: String): Boolean {
+    val d = normalizeCloudDir(dir)
+    val f = normalizeCloudDir(folder)
+    return d == f || d.startsWith("$f/")
+}
+
+/** Google Drive's real top-level folder, listed under the account's virtual root menu. */
+const val GOOGLE_DRIVE_MY_DRIVE = "/My Drive"
+
+/**
+ * Where a write aimed at the cloud folder [dir] really lands. A Google Drive account's root is a
+ * virtual menu (My Drive, Starred, Shared with me, ...) while uploads and new folders there go
+ * into My Drive, so name clashes were checked against the menu entries instead of the files
+ * actually sitting there, and same-named uploads were silently duplicated.
+ */
+fun cloudWriteDir(provider: CloudProvider?, dir: String): String =
+    if (provider == CloudProvider.GOOGLE_DRIVE && (dir == "/" || dir.isBlank())) GOOGLE_DRIVE_MY_DRIVE else dir
+
 class CloudStorageUseCase @Inject constructor(
     private val cloudRepository: ICloudRepository,
     private val transferGuard: com.antigravity.filemanager.data.service.TransferGuard,
@@ -316,6 +366,13 @@ class CloudStorageUseCase @Inject constructor(
     suspend fun createFolder(accountId: String, folderName: String, parentPath: String): Result<FileItem> =
         cloudRepository.createFolder(accountId, folderName, parentPath)
 
+    /** [cloudWriteDir] for an account known only by id. */
+    suspend fun resolveWriteDir(accountId: String, dir: String): String {
+        if (dir != "/" && dir.isNotBlank()) return dir
+        val provider = cloudRepository.getConnectedAccounts().find { it.id == accountId }?.provider
+        return cloudWriteDir(provider, dir)
+    }
+
     /** Result of [copyBetweenClouds]. */
     data class CloudCopyResult(val transferred: Int, val failures: Int, val lastError: String?)
 
@@ -330,12 +387,45 @@ class CloudStorageUseCase @Inject constructor(
         sources: List<String>,
         isDirectoryByPath: Map<String, Boolean>,
         accountId: String,
-        targetPath: String,
+        targetDir: String,
         isMove: Boolean,
         overwriteNames: Set<String>,
         skipNames: Set<String>,
         onProgress: (CloudTransferProgress) -> Unit
     ): CloudCopyResult {
+        // Held for the whole operation, not just each file's download/upload: the listing and
+        // source-removal steps in between are part of the transfer too.
+        transferGuard.begin(initialLabel = if (isMove) "Moving" else "Copying")
+        try {
+            return copyBetweenCloudsGuarded(
+                context, sourceCloudAccountId, sources, isDirectoryByPath, accountId, targetDir,
+                isMove, overwriteNames, skipNames, onProgress
+            )
+        } finally {
+            transferGuard.end()
+        }
+    }
+
+    private suspend fun copyBetweenCloudsGuarded(
+        context: android.content.Context,
+        sourceCloudAccountId: String,
+        sources: List<String>,
+        isDirectoryByPath: Map<String, Boolean>,
+        accountId: String,
+        targetDir: String,
+        isMove: Boolean,
+        overwriteNames: Set<String>,
+        skipNames: Set<String>,
+        onProgress: (CloudTransferProgress) -> Unit
+    ): CloudCopyResult {
+        val targetPath = resolveWriteDir(accountId, targetDir)
+        // Copying a folder into itself kept finding the copy it had just made inside the source
+        // and descending into it: /X/X, /X/X/X, ... without end.
+        if (sourceCloudAccountId == accountId) {
+            sources.firstOrNull { isCloudFolderOrInside(targetPath, it) }?.let {
+                return CloudCopyResult(0, 1, "Cannot ${if (isMove) "move" else "copy"} a folder into itself: ${File(it).name}")
+            }
+        }
         var failures = 0
         var lastErrorMessage: String? = null
         var transferredCount = 0
@@ -373,7 +463,8 @@ class CloudStorageUseCase @Inject constructor(
         val flat = mutableListOf<FlatEntry>()
         // Tracks whether every file under a given top-level source transferred
         // successfully, so a move only deletes that source once nothing was lost.
-        val topLevelSucceeded = sources.associateWith { true }.toMutableMap()
+        // Concurrent: the parallel transfers below write to it.
+        val topLevelSucceeded = java.util.concurrent.ConcurrentHashMap(sources.associateWith { true })
 
         // Same-shape "(1)" suffixing as FileUseCases.uniqueCloudName, used below to
         // give a top-level "Keep Both" folder its own new name at the destination
@@ -416,8 +507,11 @@ class CloudStorageUseCase @Inject constructor(
                 }
                 val childTargetDir = if (targetDir == "/" || targetDir.isBlank()) "/$name" else "${targetDir.trimEnd('/')}/$name"
                 val children = getFiles(sourceCloudAccountId, remotePath).getOrElse {
+                    // Everything inside this folder is missing from the copy; it used to end up
+                    // reported as a clean "Pasted N item(s)".
                     topLevelSucceeded[topSource] = false
-                    lastErrorMessage = it.message
+                    failures++
+                    lastErrorMessage = "Couldn't read \"$name\": ${it.message}"
                     emptyList()
                 }
                 for (child in children) {
@@ -510,6 +604,7 @@ class CloudStorageUseCase @Inject constructor(
                         } else {
                             entryDir.deleteRecursively()
                             failuresCounter.incrementAndGet()
+                            lastErrorRef.set(dlResult.exceptionOrNull()?.message)
                             topLevelSucceeded[entry.topSource] = false
                         }
                         completedCounter.incrementAndGet()
@@ -518,6 +613,8 @@ class CloudStorageUseCase @Inject constructor(
             }
         }
         failures += failuresCounter.get()
+        // Only what actually arrived: this used to stay at the total even when files failed.
+        transferredCount = totalCount - failuresCounter.get()
         lastErrorRef.get()?.let { lastErrorMessage = it }
         if (isMove) {
             // Delete each top-level source (file or folder) as one unit once its whole
@@ -532,17 +629,23 @@ class CloudStorageUseCase @Inject constructor(
             val toDelete = sources.filter { topLevelSucceeded[it] == true && File(it).name !in skipNames }
             val deleteCompleted = java.util.concurrent.atomic.AtomicInteger(0)
             val deleteSemaphore = kotlinx.coroutines.sync.Semaphore(8)
+            val removed = java.util.concurrent.ConcurrentLinkedQueue<String>()
             kotlinx.coroutines.coroutineScope {
                 toDelete.forEach { sourcePath ->
                     launch {
                         deleteSemaphore.withPermit {
                             kotlinx.coroutines.currentCoroutineContext().ensureActive()
                             setTransferProgress(currentFileName = File(sourcePath).name, currentIndex = deleteCompleted.get() + 1, totalFiles = toDelete.size, isUpload = false, operationLabel = "Removing source")
-                            deleteItem(sourceCloudAccountId, sourcePath)
+                            if (deleteItem(sourceCloudAccountId, sourcePath).isSuccess) removed.add(sourcePath)
                             deleteCompleted.incrementAndGet()
                         }
                     }
                 }
+            }
+            // Only what was really removed leaves the source folders' listings; screens used to
+            // drop every moved source, including those kept because part of them failed.
+            removed.groupBy { it.substringBeforeLast('/', "/").ifEmpty { "/" } }.forEach { (parent, paths) ->
+                folderCacheManager.notifyCloudFilesRemoved(sourceCloudAccountId, parent, paths.toSet())
             }
         }
         tempDir.deleteRecursively()
@@ -578,7 +681,8 @@ class CloudStorageUseCase @Inject constructor(
     // trip for data already sitting in cache from seconds earlier. Now it reuses that cache first
     // — same reconcile-once contract as everywhere else this cache is read — and only falls back
     // to a live fetch when there's nothing cached yet for this folder.
-    suspend fun findConflicts(accountId: String, remoteDir: String, items: List<Pair<String, Long>>): List<com.antigravity.filemanager.domain.model.OverwriteConflict> {
+    suspend fun findConflicts(accountId: String, targetDir: String, items: List<Pair<String, Long>>): List<com.antigravity.filemanager.domain.model.OverwriteConflict> {
+        val remoteDir = resolveWriteDir(accountId, targetDir)
         val cached = folderCacheManager.getCloudFolder(accountId, remoteDir)
         val existing = if (cached != null && cached.isFresh) {
             cached.files
@@ -620,20 +724,7 @@ class CloudStorageUseCase @Inject constructor(
             // Conflict choices only ever resolve top-level names (same as local copy/move): a
             // skipped folder is left out entirely, and every file inside an overwritten folder
             // overwrites its remote counterpart.
-            val flatFiles = mutableListOf<UploadItem>()
-            for (path in localPaths) {
-                val entry = File(path)
-                if (entry.name in skipNames) continue
-                val overwrite = entry.name in overwriteNames
-                if (entry.isDirectory) {
-                    val nested = mutableListOf<Pair<File, String>>()
-                    flattenDirectoryForUpload(accountId, entry, remoteDir, nested)
-                    nested.mapTo(flatFiles) { (file, dir) -> UploadItem(file, dir, overwrite) }
-                } else if (entry.isFile) {
-                    flatFiles.add(UploadItem(entry, remoteDir, overwrite))
-                }
-            }
-
+            val targetRoot = resolveWriteDir(accountId, remoteDir)
             val existingByDir = mutableMapOf<String, MutableSet<String>>()
             val existingItemsByDir = mutableMapOf<String, List<com.antigravity.filemanager.domain.model.FileItem>>()
             // Was an unconditional live getCloudFiles() call per target dir, every single upload —
@@ -660,21 +751,68 @@ class CloudStorageUseCase @Inject constructor(
                 items.map { it.name }.toMutableSet()
             }
 
+            val flatFiles = mutableListOf<UploadItem>()
+            for (path in localPaths) {
+                val entry = File(path)
+                if (entry.name in skipNames) continue
+                val overwrite = entry.name in overwriteNames
+                if (entry.isDirectory) {
+                    // "Keep both" for a folder uploads it as "Name (1)", like a local copy does;
+                    // it used to be merged into the existing folder, with "(1)" copies of any
+                    // clashing files scattered inside it.
+                    val topNames = existingNamesFor(targetRoot)
+                    val folderName = if (!overwrite && entry.name in topNames) uniqueCloudName(topNames, entry.name) else entry.name
+                    topNames.add(folderName)
+                    val nested = mutableListOf<Pair<File, String>>()
+                    flattenDirectoryForUpload(accountId, entry, targetRoot, nested, folderName)
+                    nested.mapTo(flatFiles) { (file, dir) -> UploadItem(file, dir, overwrite) }
+                } else if (entry.isFile) {
+                    flatFiles.add(UploadItem(entry, targetRoot, overwrite))
+                }
+            }
+
             val totalFiles = flatFiles.size
             // Was Result<Unit> — every caller's "success" toast just repeated the ORIGINAL
             // selection count regardless of how many were actually skipped here, so picking
             // "Skip" on every conflict still reported "Transferred N file(s) successfully" for
             // zero real uploads. Track what actually went out and hand that back instead.
             var uploadedCount = 0
+            val provider = if (flatFiles.any { it.overwrite }) {
+                cloudRepository.getConnectedAccounts().find { it.id == accountId }?.provider
+            } else null
             flatFiles.forEachIndexed { index, (file, targetDir, overwrite) ->
                 val existingNames = existingNamesFor(targetDir)
                 val conflictItem = existingItemsByDir[targetDir]?.find { it.name == file.name }
                 var uploadSource = file
                 var tempDir: File? = null
+                // Overwrite used to delete the existing remote item first, so an upload that then
+                // failed (lost connection, full quota) left neither copy in place. The old item is
+                // now removed only once the new one is up, in whatever way the provider allows.
+                var replaceAfterUpload: com.antigravity.filemanager.domain.model.FileItem? = null
+                var renameAfterUpload = false
                 if (conflictItem != null) {
                     if (overwrite) {
-                        cloudRepository.deleteCloudFile(accountId, conflictItem.path)
-                        existingNames.remove(file.name)
+                        when {
+                            // A file replacing a folder: nothing can be swapped in one step.
+                            conflictItem.isDirectory -> cloudRepository.deleteCloudFile(accountId, conflictItem.path)
+                                .getOrElse { throw java.io.IOException("Couldn't replace \"${conflictItem.name}\": ${it.message}", it) }
+                            // Uploads use WriteMode.OVERWRITE: the new file replaces the old in one step.
+                            provider == CloudProvider.DROPBOX -> Unit
+                            // Same-named siblings are allowed: upload next to it, then remove the
+                            // old one by its id (its path now also names the new file). A cached
+                            // entry may carry a path instead of a real id; fall back for those.
+                            (provider == CloudProvider.GOOGLE_DRIVE || provider == CloudProvider.MEGA) &&
+                                !conflictItem.id.startsWith("/") -> replaceAfterUpload = conflictItem
+                            // Otherwise upload under a temporary name, then remove the old item and
+                            // give the new one its real name.
+                            else -> {
+                                val dir = File(System.getProperty("java.io.tmpdir"), "upload_${System.nanoTime()}").apply { mkdirs() }
+                                tempDir = dir
+                                uploadSource = file.copyTo(File(dir, uniqueCloudName(existingNames, "${file.name}.uploading")), overwrite = true)
+                                replaceAfterUpload = conflictItem
+                                renameAfterUpload = true
+                            }
+                        }
                     } else {
                         // "Keep both": the providers name the upload after the local file, so it
                         // needs a renamed copy — made in app cache, never next to the user's own
@@ -705,6 +843,18 @@ class CloudStorageUseCase @Inject constructor(
                     // so stop here instead of silently reporting success for a partial batch.
                     throw uploadResult.exceptionOrNull() ?: Exception("Upload failed for ${uploadSource.name}")
                 }
+                replaceAfterUpload?.let { old ->
+                    val target = if (renameAfterUpload) old.path else old.id
+                    cloudRepository.deleteCloudFile(accountId, target).getOrElse {
+                        throw java.io.IOException("Uploaded \"${uploadSource.name}\" but couldn't remove the old \"${old.name}\": ${it.message}", it)
+                    }
+                    if (renameAfterUpload) {
+                        val tempPath = if (targetDir == "/" || targetDir.isBlank()) "/${uploadSource.name}" else "${targetDir.trimEnd('/')}/${uploadSource.name}"
+                        cloudRepository.renameCloudFile(accountId, tempPath, file.name).getOrElse {
+                            throw java.io.IOException("Uploaded as \"${uploadSource.name}\" but couldn't rename it to \"${file.name}\": ${it.message}", it)
+                        }
+                    }
+                }
                 uploadedCount++
             }
             Result.success(uploadedCount)
@@ -727,16 +877,18 @@ class CloudStorageUseCase @Inject constructor(
         accountId: String,
         dir: File,
         parentRemoteDir: String,
-        out: MutableList<Pair<File, String>>
+        out: MutableList<Pair<File, String>>,
+        /** The folder's name at the destination; a top-level "Keep both" passes a new one. */
+        remoteName: String = dir.name
     ) {
         val existing = cloudRepository.getCloudFiles(accountId, parentRemoteDir).getOrDefault(emptyList())
-        val existingFolder = existing.find { it.isDirectory && it.name == dir.name }
+        val existingFolder = existing.find { it.isDirectory && it.name == remoteName }
         val targetDir = if (existingFolder != null) {
             existingFolder.path
         } else {
-            val created = cloudRepository.createFolder(accountId, dir.name, parentRemoteDir)
+            val created = cloudRepository.createFolder(accountId, remoteName, parentRemoteDir)
             created.getOrNull()?.path
-                ?: throw (created.exceptionOrNull() ?: Exception("Failed to create remote folder '${dir.name}'"))
+                ?: throw (created.exceptionOrNull() ?: Exception("Failed to create remote folder '$remoteName'"))
         }
 
         dir.listFiles()?.sortedBy { it.name }?.forEach { child ->
@@ -881,6 +1033,7 @@ class CloudStorageUseCase @Inject constructor(
 
         // 1. Resolve destination targets and recursively flatten any directories
         val validTopSources = mutableListOf<String>()
+        val overwriteTopSources = remotePaths.filter { File(it).name in overwriteNames }.toSet()
         for (remotePath in remotePaths) {
             kotlinx.coroutines.currentCoroutineContext().ensureActive()
             val name = File(remotePath).name
@@ -950,20 +1103,49 @@ class CloudStorageUseCase @Inject constructor(
                 if (result.isSuccess) {
                     val downloaded = result.getOrNull()
                     if (downloaded != null && downloaded.exists() && downloaded.isFile) {
-                        val finalFile = item.localFile
-                        finalFile.parentFile?.mkdirs()
-                        if (finalFile.exists()) {
-                            finalFile.delete()
-                        }
-                        downloaded.inputStream().use { input ->
-                            finalFile.outputStream().use { output ->
-                                val buf = ByteArray(64 * 1024)
-                                var read: Int
-                                while (input.read(buf).also { read = it } != -1) {
-                                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                                    output.write(buf, 0, read)
+                        // A Google Docs/Sheets/Slides file is exported as .docx/.xlsx/.pptx/.pdf;
+                        // it used to be saved under its bare Drive name, with no extension, so
+                        // nothing on the phone could open it. Keep the export's extension.
+                        val exportExt = downloaded.extension
+                        val finalFile = if (exportExt.isNotEmpty() &&
+                            !item.localFile.name.endsWith(".$exportExt", ignoreCase = true) &&
+                            downloaded.name.equals("${File(item.remotePath).name}.$exportExt", ignoreCase = true)
+                        ) {
+                            val withExt = File(item.localFile.parentFile, "${item.localFile.name}.$exportExt")
+                            if (withExt.exists() && item.topSourcePath !in overwriteTopSources) {
+                                com.antigravity.filemanager.data.local.storage.uniqueFile(withExt.parentFile!!, withExt.name)
+                            } else withExt
+                        } else item.localFile
+                        val parent = finalFile.parentFile ?: targetFolder
+                        parent.mkdirs()
+                        // Written beside the destination and swapped in only once complete:
+                        // deleting an overwritten file first, or writing straight to its name, left
+                        // a truncated file (and no old one) whenever the copy failed or was cancelled.
+                        val staging = com.antigravity.filemanager.data.local.storage.uniqueFile(parent, ".${finalFile.name}.downloading")
+                        var committing = false
+                        try {
+                            downloaded.inputStream().use { input ->
+                                staging.outputStream().use { output ->
+                                    val buf = ByteArray(64 * 1024)
+                                    var read: Int
+                                    while (input.read(buf).also { read = it } != -1) {
+                                        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                                        output.write(buf, 0, read)
+                                    }
                                 }
                             }
+                            committing = true
+                            if (finalFile.exists()) {
+                                if (finalFile.isDirectory) finalFile.deleteRecursively() else finalFile.delete()
+                            }
+                            if (!staging.renameTo(finalFile)) {
+                                staging.copyTo(finalFile, overwrite = true)
+                                staging.delete()
+                            }
+                        } catch (t: Throwable) {
+                            // A failed swap keeps the finished staging copy: the old file may be gone.
+                            if (!committing) staging.delete()
+                            throw t
                         }
                         scannedPaths.add(finalFile.absolutePath)
                     } else {
@@ -996,8 +1178,8 @@ class CloudStorageUseCase @Inject constructor(
         // 4. If move operation, delete successfully transferred top-level sources
         if (isMove) {
             for (topSource in validTopSources) {
-                if (topSource !in failedTopSources) {
-                    deleteItem(accountId, topSource)
+                // A source whose delete failed is still in the cloud and must stay listed there.
+                if (topSource !in failedTopSources && deleteItem(accountId, topSource).isSuccess) {
                     val parentPath = topSource.substringBeforeLast('/', "/").ifEmpty { "/" }
                     movedFromFolders.getOrPut(parentPath) { mutableSetOf() }.add(topSource)
                 }
