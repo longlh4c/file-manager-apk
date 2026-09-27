@@ -86,6 +86,7 @@ import com.antigravity.filemanager.presentation.trash.RecycleBinScreen
 import com.antigravity.filemanager.presentation.viewers.ImageViewerScreen
 import com.antigravity.filemanager.presentation.viewers.VideoPlayerScreen
 import com.antigravity.filemanager.utils.rememberFoldablePosture
+import com.antigravity.filemanager.data.repository.recentFiles
 import java.io.File
 
 // Routes that hide the bottom tab bar (e.g. full-screen media viewers).
@@ -165,6 +166,12 @@ fun AppNavigation(
             val ext = file.extension.lowercase()
             val isStreamUrl = com.antigravity.filemanager.presentation.viewers.CloudMediaDataSources.isStreamPath(file.path)
             val parent = if (isStreamUrl) "" else File(file.path).parentFile?.absolutePath ?: ""
+            // Recent > Opened is for files on this device; cloud files (a downloaded copy or a
+            // stream) aren't recorded. Files handed to another app are recorded by FileOpener, and
+            // images and videos by their viewer (the one looked at last, not just the one tapped).
+            if (cloudAccountId == null && !isStreamUrl && ext in setOf("zip", "7z", "rar")) {
+                context.recentFiles().recordOpened(file.path)
+            }
             when (ext) {
                 "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng" -> {
                     controller.navigate(Screen.ImageViewer.createRoute(file.path, parent, sortOption.name, cloudAccountId, fileName = file.name))
@@ -492,6 +499,9 @@ private fun LeftPaneContent(
                             onNavigateToTrash = {
                                 navController.navigate(Screen.RecycleBin.route)
                             },
+                            onNavigateToRecent = {
+                                navController.navigate(Screen.Recent.route)
+                            },
                             onNavigateToStorageAnalysis = {
                                 navController.navigate(Screen.StorageAnalysis.route)
                             },
@@ -566,6 +576,16 @@ private fun LeftPaneContent(
                     composable(Screen.RecycleBin.route) {
                         RecycleBinScreen(
                             onNavigateBack = { navController.popBackStack() }
+                        )
+                    }
+
+                    composable(Screen.Recent.route) {
+                        com.antigravity.filemanager.presentation.recent.RecentFilesScreen(
+                            onNavigateBack = { navController.popBackStack() },
+                            onOpenFile = openFileHandler,
+                            onOpenFolder = { path, title ->
+                                navController.navigate(Screen.FileBrowser.createRoute(path, title))
+                            }
                         )
                     }
 
@@ -831,6 +851,9 @@ private fun RightPaneContent(
                             onNavigateToTrash = {
                                 navController.navigate(Screen.RecycleBin.route)
                             },
+                            onNavigateToRecent = {
+                                navController.navigate(Screen.Recent.route)
+                            },
                             onNavigateToStorageAnalysis = {
                                 navController.navigate(Screen.StorageAnalysis.route)
                             },
@@ -906,6 +929,16 @@ private fun RightPaneContent(
                     composable(Screen.RecycleBin.route) {
                         RecycleBinScreen(
                             onNavigateBack = { navController.popBackStack() }
+                        )
+                    }
+
+                    composable(Screen.Recent.route) {
+                        com.antigravity.filemanager.presentation.recent.RecentFilesScreen(
+                            onNavigateBack = { navController.popBackStack() },
+                            onOpenFile = openFileHandler,
+                            onOpenFolder = { path, title ->
+                                navController.navigate(Screen.FileBrowser.createRoute(path, title))
+                            }
                         )
                     }
 
@@ -1064,6 +1097,7 @@ private val LOCAL_TAB_ROUTES = setOf(
     Screen.StorageFolderBreakdown.route,
     Screen.LargeFiles.route,
     Screen.RecycleBin.route,
+    Screen.Recent.route,
     Screen.MediaCategory.route,
     Screen.FileBrowser.route
 )

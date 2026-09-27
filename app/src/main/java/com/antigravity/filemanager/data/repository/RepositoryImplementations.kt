@@ -77,6 +77,7 @@ class StorageRepositoryImpl @Inject constructor(
                 Pair(size, count)
             }
             val cloudDeferred = async { database.cloudDao().getAll().size }
+            val recentDeferred = async { RecentFilesRepository.countShown(database.recentFileDao().getAllPaths()) }
             val imgDeferred = async { scanner.getMediaFolders(CategoryType.IMAGES) }
             val audioDeferred = async { scanner.getMediaFolders(CategoryType.AUDIO) }
             val videoDeferred = async { scanner.getMediaFolders(CategoryType.VIDEOS) }
@@ -156,6 +157,11 @@ class StorageRepositoryImpl @Inject constructor(
                     title = "FTP"
                 ),
                 CategorySummary(
+                    type = CategoryType.RECENT,
+                    title = "Recent",
+                    itemCount = recentDeferred.await()
+                ),
+                CategorySummary(
                     type = CategoryType.RECYCLE_BIN,
                     title = "Recycle Bin",
                     totalSizeBytes = trashSize,
@@ -194,6 +200,7 @@ class StorageRepositoryImpl @Inject constructor(
                 CategorySummary(type = CategoryType.DOCUMENTS, title = "Documents"),
                 CategorySummary(type = CategoryType.CLOUD, title = "Cloud"),
                 CategorySummary(type = CategoryType.ACCESS_FROM_NETWORK, title = "FTP"),
+                CategorySummary(type = CategoryType.RECENT, title = "Recent"),
                 CategorySummary(type = CategoryType.RECYCLE_BIN, title = "Recycle Bin")
             )
             emit(baseline)

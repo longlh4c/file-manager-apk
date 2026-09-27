@@ -14,6 +14,7 @@ sealed class Screen(val route: String) {
     object AccessFromNetwork : Screen("access_from_network")
     object Cloud : Screen("cloud")
     object RecycleBin : Screen("recycle_bin")
+    object Recent : Screen("recent")
 
     object MediaCategory : Screen("category/{categoryType}") {
         fun createRoute(categoryType: CategoryType): String = "category/${categoryType.name}"

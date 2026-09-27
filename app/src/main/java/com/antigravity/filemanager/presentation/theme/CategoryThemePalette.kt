@@ -26,6 +26,7 @@ enum class CategoryThemePalette(val displayName: String) {
             CategoryType.ACCESS_FROM_NETWORK -> Color(0xFF10262B)
             CategoryType.RECYCLE_BIN -> Color(0xFF251C38)
             CategoryType.USB_OTG -> Color(0xFF132B28)
+            CategoryType.RECENT -> Color(0xFF2E2614)
         }
         PASTEL -> when (type) {
             CategoryType.MAIN_STORAGE -> Color(0xFFB0BEC5)        // Slate Grey Pastel
@@ -39,6 +40,7 @@ enum class CategoryThemePalette(val displayName: String) {
             CategoryType.ACCESS_FROM_NETWORK -> Color(0xFF80CBC4) // Teal Pastel
             CategoryType.RECYCLE_BIN -> Color(0xFFB39DDB)         // Lilac Pastel
             CategoryType.USB_OTG -> Color(0xFF80CBC4)             // Mint Teal Pastel
+            CategoryType.RECENT -> Color(0xFFFFCC80)              // Apricot Pastel
         }
         TEAL -> when (type) {
             CategoryType.MAIN_STORAGE -> Color(0xFF112225)
@@ -52,6 +54,7 @@ enum class CategoryThemePalette(val displayName: String) {
             CategoryType.ACCESS_FROM_NETWORK -> Color(0xFF0E262A)
             CategoryType.RECYCLE_BIN -> Color(0xFF132226)
             CategoryType.USB_OTG -> Color(0xFF10272B)
+            CategoryType.RECENT -> Color(0xFF12262A)
         }
     }
 
@@ -68,6 +71,7 @@ enum class CategoryThemePalette(val displayName: String) {
             CategoryType.ACCESS_FROM_NETWORK -> Color(0xFF1DE9B6)
             CategoryType.RECYCLE_BIN -> Color(0xFFA855F7)
             CategoryType.USB_OTG -> Color(0xFF14B8A6)
+            CategoryType.RECENT -> Color(0xFFF59E0B)
         }
         PASTEL -> Color.Transparent
         TEAL -> when (type) {
@@ -82,6 +86,7 @@ enum class CategoryThemePalette(val displayName: String) {
             CategoryType.ACCESS_FROM_NETWORK -> Color(0xFF00F5D4)
             CategoryType.RECYCLE_BIN -> Color(0xFF52B788)
             CategoryType.USB_OTG -> Color(0xFF26A69A)
+            CategoryType.RECENT -> Color(0xFF48CAE4)
         }
     }
 
@@ -98,6 +103,7 @@ enum class CategoryThemePalette(val displayName: String) {
             CategoryType.ACCESS_FROM_NETWORK -> Color(0xFF64FFDA)
             CategoryType.RECYCLE_BIN -> Color(0xFFC084FC)
             CategoryType.USB_OTG -> Color(0xFF2DD4BF)
+            CategoryType.RECENT -> Color(0xFFFCD34D)
         }
         PASTEL -> Color(0xFF1C1E24) // Clean dark icon on pastel circle badge
         TEAL -> when (type) {
@@ -112,6 +118,7 @@ enum class CategoryThemePalette(val displayName: String) {
             CategoryType.ACCESS_FROM_NETWORK -> Color(0xFF70F8E3)
             CategoryType.RECYCLE_BIN -> Color(0xFF74C69D)
             CategoryType.USB_OTG -> Color(0xFF80CBC4)
+            CategoryType.RECENT -> Color(0xFF90E0EF)
         }
     }
 

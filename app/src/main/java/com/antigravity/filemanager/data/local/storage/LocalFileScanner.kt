@@ -164,6 +164,67 @@ class LocalFileScanner @Inject constructor(
         sortFileList(list, sortOption)
     }
 
+    /** A single file as a list item, the same way [listFilesInDir] builds one; [shownTime] replaces
+     * its modified time where a list is ordered by something else (when it was opened or added). */
+    fun fileItemOf(file: File, shownTime: Long = file.lastModified()): FileItem {
+        val ext = file.extension.lowercase(Locale.getDefault())
+        val isVideo = ext in videoExtensions
+        val isImage = ext in imageExtensions
+        val isAudio = ext in audioExtensions
+        val mime = getMimeType(file)
+        return FileItem(
+            id = file.absolutePath,
+            name = file.name,
+            path = file.absolutePath,
+            size = file.length(),
+            lastModified = shownTime,
+            isDirectory = false,
+            mimeType = mime,
+            extension = ext,
+            thumbnailUri = if (isVideo || isImage || isAudio || ext == "apk" || ext == "pdf" || mime.startsWith("image/") || mime.startsWith("video/")) file.absolutePath else null,
+            appSourceBadge = detectBadgeFromPath(file.absolutePath, isVideo = isVideo)
+        )
+    }
+
+    /**
+     * The files most recently added to the device (downloaded, received, saved, captured),
+     * newest first, from MediaStore's own index. Hidden files and folders are left out, and so is
+     * anything no longer on disk.
+     */
+    suspend fun getRecentlyAddedFiles(
+        limit: Int = 200,
+        /** Only files whose (lowercase) extension passes are counted towards [limit]. */
+        acceptExtension: (String) -> Boolean = { true }
+    ): List<FileItem> = withContext(Dispatchers.IO) {
+        val results = mutableListOf<FileItem>()
+        try {
+            val projection = arrayOf(MediaStore.Files.FileColumns.DATA, MediaStore.Files.FileColumns.DATE_ADDED)
+            context.contentResolver.query(
+                MediaStore.Files.getContentUri("external"),
+                projection,
+                // Folders are indexed too, with no MIME type.
+                "${MediaStore.Files.FileColumns.MIME_TYPE} IS NOT NULL",
+                null,
+                "${MediaStore.Files.FileColumns.DATE_ADDED} DESC"
+            )?.use { cursor ->
+                val dataIdx = cursor.getColumnIndex(MediaStore.Files.FileColumns.DATA)
+                val addedIdx = cursor.getColumnIndex(MediaStore.Files.FileColumns.DATE_ADDED)
+                while (cursor.moveToNext() && results.size < limit) {
+                    val path = (if (dataIdx >= 0) cursor.getString(dataIdx) else null) ?: continue
+                    if (isInsideHiddenOrSystemFolder(path, isFolder = false) || path.substringAfterLast('/').startsWith(".")) continue
+                    if (!acceptExtension(path.substringAfterLast('.', "").lowercase(Locale.ROOT))) continue
+                    val file = File(path)
+                    if (!file.isFile) continue
+                    val addedSec = if (addedIdx >= 0) cursor.getLong(addedIdx) else 0L
+                    results.add(fileItemOf(file, shownTime = if (addedSec > 0) addedSec * 1000L else file.lastModified()))
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        results
+    }
+
     fun detectFolderBadge(folderName: String): FolderBadgeType {
         val lower = folderName.lowercase(Locale.getDefault())
         return when {

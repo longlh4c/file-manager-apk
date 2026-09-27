@@ -42,7 +42,9 @@ enum class CategoryType {
     CLOUD,
     ACCESS_FROM_NETWORK,
     RECYCLE_BIN,
-    USB_OTG
+    USB_OTG,
+    // Recent: files opened in the app, and files newly added to the device
+    RECENT
 }
 
 enum class CloudProvider {
@@ -160,6 +162,11 @@ data class CategorySummary(
             CategoryType.CLOUD -> if (itemCount > 0) "($itemCount)" else ""
             CategoryType.RECYCLE_BIN -> if (totalSizeBytes > 0L) FileItem.formatBytes(totalSizeBytes) else if (itemCount > 0) "0 B" else ""
             CategoryType.ACCESS_FROM_NETWORK -> ""
+            CategoryType.RECENT -> when {
+                itemCount == 1 -> "1 file"
+                itemCount > 1 -> "$itemCount files"
+                else -> ""
+            }
             else -> {
                 if (totalSizeBytes > 0L || itemCount > 0) {
                     val sizeStr = FileItem.formatBytes(totalSizeBytes)
