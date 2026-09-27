@@ -65,6 +65,18 @@ class MegaApiClient @Inject constructor(
         nodeTreeCache.remove(accountId)
     }
 
+    // Every node of the last tree fetched per account, by handle, kept through
+    // invalidateNodeTreeCache and the tree's expiry. A node's key and thumbnail attribute never
+    // change, so thumbnails and other reads of a known node look it up here: they used to wait on
+    // getOrFetchNodeTree, which a refresh (in the other dual-panel pane, say) held for the whole
+    // account-wide re-fetch, so thumbnails stopped loading until it finished.
+    private val knownNodes = ConcurrentHashMap<String, Map<String, MegaNode>>()
+
+    /** The node with [nodeHandle], from [knownNodes] when possible, else from the current tree. */
+    private suspend fun findNode(account: CloudAccount, nodeHandle: String): MegaNode? =
+        knownNodes[account.id]?.get(nodeHandle)
+            ?: getOrFetchNodeTree(account).getOrNull()?.first?.find { it.handle == nodeHandle }
+
     // MEGA's "p" command (create-node — used by both createFolder and uploadFile's finalize
     // step) is NOT safe to send concurrently on the same session: firing several "p" requests
     // in parallel (e.g. a multi-file paste running with several files in flight at once) made
@@ -390,6 +402,7 @@ class MegaApiClient @Inject constructor(
             val fetched = fetchNodeTreeFromNetwork(account)
             fetched.onSuccess { (nodes, root) ->
                 nodeTreeCache[account.id] = NodeTreeCache(nodes, root, System.currentTimeMillis())
+                knownNodes[account.id] = nodes.associateBy { it.handle }
             }
             // An expired tree still beats an error while offline or rate-limited.
             if (fetched.isFailure && stale != null) Result.success(stale.allNodes to stale.rootHandle) else fetched
@@ -771,8 +784,7 @@ class MegaApiClient @Inject constructor(
             val masterKey = masterKeyOrNull
                 ?: return@withContext Result.failure(Exception("No master key available"))
 
-            val treeResult = getOrFetchNodeTree(account)
-            val node = treeResult.getOrNull()?.first?.find { it.handle == nodeHandle }
+            val node = findNode(account, nodeHandle)
                 ?: return@withContext Result.failure(Exception("Node not found in cached tree"))
             val (aesKey, nonce) = deriveNodeContentKeyAndNonce(node.keyStr, masterKey)
                 ?: return@withContext Result.failure(Exception("Could not resolve a decryption key for node $nodeHandle"))
@@ -862,8 +874,7 @@ class MegaApiClient @Inject constructor(
                 val masterKey = masterKeyOrNull
                     ?: return@withContext Result.failure(Exception("No master key available"))
 
-                val treeResult = getOrFetchNodeTree(account)
-                val node = treeResult.getOrNull()?.first?.find { it.handle == nodeHandle }
+                val node = findNode(account, nodeHandle)
                     ?: return@withContext Result.failure(Exception("Node not found in cached tree"))
                 val (aesKey, nonce) = deriveNodeContentKeyAndNonce(node.keyStr, masterKey)
                     ?: return@withContext Result.failure(Exception("Could not resolve a decryption key for node $nodeHandle"))
@@ -1287,9 +1298,7 @@ class MegaApiClient @Inject constructor(
      */
     suspend fun downloadThumbnail(account: CloudAccount, nodeHandle: String): Result<ByteArray> = withContext(Dispatchers.IO) {
         try {
-            val treeResult = getOrFetchNodeTree(account)
-            val (allNodes, _) = treeResult.getOrElse { return@withContext Result.failure(it) }
-            val node = allNodes.find { it.handle == nodeHandle }
+            val node = findNode(account, nodeHandle)
                 ?: return@withContext Result.failure(Exception("Node not found: $nodeHandle"))
 
             // "fa" format: "0:0*<handle>/1:1*<handle>" — type 0 is the thumbnail, 1 is the preview.

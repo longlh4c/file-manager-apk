@@ -247,7 +247,7 @@ class EmbeddedHttpServer @Inject constructor(
                     if (count >= maxResults) break
                     if (isSystemOrHidden(f)) continue
                     val childRel = if (currentRel.isEmpty()) f.name else "$currentRel/${f.name}"
-                    if (f.name.contains(query, ignoreCase = true)) {
+                    if (com.antigravity.filemanager.utils.matchesSearch(f.name, query)) {
                         val obj = JSONObject().apply {
                             put("name", f.name)
                             put("path", childRel)

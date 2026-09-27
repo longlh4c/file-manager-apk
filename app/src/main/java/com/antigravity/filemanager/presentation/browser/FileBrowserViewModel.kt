@@ -470,7 +470,7 @@ class FileBrowserViewModel @Inject constructor(
                 // call (including waiting on this folder's own children) can deadlock a wide/deep
                 // tree with only 4 permits.
                 val children = semaphore.withPermit { fileOperationsUseCase.getFiles(path, FileSortOption.BY_NAME_ASC, showHidden, mergeCloneDownloads = true) }
-                val matches = children.filter { it.name.contains(query, ignoreCase = true) }
+                val matches = children.filter { com.antigravity.filemanager.utils.matchesSearch(it.name, query) }
                 if (matches.isNotEmpty()) {
                     resultsMutex.withLock {
                         found.addAll(matches)

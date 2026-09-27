@@ -41,18 +41,54 @@ class DualPaneDragStateTest {
     }
 
     @Test
-    fun droppingOnTheOtherPaneAsksAndThenMoves() {
+    fun droppingOnTheSameDriveMovesWithoutAsking() {
         val s = state()
         s.dragTo(Offset(700f, 600f))
         assertEquals("/sdcard/B", s.hoveredTarget?.location)
         s.drop()
-        assertTrue(s.pendingDrop != null)
-        assertTrue(received.isEmpty())
-
-        s.resolve(isMove = true)
+        assertNull(s.pendingDrop)
         assertEquals(listOf("/sdcard/A/x.txt"), received["/sdcard/B"]?.paths)
         assertTrue(received["/sdcard/B"]!!.isCut)
         assertTrue(finished)
+    }
+
+    @Test
+    fun droppingOntoAnotherDriveCopies() {
+        val s = state().apply {
+            register(zone(ActivePanel.RIGHT, "/storage/1A2B-3C4D/Music", Rect(500f, 300f, 1000f, 400f)))
+            register(zone(ActivePanel.RIGHT, cloudLocation("mega1", "/Photos"), Rect(500f, 400f, 1000f, 500f)))
+        }
+        s.dragTo(Offset(700f, 350f))
+        s.drop()
+        assertFalse(received["/storage/1A2B-3C4D/Music"]!!.isCut)
+
+        s.dragTo(Offset(700f, 450f))
+        s.drop()
+        assertFalse(received[cloudLocation("mega1", "/Photos")]!!.isCut)
+    }
+
+    @Test
+    fun cloudItemsMoveWithinTheirOwnAccountOnly() {
+        val s = DualPaneDragState().apply {
+            register(zone(ActivePanel.RIGHT, cloudLocation("mega1", "/B"), Rect(500f, 0f, 1000f, 500f)))
+            register(zone(ActivePanel.RIGHT, cloudLocation("mega2", "/B"), Rect(500f, 500f, 1000f, 1000f)))
+        }
+        fun dragFromMega1(at: Offset) {
+            s.start(
+                DualPaneDragPayload(
+                    ActivePanel.LEFT,
+                    GlobalClipboardState(paths = listOf("/A/x.jpg"), sourceCloudAccountId = "mega1"),
+                    cloudLocation("mega1", "/A")
+                ) {},
+                Offset(10f, 10f)
+            )
+            s.move(at)
+            s.drop()
+        }
+        dragFromMega1(Offset(700f, 200f))
+        assertTrue(received[cloudLocation("mega1", "/B")]!!.isCut)
+        dragFromMega1(Offset(700f, 700f))
+        assertFalse(received[cloudLocation("mega2", "/B")]!!.isCut)
     }
 
     @Test
@@ -90,9 +126,11 @@ class DualPaneDragStateTest {
     }
 
     @Test
-    fun cancellingTheMenuLeavesEverythingAsIs() {
-        val s = state()
-        s.dragTo(Offset(700f, 600f))
+    fun cancellingTheTrashConfirmationLeavesEverythingAsIs() {
+        val s = state().apply {
+            register(zone(ActivePanel.RIGHT, "trash", Rect(600f, 800f, 700f, 900f), kind = DropZoneKind.TRASH))
+        }
+        s.dragTo(Offset(650f, 850f))
         s.drop()
         s.resolve(isMove = null)
         assertTrue(received.isEmpty())

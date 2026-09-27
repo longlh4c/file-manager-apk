@@ -109,7 +109,7 @@ fun StorageFolderBreakdownScreen(
     }
 
     val filteredItems = remember(folderItems, searchQuery) {
-        if (searchQuery.isBlank()) folderItems else folderItems.filter { it.name.contains(searchQuery, ignoreCase = true) }
+        if (searchQuery.isBlank()) folderItems else folderItems.filter { com.antigravity.filemanager.utils.matchesSearch(it.name, searchQuery) }
     }
 
     BackHandler {
@@ -522,7 +522,8 @@ fun StorageFolderBreakdownScreen(
                 if (!isScanning && filteredItems.isEmpty()) {
                     EmptyFolderState()
                 } else {
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    val scrollState = androidx.compose.foundation.lazy.rememberLazyListState()
+                    LazyColumn(state = scrollState, modifier = Modifier.fillMaxSize().verticalScrollbar(scrollState)) {
                         items(filteredItems, key = { it.path }) { item ->
                             val percentage = (item.size.toDouble() / totalDirBytes.toDouble()) * 100.0
                             val formattedPercent = String.format(Locale.getDefault(), "%.2f%%", percentage)

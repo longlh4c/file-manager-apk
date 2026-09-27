@@ -74,12 +74,36 @@ class DualPaneDropZone(
 /** The drag-and-drop location of a folder in a cloud account. */
 fun cloudLocation(accountId: String, path: String): String = "cloud:$accountId:$path"
 
-/** A dropped-but-not-yet-confirmed drag, waiting on the Copy / Move / Cancel menu. */
+/** The drive a drag-and-drop location is on: one cloud account, or one local storage volume
+ * (main storage, a USB drive, an SD card). */
+private fun driveOf(location: String): String {
+    if (location.startsWith("cloud:")) return location.substringBefore(":/")
+    val path = location.replace("/sdcard", "/storage/emulated/0").trimEnd('/')
+    val parts = path.split('/').filter { it.isNotEmpty() }
+    return when {
+        // /storage/emulated/<user>: each user's (or the app-clone space's) storage.
+        parts.size >= 3 && parts[0] == "storage" && parts[1] == "emulated" -> "/storage/emulated/${parts[2]}"
+        // /storage/<volume id>: a USB drive or SD card.
+        parts.size >= 2 && parts[0] == "storage" -> "/storage/${parts[1]}"
+        else -> "/"
+    }
+}
+
+/** What a drop does without asking: a move within the same drive, a copy onto another one —
+ * the same default as a desktop file manager. */
+fun isMoveByDefault(payload: DualPaneDragPayload, target: DualPaneDropZone): Boolean {
+    if (target.kind == DropZoneKind.TRASH) return true
+    val source = payload.itemLocations.firstOrNull() ?: payload.sourceLocation
+    return driveOf(source) == driveOf(target.location)
+}
+
+/** A drop onto the trash, waiting on its confirmation. */
 class PendingDualPaneDrop(val payload: DualPaneDragPayload, val target: DualPaneDropZone)
 
 /**
  * In-app drag between the panes: a long press on an item followed by a move starts it, an
- * overlay follows the finger, and releasing over a drop zone asks what to do ([pendingDrop]).
+ * overlay follows the finger, and releasing over a folder moves or copies there straight away
+ * ([isMoveByDefault]); releasing over the trash asks first ([pendingDrop]).
  * Positions are in window coordinates.
  */
 class DualPaneDragState {
@@ -130,15 +154,24 @@ class DualPaneDragState {
         val p = payload ?: return
         val target = hoveredTarget
         payload = null
-        if (target != null) pendingDrop = PendingDualPaneDrop(p, target)
+        if (target == null) return
+        if (target.kind == DropZoneKind.TRASH) {
+            // Still confirmed: a trash drop takes the items out of their folder.
+            pendingDrop = PendingDualPaneDrop(p, target)
+        } else {
+            // A folder drop no longer asks: it moves within a drive and copies across drives
+            // (see isMoveByDefault; the drag chip says which before the finger lifts).
+            target.onDrop(p.items.copy(isCut = isMoveByDefault(p, target)))
+            p.onFinished()
+        }
     }
 
     fun cancel() {
         payload = null
     }
 
-    /** The user's answer to the drop menu: true = move, false = copy, null = cancel. A trash
-     * drop is always a move. */
+    /** The user's answer to the trash confirmation: non-null = go ahead (always a move),
+     * null = cancel. */
     fun resolve(isMove: Boolean?) {
         val drop = pendingDrop ?: return
         pendingDrop = null

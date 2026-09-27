@@ -710,30 +710,32 @@ class LocalFileScanner @Inject constructor(
      * fixes the old bug where a device-wide file-name search wasted its whole result budget on
      * files of unrelated types before ever reaching the folder actually being searched. */
     suspend fun searchMediaByCategory(query: String, categoryType: CategoryType, folderPath: String? = null, maxResults: Int = 500): List<FileItem> = withContext(Dispatchers.IO) {
-        val likeArgs = if (folderPath != null) arrayOf("%$query%", "${folderPath.trimEnd('/')}/%") else arrayOf("%$query%")
+        // The name is matched here rather than with SQL LIKE, which can't ignore accents: a search
+        // for "Thao" has to find "Thảo". Only the folder scope stays in the query.
+        val scopeArgs = if (folderPath != null) arrayOf("${folderPath.trimEnd('/')}/%") else null
         // Scope to one folder (non-recursive — DATA LIKE 'folder/%' also matches nested
         // subfolders' files, but a category folder is already meant to be a flat bucket, same
         // assumption filterFilesForCategory makes) when the user searched from inside it, instead
         // of always searching the whole category regardless of where they currently are.
-        fun scoped(nameSelection: String) = if (folderPath != null) "($nameSelection) AND ${MediaStore.Files.FileColumns.DATA} LIKE ?" else nameSelection
+        val scopeSelection = if (folderPath != null) "${MediaStore.Files.FileColumns.DATA} LIKE ?" else null
         when (categoryType) {
             CategoryType.IMAGES -> queryMediaStoreByName(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                 MediaStore.Images.Media.DATA, MediaStore.Images.Media.DISPLAY_NAME,
                 MediaStore.Images.Media.SIZE, MediaStore.Images.Media.DATE_MODIFIED,
-                scoped("${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?"), likeArgs, maxResults
+                scopeSelection, scopeArgs, query, maxResults
             )
             CategoryType.VIDEOS -> queryMediaStoreByName(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
                 MediaStore.Video.Media.DATA, MediaStore.Video.Media.DISPLAY_NAME,
                 MediaStore.Video.Media.SIZE, MediaStore.Video.Media.DATE_MODIFIED,
-                scoped("${MediaStore.Video.Media.DISPLAY_NAME} LIKE ?"), likeArgs, maxResults
+                scopeSelection, scopeArgs, query, maxResults
             )
             CategoryType.AUDIO -> queryMediaStoreByName(
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
                 MediaStore.Audio.Media.DATA, MediaStore.Audio.Media.DISPLAY_NAME,
                 MediaStore.Audio.Media.SIZE, MediaStore.Audio.Media.DATE_MODIFIED,
-                scoped("${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?"), likeArgs, maxResults
+                scopeSelection, scopeArgs, query, maxResults
             )
             CategoryType.DOCUMENTS -> {
                 val mimeTypes = listOf(
@@ -767,13 +769,12 @@ class LocalFileScanner @Inject constructor(
                         " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.rtf'" +
                         " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.epub'" +
                         " OR ${MediaStore.Files.FileColumns.DATA} LIKE '%.mobi'"
-                val nameSelection = "($typeSelection) AND ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE ?"
                 queryMediaStoreByName(
                     MediaStore.Files.getContentUri("external"),
                     MediaStore.Files.FileColumns.DATA, MediaStore.Files.FileColumns.DISPLAY_NAME,
                     MediaStore.Files.FileColumns.SIZE, MediaStore.Files.FileColumns.DATE_MODIFIED,
-                    if (folderPath != null) "($nameSelection) AND ${MediaStore.Files.FileColumns.DATA} LIKE ?" else nameSelection,
-                    likeArgs, maxResults
+                    if (scopeSelection != null) "($typeSelection) AND $scopeSelection" else typeSelection,
+                    scopeArgs, query, maxResults
                 )
             }
             else -> emptyList()
@@ -786,8 +787,10 @@ class LocalFileScanner @Inject constructor(
         nameCol: String,
         sizeCol: String,
         dateCol: String,
-        selection: String,
-        selectionArgs: Array<String>,
+        selection: String?,
+        selectionArgs: Array<String>?,
+        /** Kept only when the name contains it, ignoring case and accents. */
+        query: String,
         maxResults: Int
     ): List<FileItem> {
         val results = mutableListOf<FileItem>()
@@ -805,6 +808,7 @@ class LocalFileScanner @Inject constructor(
                     val path = (if (dataIdx >= 0) it.getString(dataIdx) else null) ?: continue
                     val name = (if (nameIdx >= 0) it.getString(nameIdx) else null) ?: path.substringAfterLast('/')
                     if (name.startsWith(".") || isInsideHiddenOrSystemFolder(path, isFolder = false)) continue
+                    if (!com.antigravity.filemanager.utils.matchesSearch(name, query)) continue
                     val size = if (sizeIdx >= 0) it.getLong(sizeIdx) else 0L
                     val dateSec = if (dateIdx >= 0) it.getLong(dateIdx) else 0L
                     results.add(

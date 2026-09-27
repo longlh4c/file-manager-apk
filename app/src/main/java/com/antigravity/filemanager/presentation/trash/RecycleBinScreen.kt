@@ -31,6 +31,7 @@ import com.antigravity.filemanager.presentation.components.CloudDownloadProgress
 import com.antigravity.filemanager.presentation.components.FileManagerTopBar
 import com.antigravity.filemanager.presentation.components.PullToRefreshWrapper
 import com.antigravity.filemanager.presentation.components.getFileIcon
+import com.antigravity.filemanager.presentation.components.verticalScrollbar
 import com.antigravity.filemanager.presentation.theme.*
 import java.io.File
 
@@ -150,10 +151,13 @@ fun RecycleBinScreen(
                     }
                 }
             } else {
+                val scrollState = androidx.compose.foundation.lazy.rememberLazyListState()
                 LazyColumn(
+                    state = scrollState,
                     modifier = Modifier
                         .fillMaxSize()
                         .background(DarkBackground)
+                        .then(Modifier.verticalScrollbar(scrollState))
                 ) {
                 items(uiState.items, key = { it.id }) { item ->
                     val isSelected = uiState.selectedIds.contains(item.id)
