@@ -638,6 +638,8 @@ fun CloudExplorerScreen(
                             isLoading = uiState.isLoading,
                             record = uiState.searchQuery.isBlank()
                         )
+                        // Back from the image/video viewer: bring the last media item viewed into view.
+                        com.antigravity.filemanager.presentation.viewers.ScrollToLastViewed(filteredFiles, listState, uiState.isLoading)
                         val revealName = uiState.revealItemName
                         LaunchedEffect(revealName, filteredFiles) {
                             if (revealName == null) return@LaunchedEffect
@@ -647,7 +649,10 @@ fun CloudExplorerScreen(
                                 viewModel.onItemRevealed()
                             }
                         }
-                        LazyColumn(state = listState, modifier = Modifier.fillMaxSize().weight(1f)) {
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier.fillMaxSize().weight(1f).verticalScrollbar(listState)
+                        ) {
                         items(filteredFiles, key = { it.id }) { file ->
                             FileListItem(
                                 file = file,

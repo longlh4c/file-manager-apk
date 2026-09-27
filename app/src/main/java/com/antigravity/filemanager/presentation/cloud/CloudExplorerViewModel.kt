@@ -1174,7 +1174,7 @@ class CloudExplorerViewModel @Inject constructor(
                 // pull-to-refresh (or a mutation) is still what rebuilds it.
                 val listResult = semaphore.withPermit { cloudUseCase.getFiles(accountId, path, forceFullRefresh = isDropboxTrash) }
                 val children = listResult.getOrDefault(emptyList())
-                val rawMatches = children.filter { it.id != "__trash__" && it.name.contains(query, ignoreCase = true) }
+                val rawMatches = children.filter { it.id != "__trash__" && com.antigravity.filemanager.utils.matchesSearch(it.name, query) }
                 // Same local-thumbnail-cache check normal folder loading gets — without it every
                 // search result always had to hit the network for its thumbnail even when it was
                 // already cached on disk from browsing this file's folder earlier.

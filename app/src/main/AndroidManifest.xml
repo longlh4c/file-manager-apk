@@ -41,8 +41,11 @@
         android:requestLegacyExternalStorage="true"
         tools:targetApi="34">
 
+        <!-- enableOnBackInvokedCallback: a back swipe reports which screen edge it started from,
+             so in dual panel it goes back in the pane on that side (see AppNavigation). -->
         <activity
             android:name=".MainActivity"
+            android:enableOnBackInvokedCallback="true"
             android:exported="true"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|uiMode"

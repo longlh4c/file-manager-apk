@@ -247,7 +247,7 @@ fun MediaCategoriesScreen(
         if (uiState.searchQuery.isBlank() || uiState.folderHistory.isNotEmpty()) {
             emptyList()
         } else {
-            uiState.folders.filter { it.name.contains(uiState.searchQuery, ignoreCase = true) }
+            uiState.folders.filter { com.antigravity.filemanager.utils.matchesSearch(it.name, uiState.searchQuery) }
                 .map { folder ->
                     FileItem(
                         id = folder.path,
@@ -569,6 +569,24 @@ fun MediaCategoriesScreen(
                 onSegmentClick = { index -> viewModel.navigateToSegment(index) }
             )
 
+            // Scroll states for the lists below — one per folder (plus search results, and the
+            // root grid of folders) — saved while an image viewer is open on top, so Back returns
+            // to where the list was (and ScrollToLastViewed can move it to the image just viewed).
+            val subfolderKey = uiState.currentSubfolderPath ?: ""
+            val isSearchList = uiState.searchQuery.isNotBlank()
+            val filesListState = androidx.compose.runtime.saveable.rememberSaveable(
+                subfolderKey, isSearchList, saver = androidx.compose.foundation.lazy.LazyListState.Saver
+            ) { androidx.compose.foundation.lazy.LazyListState() }
+            val filesGridState = androidx.compose.runtime.saveable.rememberSaveable(
+                subfolderKey, saver = androidx.compose.foundation.lazy.grid.LazyGridState.Saver
+            ) { androidx.compose.foundation.lazy.grid.LazyGridState() }
+            val foldersListState = androidx.compose.runtime.saveable.rememberSaveable(
+                saver = androidx.compose.foundation.lazy.LazyListState.Saver
+            ) { androidx.compose.foundation.lazy.LazyListState() }
+            val foldersGridState = androidx.compose.runtime.saveable.rememberSaveable(
+                saver = androidx.compose.foundation.lazy.grid.LazyGridState.Saver
+            ) { androidx.compose.foundation.lazy.grid.LazyGridState() }
+
             PullToRefreshWrapper(
                 onRefresh = { viewModel.refresh() },
                 isRefreshing = uiState.isLoading,
@@ -596,15 +614,24 @@ fun MediaCategoriesScreen(
                     // as the plain list (with each result's path shown, since a device-wide search
                     // spans many different folders) regardless of whatever view mode the current
                     // folder happens to be set to — same as Cloud's own search results.
-                    when (if (uiState.searchQuery.isNotBlank()) ViewMode.LIST else viewMode) {
+                    val shownMode = if (uiState.searchQuery.isNotBlank()) ViewMode.LIST else viewMode
+                    // Back from the image/video viewer: bring the last media item viewed into view.
+                    if (shownMode == ViewMode.GRID) {
+                        com.antigravity.filemanager.presentation.viewers.ScrollToLastViewed(filteredFiles, filesGridState, uiState.isLoading)
+                    } else {
+                        com.antigravity.filemanager.presentation.viewers.ScrollToLastViewed(filteredFiles, filesListState, uiState.isLoading)
+                    }
+                    when (shownMode) {
                         ViewMode.GRID -> {
                             LazyVerticalGrid(
+                                state = filesGridState,
                                 // Adaptive so column count follows actual screen width instead
                                 // of a hardcoded number — see FileBrowserScreen's identical grid
                                 // for the full rationale.
                                 columns = GridCells.Adaptive(minSize = 100.dp),
                                 modifier = Modifier
                                     .fillMaxSize()
+                                    .verticalScrollbar(filesGridState)
                                     .padding(horizontal = 4.dp, vertical = 6.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -633,7 +660,7 @@ fun MediaCategoriesScreen(
                             }
                         }
                         ViewMode.DETAILED_LIST -> {
-                            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                            LazyColumn(state = filesListState, modifier = Modifier.fillMaxSize().verticalScrollbar(filesListState)) {
                                 items(filteredFiles, key = { it.path }) { file ->
                                     FileDetailedListItem(
                                         file = file,
@@ -669,7 +696,7 @@ fun MediaCategoriesScreen(
                                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                                     )
                                 }
-                                LazyColumn(modifier = Modifier.fillMaxSize().weight(1f)) {
+                                LazyColumn(state = filesListState, modifier = Modifier.fillMaxSize().weight(1f).verticalScrollbar(filesListState)) {
                                     items(filteredFiles, key = { it.path }) { file ->
                                         FileListItem(
                                             file = file,
@@ -718,9 +745,11 @@ fun MediaCategoriesScreen(
                     }
                 } else if (viewMode == ViewMode.GRID) {
                     LazyVerticalGrid(
+                        state = foldersGridState,
                         columns = GridCells.Adaptive(minSize = 100.dp),
                         modifier = Modifier
                             .fillMaxSize()
+                            .verticalScrollbar(foldersGridState)
                             .padding(horizontal = 4.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -741,7 +770,7 @@ fun MediaCategoriesScreen(
                         }
                     }
                 } else {
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(state = foldersListState, modifier = Modifier.fillMaxSize().verticalScrollbar(foldersListState)) {
                         items(filteredFolders, key = { it.id }) { folder ->
                             AudioListItem(
                                 folder = folder,

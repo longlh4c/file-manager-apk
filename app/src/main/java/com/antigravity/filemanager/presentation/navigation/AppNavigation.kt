@@ -4,7 +4,6 @@ import kotlinx.coroutines.flow.first
 import android.widget.Toast
 import androidx.activity.OnBackPressedDispatcher
 import androidx.activity.OnBackPressedDispatcherOwner
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -191,17 +190,36 @@ fun AppNavigation(
 
     val activePanel by dualPanelManager.activePanel.collectAsStateWithLifecycle()
 
-    // Each pane gets its own back dispatcher and system Back goes only to the active one. Both
+    // Each pane gets its own back dispatcher and system Back goes to just one of them. Both
     // NavHosts (and every screen's own BackHandler) used to register on the activity's shared
     // dispatcher, where the right pane — composed last — always won: Back while working in the
     // left pane popped or navigated the right pane instead.
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     val leftBack = remember(lifecycleOwner) { PaneBackDispatcherOwner(lifecycleOwner) }
     val rightBack = remember(lifecycleOwner) { PaneBackDispatcherOwner(lifecycleOwner) }
-    val activeBack = if (isDualSplit && activePanel == ActivePanel.RIGHT) rightBack else leftBack
-    // An active pane with nothing left to go back to closes the split instead of leaving the app.
-    BackHandler(enabled = activeBack.hasEnabledCallbacks || isDualSplit) {
-        if (activeBack.hasEnabledCallbacks) activeBack.onBackPressedDispatcher.onBackPressed()
+    fun backOf(pane: ActivePanel) = if (isDualSplit && pane == ActivePanel.RIGHT) rightBack else leftBack
+    // Back from a swipe goes to the pane on the side it was swiped from (and makes that pane the
+    // active one) — it used to always go to the active pane, so going back in the other one meant
+    // tapping it first. Back with no edge (the 3-button Back key) still goes to the active pane.
+    // A pane with nothing left to go back to closes the split instead of leaving the app.
+    androidx.activity.compose.PredictiveBackHandler(
+        enabled = isDualSplit || leftBack.hasEnabledCallbacks
+    ) { progress ->
+        var edge: Int? = null
+        try {
+            progress.collect { event -> if (edge == null) edge = event.swipeEdge }
+        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+            return@PredictiveBackHandler // the swipe was abandoned
+        }
+        val pane = when {
+            !isDualSplit -> ActivePanel.LEFT
+            edge == androidx.activity.BackEventCompat.EDGE_LEFT -> ActivePanel.LEFT
+            edge == androidx.activity.BackEventCompat.EDGE_RIGHT -> ActivePanel.RIGHT
+            else -> activePanel
+        }
+        if (isDualSplit && pane != activePanel) dualPanelManager.setActivePanel(pane)
+        val back = backOf(pane)
+        if (back.hasEnabledCallbacks) back.onBackPressedDispatcher.onBackPressed()
         else dualPanelManager.close()
     }
 
@@ -1072,8 +1090,9 @@ private class PaneBackDispatcherOwner(
     override val lifecycle: androidx.lifecycle.Lifecycle get() = lifecycleOwner.lifecycle
 }
 
-/** What a drag between the panes shows: the dragged-items chip under the finger, an outline on
- * the pane that would receive the drop, and the Copy / Move / Cancel menu after dropping. */
+/** What a drag between the panes shows: the dragged-items chip under the finger (saying whether
+ * letting go moves or copies), an outline on the zone that would receive the drop, and the
+ * confirmation after dropping onto the trash. */
 @Composable
 private fun DualPaneDragOverlay(
     state: com.antigravity.filemanager.presentation.components.DualPaneDragState,
@@ -1094,14 +1113,28 @@ private fun DualPaneDragOverlay(
         }
         val at = state.pointer - rootOffset
         val count = payload.paths.size
+        // Says what letting go will do, since a folder drop no longer asks.
+        val action = target?.let {
+            when {
+                it.kind == com.antigravity.filemanager.presentation.components.DropZoneKind.TRASH -> "Trash"
+                com.antigravity.filemanager.presentation.components.isMoveByDefault(payload, it) -> "Move"
+                else -> "Copy"
+            }
+        }
+        // Beside the finger, flipped to its left when the right side has no room: over the right
+        // pane the chip ran off the edge of the screen and its action was cut off.
+        var chipWidth by remember { mutableStateOf(0) }
+        val windowWidth = with(density) { androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp.toPx() }
+        val chipX = if (at.x + 24 + chipWidth > windowWidth) at.x - 24 - chipWidth else at.x + 24
         Text(
             text = (if (count == 1) java.io.File(payload.paths.first()).name else "$count items") +
-                (target?.let { "  →  ${it.name}" } ?: ""),
+                (target?.let { "  →  $action to ${it.name}" } ?: ""),
             color = Color.Black,
             fontSize = 13.sp,
             maxLines = 1,
             modifier = Modifier
-                .offset { androidx.compose.ui.unit.IntOffset(at.x.toInt() + 24, at.y.toInt() - 72) }
+                .offset { androidx.compose.ui.unit.IntOffset(chipX.toInt().coerceAtLeast(0), at.y.toInt() - 72) }
+                .onGloballyPositioned { chipWidth = it.size.width }
                 .background(if (target != null) TealPrimary else Color(0xFFB0B0B0), androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
                 .padding(horizontal = 12.dp, vertical = 6.dp)
         )
@@ -1110,51 +1143,27 @@ private fun DualPaneDragOverlay(
     state.pendingDrop?.let { drop ->
         val count = drop.payload.paths.size
         val what = if (count == 1) "\"${java.io.File(drop.payload.paths.first()).name}\"" else "$count items"
-        if (drop.target.kind == com.antigravity.filemanager.presentation.components.DropZoneKind.TRASH) {
-            androidx.compose.material3.AlertDialog(
-                onDismissRequest = { state.resolve(null) },
-                title = { Text("Move $what to trash?", color = TextPrimary) },
-                text = {
-                    Text(
-                        if (drop.payload.items.sourceCloudAccountId == null) "They can be restored from the Recycle Bin."
-                        else "They go to this cloud account's own trash.",
-                        color = TextSecondary
-                    )
-                },
-                confirmButton = {
-                    Row {
-                        androidx.compose.material3.TextButton(onClick = { state.resolve(null) }) {
-                            Text("CANCEL", color = TextSecondary)
-                        }
-                        androidx.compose.material3.Button(
-                            onClick = { state.resolve(isMove = true) },
-                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = com.antigravity.filemanager.presentation.theme.PastelCoral, contentColor = Color.Black)
-                        ) {
-                            Text("MOVE TO TRASH")
-                        }
-                    }
-                },
-                containerColor = DarkCard
-            )
-            return
-        }
+        // Only a trash drop is confirmed; a folder drop moves or copies without asking.
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { state.resolve(null) },
-            title = { Text("Drop $what", color = TextPrimary) },
-            text = { Text("into \"${drop.target.name}\"", color = TextSecondary) },
+            title = { Text("Move $what to trash?", color = TextPrimary) },
+            text = {
+                Text(
+                    if (drop.payload.items.sourceCloudAccountId == null) "They can be restored from the Recycle Bin."
+                    else "They go to this cloud account's own trash.",
+                    color = TextSecondary
+                )
+            },
             confirmButton = {
                 Row {
                     androidx.compose.material3.TextButton(onClick = { state.resolve(null) }) {
                         Text("CANCEL", color = TextSecondary)
                     }
-                    androidx.compose.material3.TextButton(onClick = { state.resolve(isMove = true) }) {
-                        Text("MOVE", color = TealPrimary)
-                    }
                     androidx.compose.material3.Button(
-                        onClick = { state.resolve(isMove = false) },
-                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = TealPrimary, contentColor = Color.Black)
+                        onClick = { state.resolve(isMove = true) },
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = com.antigravity.filemanager.presentation.theme.PastelCoral, contentColor = Color.Black)
                     ) {
-                        Text("COPY")
+                        Text("MOVE TO TRASH")
                     }
                 }
             },

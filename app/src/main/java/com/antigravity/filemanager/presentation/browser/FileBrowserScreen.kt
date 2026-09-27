@@ -657,6 +657,12 @@ fun FileBrowserScreen(
                 isLoading = uiState.isLoading,
                 record = recordScroll && viewMode == ViewMode.GRID
             )
+            // Back from the image/video viewer: bring the last media item viewed into view.
+            if (viewMode == ViewMode.GRID) {
+                com.antigravity.filemanager.presentation.viewers.ScrollToLastViewed(filteredFiles, gridState, uiState.isLoading)
+            } else {
+                com.antigravity.filemanager.presentation.viewers.ScrollToLastViewed(filteredFiles, listState, uiState.isLoading)
+            }
             val revealName = uiState.revealItemName
             LaunchedEffect(revealName, filteredFiles, viewMode) {
                 if (revealName == null) return@LaunchedEffect
@@ -678,6 +684,7 @@ fun FileBrowserScreen(
                         columns = GridCells.Adaptive(minSize = 100.dp),
                         modifier = Modifier
                             .fillMaxSize()
+                            .verticalScrollbar(gridState)
                             .padding(horizontal = 6.dp, vertical = 6.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -707,7 +714,7 @@ fun FileBrowserScreen(
                     }
                 }
                 ViewMode.DETAILED_LIST -> {
-                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().verticalScrollbar(listState)) {
                         items(filteredFiles, key = { it.path }) { file ->
                             FileDetailedListItem(
                                 file = file,
@@ -736,7 +743,7 @@ fun FileBrowserScreen(
                 }
                 else -> {
                     // Standard List
-                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().verticalScrollbar(listState)) {
                         items(filteredFiles, key = { it.path }) { file ->
                             FileListItem(
                                 file = file,

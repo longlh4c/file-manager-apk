@@ -210,6 +210,7 @@ fun ImageViewerScreen(
                 is ViewerEntry.Local -> currentEntry.file.absolutePath
                 is ViewerEntry.Cloud -> currentEntry.item.path
             }
+            LastViewedMedia.set(entryPath)
             cloudMediaViewerViewModel.saveLastViewedImage(
                 path = entryPath,
                 parentPath = actualParentPath,
@@ -670,6 +671,15 @@ fun VideoPlayerScreen(
     }
     val currentLocalFile: File? = (currentMedia as? ResolvedVideoMedia.LocalFile)?.file
     val currentName = currentEntry?.entryName ?: initialDisplayName
+
+    // For the folder to scroll to on the way back (see LastViewedMedia).
+    LaunchedEffect(currentEntry) {
+        when (currentEntry) {
+            is ViewerEntry.Local -> LastViewedMedia.set(currentEntry.file.absolutePath)
+            is ViewerEntry.Cloud -> LastViewedMedia.set(currentEntry.item.path)
+            null -> Unit
+        }
+    }
 
     val coroutineScope = rememberCoroutineScope()
     var showDeleteConfirm by remember { mutableStateOf(false) }

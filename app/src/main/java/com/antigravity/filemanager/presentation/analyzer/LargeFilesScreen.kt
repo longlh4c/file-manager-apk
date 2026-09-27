@@ -59,7 +59,7 @@ fun LargeFilesScreen(
 
     val largeFiles = uiState.data.largeFiles
     val filteredFiles = remember(largeFiles, searchQuery) {
-        if (searchQuery.isBlank()) largeFiles else largeFiles.filter { it.name.contains(searchQuery, ignoreCase = true) }
+        if (searchQuery.isBlank()) largeFiles else largeFiles.filter { com.antigravity.filemanager.utils.matchesSearch(it.name, searchQuery) }
     }
 
     BackHandler {
@@ -414,7 +414,8 @@ fun LargeFilesScreen(
                         Text(text = "No large files found", color = TextSecondary, fontSize = 15.sp)
                     }
                 } else {
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    val scrollState = androidx.compose.foundation.lazy.rememberLazyListState()
+                    LazyColumn(state = scrollState, modifier = Modifier.fillMaxSize().verticalScrollbar(scrollState)) {
                         items(filteredFiles, key = { it.path }) { item ->
                             val isSelected = selectedPaths.contains(item.path)
                             LargeFileDetailedRow(

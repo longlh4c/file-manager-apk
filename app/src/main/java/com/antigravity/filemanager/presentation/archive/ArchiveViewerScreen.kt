@@ -49,6 +49,7 @@ import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FileSortOption
 import com.antigravity.filemanager.presentation.components.ArchivePasswordDialog
 import com.antigravity.filemanager.presentation.components.FileListItem
+import com.antigravity.filemanager.presentation.components.verticalScrollbar
 import com.antigravity.filemanager.presentation.theme.DarkBackground
 import com.antigravity.filemanager.presentation.theme.DarkCard
 import com.antigravity.filemanager.presentation.theme.SelectionTopBarBg
@@ -168,6 +169,10 @@ fun ArchiveViewerScreen(
                 currentDir = uiState.currentDir,
                 onNavigate = { viewModel.goTo(it) }
             )
+            // A fresh position per archive folder, so going into a subfolder starts at its top.
+            val scrollState = androidx.compose.runtime.remember(uiState.currentDir) {
+                androidx.compose.foundation.lazy.LazyListState()
+            }
             when {
                 uiState.isLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = TealPrimary)
@@ -178,7 +183,7 @@ fun ArchiveViewerScreen(
                 uiState.items.isEmpty() && !uiState.needsPassword -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text("This folder is empty", color = TextSecondary)
                 }
-                else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
+                else -> LazyColumn(state = scrollState, modifier = Modifier.fillMaxSize().verticalScrollbar(scrollState)) {
                     items(uiState.items, key = { it.path }) { item ->
                         FileListItem(
                             file = item,

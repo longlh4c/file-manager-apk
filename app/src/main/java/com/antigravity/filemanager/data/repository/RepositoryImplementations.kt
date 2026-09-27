@@ -348,7 +348,7 @@ class FileRepositoryImpl @Inject constructor(
                 if (results.size >= maxResults) return
                 if (f.name.startsWith(".")) continue
                 val matchesType = f.isDirectory || allowedExts == null || f.extension.lowercase() in allowedExts
-                if (matchesType && f.name.contains(query, ignoreCase = true)) {
+                if (matchesType && com.antigravity.filemanager.utils.matchesSearch(f.name, query)) {
                     val isDir = f.isDirectory
                     results.add(
                         FileItem(
