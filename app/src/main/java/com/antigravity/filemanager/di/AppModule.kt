@@ -49,6 +49,9 @@ object DatabaseModule {
     fun provideBookmarkDao(database: AppDatabase): com.antigravity.filemanager.data.local.db.BookmarkDao = database.bookmarkDao()
 
     @Provides
+    fun provideRecentFileDao(database: AppDatabase): com.antigravity.filemanager.data.local.db.RecentFileDao = database.recentFileDao()
+
+    @Provides
     @Singleton
     fun provideOkHttpClient(): okhttp3.OkHttpClient {
         return okhttp3.OkHttpClient.Builder()

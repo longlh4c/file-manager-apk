@@ -1,5 +1,6 @@
 package com.antigravity.filemanager.presentation.viewers
 
+import com.antigravity.filemanager.data.repository.recentFiles
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -67,6 +68,27 @@ private fun decodeViewerPathArg(arg: String): String =
 
 private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng")
 private val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v")
+
+/** Adds a local [entry] to Recent > Opened once it has stayed on screen for a moment, so swiping
+ * quickly past fifty photos doesn't fill the history with them. Cancelled by a swipe onward. */
+private suspend fun recordWhenLingeredOn(context: android.content.Context, entry: ViewerEntry) {
+    if (entry !is ViewerEntry.Local) return
+    kotlinx.coroutines.delay(1500)
+    context.recentFiles().recordOpened(entry.file.absolutePath)
+}
+
+/** Adds the page on screen when the viewer closes to Recent > Opened, however briefly it was
+ * shown, so the last one looked at ends up first there (not the one first tapped). */
+@Composable
+private fun RecordLastViewedOnExit(currentEntry: ViewerEntry?) {
+    val context = LocalContext.current
+    val latest by rememberUpdatedState(currentEntry)
+    DisposableEffect(Unit) {
+        onDispose {
+            (latest as? ViewerEntry.Local)?.let { context.recentFiles().recordOpened(it.file.absolutePath) }
+        }
+    }
+}
 
 // A page in the swipeable viewer is either an already-local file, or a cloud file that still
 // needs to be downloaded on demand (see CloudViewerSession / CloudMediaViewerViewModel).
@@ -199,6 +221,7 @@ fun ImageViewerScreen(
     }
     val currentLocalFile: File? = (currentMedia as? ResolvedImageMedia.LocalFile)?.file
     val currentName = currentEntry?.entryName ?: initialDisplayName
+    RecordLastViewedOnExit(currentEntry)
 
     val coroutineScope = rememberCoroutineScope()
 
@@ -218,6 +241,7 @@ fun ImageViewerScreen(
                 cloudAccountId = cloudAccountId,
                 fileName = currentEntry.entryName
             )
+            recordWhenLingeredOn(context, currentEntry)
         }
     }
 
@@ -671,6 +695,7 @@ fun VideoPlayerScreen(
     }
     val currentLocalFile: File? = (currentMedia as? ResolvedVideoMedia.LocalFile)?.file
     val currentName = currentEntry?.entryName ?: initialDisplayName
+    RecordLastViewedOnExit(currentEntry)
 
     // For the folder to scroll to on the way back (see LastViewedMedia).
     LaunchedEffect(currentEntry) {
@@ -679,6 +704,7 @@ fun VideoPlayerScreen(
             is ViewerEntry.Cloud -> LastViewedMedia.set(currentEntry.item.path)
             null -> Unit
         }
+        if (currentEntry != null) recordWhenLingeredOn(context, currentEntry)
     }
 
     val coroutineScope = rememberCoroutineScope()

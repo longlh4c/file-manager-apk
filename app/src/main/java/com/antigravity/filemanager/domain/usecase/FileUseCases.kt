@@ -48,7 +48,8 @@ class FileOperationsUseCase @Inject constructor(
     private val recycleBinRepository: IRecycleBinRepository,
     private val transferGuard: com.antigravity.filemanager.data.service.TransferGuard,
     private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
-    private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal
+    private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal,
+    private val recentFiles: com.antigravity.filemanager.data.repository.RecentFilesRepository
 ) {
     suspend fun getFiles(
         directoryPath: String,
@@ -115,6 +116,12 @@ class FileOperationsUseCase @Inject constructor(
             // Even a failed copy/move may have written part of the files.
             folderCacheManager.invalidateMediaFolders()
             mediaChangeSignal.notifyChanged()
+            // Recently opened files that were moved stay in Recent at their new place. (One saved
+            // under a new "(1)" name isn't matched and drops out once its old path is gone.)
+            for (source in sourcePaths) {
+                val moved = File(targetDir, File(source).name)
+                if (!File(source).exists() && moved.exists()) recentFiles.onMoved(source, moved.absolutePath)
+            }
             return result
         } finally {
             transferGuard.end()
@@ -129,6 +136,7 @@ class FileOperationsUseCase @Inject constructor(
             if (it.isSuccess) {
                 folderCacheManager.invalidateMediaFolders()
                 mediaChangeSignal.notifyChanged()
+                it.getOrNull()?.let { renamed -> recentFiles.onMoved(filePath, renamed.path) }
             }
         }
 

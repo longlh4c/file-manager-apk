@@ -7,6 +7,7 @@ import android.os.Build
 import android.provider.Settings
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
+import com.antigravity.filemanager.data.repository.recentFiles
 import com.antigravity.filemanager.domain.model.FileItem
 import java.io.File
 import java.util.Locale
@@ -16,6 +17,8 @@ object FileOpener {
     fun openFile(context: Context, fileItem: FileItem) {
         val file = File(fileItem.path)
         if (!file.exists()) return notify(context, "File no longer exists")
+        // Recent > Opened (skips cloud and other temporary copies by itself).
+        context.recentFiles().recordOpened(file.absolutePath)
 
         val ext = file.extension.lowercase(Locale.getDefault())
 

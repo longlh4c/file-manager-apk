@@ -40,6 +40,7 @@ private val INITIAL_DASHBOARD_CATEGORIES = listOf(
     CategorySummary(type = CategoryType.DOCUMENTS, title = "Documents"),
     CategorySummary(type = CategoryType.CLOUD, title = "Cloud"),
     CategorySummary(type = CategoryType.ACCESS_FROM_NETWORK, title = "FTP"),
+    CategorySummary(type = CategoryType.RECENT, title = "Recent"),
     CategorySummary(type = CategoryType.RECYCLE_BIN, title = "Recycle Bin")
 )
 
@@ -68,7 +69,8 @@ class DashboardViewModel @Inject constructor(
     private val folderCacheManager: com.antigravity.filemanager.data.local.cache.FolderCacheManager,
     private val folderPreferencesRepository: com.antigravity.filemanager.data.repository.FolderPreferencesRepository,
     private val usbOtgManager: com.antigravity.filemanager.utils.UsbOtgManager,
-    private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal
+    private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal,
+    private val recentFiles: com.antigravity.filemanager.data.repository.RecentFilesRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(DashboardUiState())
@@ -88,7 +90,21 @@ class DashboardViewModel @Inject constructor(
         observeBookmarks()
         observeUsbDrives()
         observeMediaChanges()
+        observeRecentCount()
         warmMediaFolderCaches()
+    }
+
+    // The Recent card's count follows the history live (opening a file adds to it), instead of
+    // waiting for the next full dashboard rescan.
+    private var recentCount: Int? = null
+
+    private fun observeRecentCount() {
+        viewModelScope.launch {
+            recentFiles.observeOpenedCount().collect { count ->
+                recentCount = count
+                applyCategoriesWithUsb(_uiState.value.usbDrives)
+            }
+        }
     }
 
     /**
@@ -196,6 +212,9 @@ class DashboardViewModel @Inject constructor(
             folderCacheManager.putDashboardSummaries(fresh)
             withContext(Dispatchers.Main) {
                 baseCategories = fresh
+                // Recounted on disk just now: also catches recent files deleted outside the app,
+                // which the live count (driven by history changes) doesn't notice on its own.
+                fresh.firstOrNull { it.type == CategoryType.RECENT }?.let { recentCount = it.itemCount }
                 _uiState.update { old -> old.copy(
                     isLoading = false,
                     storageVolume = volume
@@ -330,7 +349,7 @@ class DashboardViewModel @Inject constructor(
     }
 
     private fun applyCategoriesWithUsb(drives: List<com.antigravity.filemanager.domain.model.UsbOtgVolumeInfo>) {
-        val filtered = baseCategories.filter { it.type != CategoryType.USB_OTG }
+        val filtered = withRecentCard(baseCategories.filter { it.type != CategoryType.USB_OTG })
         val finalCategories = if (drives.isNotEmpty()) {
             val usbSummaries = drives.map { drive ->
                 CategorySummary(
@@ -346,6 +365,17 @@ class DashboardViewModel @Inject constructor(
             filtered
         }
         _uiState.update { old -> old.copy(categories = finalCategories) }
+    }
+
+    /** [categories] with the Recent card just before the Recycle Bin — added when missing (cards
+     * saved by a version without it) — showing the live count. */
+    private fun withRecentCard(categories: List<CategorySummary>): List<CategorySummary> {
+        val existing = categories.firstOrNull { it.type == CategoryType.RECENT }
+        val card = (existing ?: CategorySummary(type = CategoryType.RECENT, title = "Recent"))
+            .let { card -> recentCount?.let { card.copy(itemCount = it) } ?: card }
+        val others = categories.filter { it.type != CategoryType.RECENT }
+        val binIndex = others.indexOfFirst { it.type == CategoryType.RECYCLE_BIN }.takeIf { it >= 0 } ?: others.size
+        return others.take(binIndex) + card + others.drop(binIndex)
     }
 
     private fun mergeWithExisting(current: List<CategorySummary>, incoming: List<CategorySummary>): List<CategorySummary> {

@@ -193,9 +193,67 @@ interface BookmarkDao {
     suspend fun deleteByPath(path: String)
 }
 
+/** A local file opened in the app (Recent > Opened). Its size and type are read from the file
+ * itself when shown, so they are never stale. */
+@Entity(tableName = "recent_files", indices = [Index("lastOpenedAt")])
+data class RecentFileEntity(
+    @PrimaryKey
+    val path: String,
+    val name: String,
+    val lastOpenedAt: Long,
+    val openCount: Int
+)
+
+@Dao
+interface RecentFileDao {
+    @Query("SELECT * FROM recent_files ORDER BY lastOpenedAt DESC")
+    fun observeAll(): Flow<List<RecentFileEntity>>
+
+    @Query("SELECT path FROM recent_files ORDER BY lastOpenedAt DESC")
+    suspend fun getAllPaths(): List<String>
+
+    /** Paths anywhere under [folder] (the caller keeps its direct children). */
+    @Query("SELECT path FROM recent_files WHERE substr(path, 1, length(:folder) + 1) = :folder || '/'")
+    suspend fun getPathsIn(folder: String): List<String>
+
+    @Query("SELECT * FROM recent_files WHERE path = :path LIMIT 1")
+    suspend fun get(path: String): RecentFileEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(entity: RecentFileEntity)
+
+    /** Records an open: a new row, or the existing one moved to the top with its count bumped. */
+    @Transaction
+    suspend fun recordOpen(path: String, name: String, at: Long) {
+        val existing = get(path)
+        insert(RecentFileEntity(path, name, at, (existing?.openCount ?: 0) + 1))
+    }
+
+    /** Keeps only the [keep] most recently opened files. */
+    @Query("DELETE FROM recent_files WHERE path NOT IN (SELECT path FROM recent_files ORDER BY lastOpenedAt DESC LIMIT :keep)")
+    suspend fun trimTo(keep: Int)
+
+    @Query("DELETE FROM recent_files WHERE path IN (:paths)")
+    suspend fun deleteByPaths(paths: List<String>)
+
+    @Query("DELETE FROM recent_files")
+    suspend fun clearAll()
+
+    /** A file renamed or moved in the app keeps its place in the history. */
+    @Query("UPDATE OR REPLACE recent_files SET path = :newPath, name = :newName WHERE path = :oldPath")
+    suspend fun rename(oldPath: String, newPath: String, newName: String)
+
+    /** Everything inside a renamed or moved folder follows it. */
+    @Query(
+        "UPDATE OR REPLACE recent_files SET path = :newFolder || substr(path, length(:oldFolder) + 1) " +
+            "WHERE substr(path, 1, length(:oldFolder) + 1) = :oldFolder || '/'"
+    )
+    suspend fun moveFolder(oldFolder: String, newFolder: String)
+}
+
 @Database(
-    entities = [TrashEntity::class, CloudEntity::class, FolderPreferenceEntity::class, BookmarkEntity::class],
-    version = 6,
+    entities = [TrashEntity::class, CloudEntity::class, FolderPreferenceEntity::class, BookmarkEntity::class, RecentFileEntity::class],
+    version = 7,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -203,5 +261,6 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun cloudDao(): CloudDao
     abstract fun folderPreferenceDao(): FolderPreferenceDao
     abstract fun bookmarkDao(): BookmarkDao
+    abstract fun recentFileDao(): RecentFileDao
 }
 

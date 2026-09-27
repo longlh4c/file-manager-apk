@@ -50,6 +50,7 @@ fun DashboardScreen(
     onNavigateToCategory: (CategoryType) -> Unit,
     onNavigateToBrowser: (path: String, title: String) -> Unit,
     onNavigateToTrash: () -> Unit,
+    onNavigateToRecent: () -> Unit,
     onNavigateToStorageAnalysis: () -> Unit,
     onDualPanelToggle: (() -> Unit)? = null,
     isDualPanelActive: Boolean = false,
@@ -184,6 +185,7 @@ fun DashboardScreen(
                             CategoryType.CLOUD -> {}
                             CategoryType.ACCESS_FROM_NETWORK -> {}
                             CategoryType.RECYCLE_BIN -> onNavigateToTrash()
+                            CategoryType.RECENT -> onNavigateToRecent()
                             CategoryType.USB_OTG -> {
                                 val usbDrive = uiState.usbDrives.find { it.rootPath == summary.id }
                                 if (usbDrive != null) {
