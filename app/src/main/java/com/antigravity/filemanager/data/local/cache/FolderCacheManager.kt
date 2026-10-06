@@ -545,6 +545,7 @@ class FolderCacheManager @Inject constructor(
                             size = obj.optLong("size", 0L),
                             lastModified = obj.optLong("lastModified", 0L),
                             isDirectory = obj.optBoolean("isDirectory", false),
+                            mimeType = obj.optString("mimeType", "*/*"),
                             itemCount = obj.optInt("itemCount", 0),
                             // Missing these two used to silently reset to 0 on every disk-cache
                             // round trip, breaking the "N folders, M items" split label (it only
@@ -555,7 +556,8 @@ class FolderCacheManager @Inject constructor(
                             fileChildCount = obj.optInt("fileChildCount", 0),
                             extension = obj.optString("extension", ""),
                             thumbnailUri = obj.optString("thumbnailUri").ifBlank { null },
-                            folderBadgeType = badge
+                            folderBadgeType = badge,
+                            webViewLink = obj.optString("webViewLink").ifBlank { null }
                         )
                     )
                 }
@@ -584,12 +586,14 @@ class FolderCacheManager @Inject constructor(
                         put("size", item.size)
                         put("lastModified", item.lastModified)
                         put("isDirectory", item.isDirectory)
+                        put("mimeType", item.mimeType)
                         put("itemCount", item.itemCount)
                         put("subfolderCount", item.subfolderCount)
                         put("fileChildCount", item.fileChildCount)
                         put("extension", item.extension)
                         put("thumbnailUri", item.thumbnailUri ?: "")
                         put("badge", item.folderBadgeType.name)
+                        put("webViewLink", item.webViewLink ?: "")
                     })
                 }
                 val root = JSONObject().apply {

@@ -43,6 +43,9 @@ fun writeUploadStream(targetDir: File, fileName: String, input: InputStream, len
         }
     } catch (e: Throwable) {
         destination.delete()
+        if (e is IOException && (e.message?.contains("ENOSPC", ignoreCase = true) == true || e.message?.contains("No space left", ignoreCase = true) == true)) {
+            throw NotEnoughSpaceException(length, targetDir.usableSpace)
+        }
         throw e
     }
     return destination

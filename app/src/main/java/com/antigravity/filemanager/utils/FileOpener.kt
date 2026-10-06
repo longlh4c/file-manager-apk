@@ -15,6 +15,24 @@ import java.util.Locale
 object FileOpener {
 
     fun openFile(context: Context, fileItem: FileItem) {
+        val targetUrl = when {
+            fileItem.path.startsWith("http://") || fileItem.path.startsWith("https://") -> fileItem.path
+            !fileItem.webViewLink.isNullOrBlank() && (fileItem.webViewLink.startsWith("http://") || fileItem.webViewLink.startsWith("https://")) -> fileItem.webViewLink
+            else -> null
+        }
+        if (targetUrl != null) {
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                notify(context, "Cannot open link")
+            }
+            return
+        }
+
         val file = File(fileItem.path)
         if (!file.exists()) return notify(context, "File no longer exists")
         // Recent > Opened (skips cloud and other temporary copies by itself).
@@ -81,6 +99,26 @@ object FileOpener {
     }
 
     fun openWith(context: Context, fileItem: FileItem) {
+        val targetUrl = when {
+            fileItem.path.startsWith("http://") || fileItem.path.startsWith("https://") -> fileItem.path
+            !fileItem.webViewLink.isNullOrBlank() && (fileItem.webViewLink.startsWith("http://") || fileItem.webViewLink.startsWith("https://")) -> fileItem.webViewLink
+            else -> null
+        }
+        if (targetUrl != null) {
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                val chooser = Intent.createChooser(intent, "Open with...")
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(chooser)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                notify(context, "No app can open this link")
+            }
+            return
+        }
+
         val file = File(fileItem.path)
         if (!file.exists()) return notify(context, "File no longer exists")
 

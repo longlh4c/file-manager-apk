@@ -165,28 +165,33 @@ fun AppNavigation(
         { file, sortOption, cloudAccountId ->
             val ext = file.extension.lowercase()
             val isStreamUrl = com.antigravity.filemanager.presentation.viewers.CloudMediaDataSources.isStreamPath(file.path)
-            val parent = if (isStreamUrl) "" else File(file.path).parentFile?.absolutePath ?: ""
+            val isWebUrl = file.path.startsWith("http://") || file.path.startsWith("https://") || !file.webViewLink.isNullOrBlank()
+            val parent = if (isStreamUrl || isWebUrl) "" else File(file.path).parentFile?.absolutePath ?: ""
             // Recent > Opened is for files on this device; cloud files (a downloaded copy or a
             // stream) aren't recorded. Files handed to another app are recorded by FileOpener, and
             // images and videos by their viewer (the one looked at last, not just the one tapped).
-            if (cloudAccountId == null && !isStreamUrl && ext in setOf("zip", "7z", "rar")) {
+            if (cloudAccountId == null && !isStreamUrl && !isWebUrl && ext in setOf("zip", "7z", "rar")) {
                 context.recentFiles().recordOpened(file.path)
             }
-            when (ext) {
-                "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng" -> {
-                    controller.navigate(Screen.ImageViewer.createRoute(file.path, parent, sortOption.name, cloudAccountId, fileName = file.name))
-                }
-                "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v" -> {
-                    controller.navigate(Screen.VideoPlayer.createRoute(file.path, parent, sortOption.name, cloudAccountId, fileName = file.name))
-                }
-                // Browsed in-app (see ArchiveViewerScreen) instead of handed to another app.
-                "zip", "7z", "rar" -> if (isStreamUrl) {
-                    com.antigravity.filemanager.utils.FileOpener.openFile(context, file)
-                } else {
-                    controller.navigate(Screen.ArchiveViewer.createRoute(file.path))
-                }
-                else -> {
-                    com.antigravity.filemanager.utils.FileOpener.openFile(context, file)
+            if (isWebUrl) {
+                com.antigravity.filemanager.utils.FileOpener.openFile(context, file)
+            } else {
+                when (ext) {
+                    "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng" -> {
+                        controller.navigate(Screen.ImageViewer.createRoute(file.path, parent, sortOption.name, cloudAccountId, fileName = file.name))
+                    }
+                    "mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp", "ts", "m4v" -> {
+                        controller.navigate(Screen.VideoPlayer.createRoute(file.path, parent, sortOption.name, cloudAccountId, fileName = file.name))
+                    }
+                    // Browsed in-app (see ArchiveViewerScreen) instead of handed to another app.
+                    "zip", "7z", "rar" -> if (isStreamUrl) {
+                        com.antigravity.filemanager.utils.FileOpener.openFile(context, file)
+                    } else {
+                        controller.navigate(Screen.ArchiveViewer.createRoute(file.path))
+                    }
+                    else -> {
+                        com.antigravity.filemanager.utils.FileOpener.openFile(context, file)
+                    }
                 }
             }
         }

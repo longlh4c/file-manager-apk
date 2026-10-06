@@ -132,6 +132,7 @@ class EmbeddedHttpServer @Inject constructor(
                         newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", WebShareAssets.getIndexHtml(appContext))
                     }
                     uri == "/api/list" -> handleList(session)
+                    uri == "/api/status" -> handleStatus(session)
                     uri == "/api/search" -> handleSearch(session)
                     uri == "/api/download" -> handleDownload(session)
                     uri == "/api/upload" && method == Method.POST -> handleUpload(session)
@@ -197,11 +198,36 @@ class EmbeddedHttpServer @Inject constructor(
                 jsonArray.put(obj)
             }
 
+            val storageObj = JSONObject().apply {
+                put("freeBytes", storageRoot.usableSpace)
+                put("totalBytes", storageRoot.totalSpace)
+                put("deviceModel", android.os.Build.MODEL)
+            }
+
             val resObj = JSONObject().apply {
                 put("currentPath", relPath)
                 put("items", jsonArray)
+                put("storage", storageObj)
             }
 
+            return finalizeResponse(newFixedLengthResponse(
+                Response.Status.OK,
+                "application/json",
+                resObj.toString()
+            ))
+        }
+
+        private fun handleStatus(session: IHTTPSession): Response {
+            val storageObj = JSONObject().apply {
+                put("freeBytes", storageRoot.usableSpace)
+                put("totalBytes", storageRoot.totalSpace)
+                put("deviceModel", android.os.Build.MODEL)
+            }
+            val resObj = JSONObject().apply {
+                put("status", "ok")
+                put("serverRunning", true)
+                put("storage", storageObj)
+            }
             return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
@@ -459,13 +485,23 @@ class EmbeddedHttpServer @Inject constructor(
                 } catch (e: NotEnoughSpaceException) {
                     finalizeResponse(newFixedLengthResponse(
                         Response.Status.INTERNAL_ERROR, "application/json",
-                        JSONObject().put("error", "Not enough space: ${e.message}").toString()
+                        JSONObject().apply {
+                            put("error", "Not enough space: ${e.message}")
+                            put("storageFull", true)
+                            put("required", e.required)
+                            put("available", e.available)
+                        }.toString()
                     ))
                 } catch (e: Exception) {
+                    val isSpaceError = e.message?.contains("ENOSPC", ignoreCase = true) == true ||
+                            e.message?.contains("No space left", ignoreCase = true) == true
                     android.util.Log.e("EmbeddedHttpServer", "Upload of $name failed", e)
                     finalizeResponse(newFixedLengthResponse(
                         Response.Status.INTERNAL_ERROR, "application/json",
-                        JSONObject().put("error", e.message ?: "Upload failed").toString()
+                        JSONObject().apply {
+                            put("error", e.message ?: "Upload failed")
+                            if (isSpaceError) put("storageFull", true)
+                        }.toString()
                     ))
                 }
             }
@@ -500,6 +536,14 @@ class EmbeddedHttpServer @Inject constructor(
                         }
                     } catch (e: Exception) {
                         destFile.delete() // don't leave a truncated file behind
+                        val isSpace = e.message?.contains("ENOSPC", ignoreCase = true) == true ||
+                                e.message?.contains("No space left", ignoreCase = true) == true
+                        if (isSpace) {
+                            return finalizeResponse(newFixedLengthResponse(
+                                Response.Status.INTERNAL_ERROR, "application/json",
+                                JSONObject().put("error", "Storage full: ${e.message}").put("storageFull", true).toString()
+                            ))
+                        }
                         throw e
                     } finally {
                         tempFile.delete()

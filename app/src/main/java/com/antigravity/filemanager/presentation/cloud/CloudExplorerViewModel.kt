@@ -962,6 +962,24 @@ class CloudExplorerViewModel @Inject constructor(
     }
 
     fun openFile(file: FileItem, onReadyToOpen: (FileItem) -> Unit) {
+        // If this is a Google Workspace file (Google Sheets, Docs, Slides, Forms, etc.) or has a webViewLink,
+        // open it immediately via link (launching Google Sheets/Docs app or web browser) without downloading.
+        val webUrl = file.webViewLink?.takeIf { it.isNotBlank() }
+            ?: when (file.extension.lowercase()) {
+                "gsheet" -> "https://docs.google.com/spreadsheets/d/${file.id}/edit"
+                "gdoc" -> "https://docs.google.com/document/d/${file.id}/edit"
+                "gslides" -> "https://docs.google.com/presentation/d/${file.id}/edit"
+                "gform" -> "https://docs.google.com/forms/d/${file.id}/viewform"
+                else -> if (file.mimeType.startsWith("application/vnd.google-apps.") && !file.isDirectory) {
+                    "https://drive.google.com/file/d/${file.id}/view"
+                } else null
+            }
+
+        if (webUrl != null) {
+            onReadyToOpen(file.copy(path = webUrl, webViewLink = webUrl))
+            return
+        }
+
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
             try {

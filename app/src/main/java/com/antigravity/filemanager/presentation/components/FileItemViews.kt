@@ -525,9 +525,11 @@ fun getFileIcon(file: FileItem): ImageVector {
     val ext = file.extension.lowercase(Locale.getDefault())
     return when (ext) {
         "pdf" -> Icons.Default.PictureAsPdf
-        "doc", "docx", "odt", "wps", "wpd", "pages", "rtf" -> Icons.Default.Description
-        "xls", "xlsx", "ods", "csv", "tsv", "numbers" -> Icons.Default.TableChart
-        "ppt", "pptx", "odp", "key", "keynote" -> Icons.Default.Slideshow
+        "doc", "docx", "odt", "wps", "wpd", "pages", "rtf", "gdoc" -> Icons.Default.Description
+        "xls", "xlsx", "ods", "csv", "tsv", "numbers", "gsheet" -> Icons.Default.TableChart
+        "ppt", "pptx", "odp", "key", "keynote", "gslides" -> Icons.Default.Slideshow
+        "gform" -> Icons.Default.Assignment
+        "gshortcut" -> Icons.Default.Link
         "epub", "mobi", "azw", "azw3", "fb2", "chm", "lit" -> Icons.Default.MenuBook
         "txt", "text", "log", "md", "markdown", "rst", "tex", "latex", "note", "nfo", "diz" -> Icons.Default.Article
         "json", "xml", "yaml", "yml", "ini", "conf", "properties", "html", "htm" -> Icons.Default.Code
@@ -545,9 +547,11 @@ fun getFileIconColor(file: FileItem): Color {
     val ext = file.extension.lowercase(Locale.getDefault())
     return when (ext) {
         "pdf" -> Color(0xFFFFAB91) // Pastel Soft Coral
-        "doc", "docx", "odt", "wps", "wpd", "pages", "rtf" -> Color(0xFF90CAF9) // Pastel Sky Blue
-        "xls", "xlsx", "ods", "csv", "tsv", "numbers" -> Color(0xFFA5D6A7) // Pastel Mint Green
-        "ppt", "pptx", "odp", "key", "keynote" -> Color(0xFFFFCC80) // Pastel Peach
+        "doc", "docx", "odt", "wps", "wpd", "pages", "rtf", "gdoc" -> Color(0xFF90CAF9) // Pastel Sky Blue
+        "xls", "xlsx", "ods", "csv", "tsv", "numbers", "gsheet" -> Color(0xFFA5D6A7) // Pastel Mint Green
+        "ppt", "pptx", "odp", "key", "keynote", "gslides" -> Color(0xFFFFCC80) // Pastel Peach
+        "gform" -> Color(0xFFCE93D8) // Pastel Purple
+        "gshortcut" -> Color(0xFF80DEEA) // Pastel Aqua
         "epub", "mobi", "azw", "azw3", "fb2", "chm", "lit" -> Color(0xFFD1C4E9) // Pastel Purple
         "txt", "text", "log", "md", "markdown", "rst", "tex", "latex", "note", "nfo", "diz" -> Color(0xFF81D4FA) // Pastel Ice Blue
         "json", "xml", "yaml", "yml", "ini", "conf", "properties", "html", "htm" -> Color(0xFF80CBC4) // Pastel Teal

@@ -84,6 +84,12 @@ class FileOperationsHelper @Inject constructor(
                 collectFileCopyEntries(source, dest, fileEntries, dirEntries)
             }
 
+            val totalRequiredBytes = fileEntries.sumOf { it.source.length() }
+            val availableSpace = targetFolder.usableSpace
+            if (totalRequiredBytes > 0 && availableSpace in 0 until totalRequiredBytes + 8L * 1024 * 1024) {
+                return@withContext Result.failure(IOException("Bộ nhớ thiết bị không đủ dung lượng để sao chép (Cần ${(totalRequiredBytes / (1024 * 1024))} MB, còn trống ${(availableSpace / (1024 * 1024))} MB)"))
+            }
+
             val outcome = copyEntries(dirEntries, fileEntries, deleteSources = false, onProgress = onProgress)
             scanMedia(outcome.copiedPaths)
             if (outcome.failedSources.isNotEmpty()) {

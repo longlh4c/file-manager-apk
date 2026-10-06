@@ -116,30 +116,57 @@ class GoogleDriveApiClient @Inject constructor(
         }
 
     private fun toFileItem(f: DriveFile): FileItem {
-        val isDir = f.mimeType == "application/vnd.google-apps.folder"
+        val isShortcut = f.mimeType == "application/vnd.google-apps.shortcut"
+        val shortcutTargetId = if (isShortcut) f.shortcutDetails?.targetId else null
+        val shortcutTargetMime = if (isShortcut) f.shortcutDetails?.targetMimeType else null
+
+        val effectiveMimeType = if (isShortcut && !shortcutTargetMime.isNullOrBlank()) {
+            shortcutTargetMime
+        } else {
+            f.mimeType ?: "*/*"
+        }
+
+        val isDir = effectiveMimeType == "application/vnd.google-apps.folder"
         val rawExt = if (!isDir && f.name.contains(".")) f.name.substringAfterLast(".", "") else ""
         val ext = if (rawExt.isNotBlank() && !rawExt.contains("/")) {
             rawExt
         } else {
-            when (f.mimeType) {
+            when (effectiveMimeType) {
                 "application/vnd.google-apps.document" -> "gdoc"
                 "application/vnd.google-apps.spreadsheet" -> "gsheet"
                 "application/vnd.google-apps.presentation" -> "gslides"
                 "application/vnd.google-apps.form" -> "gform"
+                "application/vnd.google-apps.drawing" -> "gdraw"
+                "application/vnd.google-apps.shortcut" -> "gshortcut"
                 "application/pdf" -> "pdf"
                 else -> ""
             }
         }
+
+        val effectiveId = shortcutTargetId ?: f.id
+        val webViewLink = f.webViewLink?.takeIf { it.isNotBlank() } ?: when (effectiveMimeType) {
+            "application/vnd.google-apps.spreadsheet" -> "https://docs.google.com/spreadsheets/d/$effectiveId/edit"
+            "application/vnd.google-apps.document" -> "https://docs.google.com/document/d/$effectiveId/edit"
+            "application/vnd.google-apps.presentation" -> "https://docs.google.com/presentation/d/$effectiveId/edit"
+            "application/vnd.google-apps.form" -> "https://docs.google.com/forms/d/$effectiveId/viewform"
+            else -> if (effectiveMimeType.startsWith("application/vnd.google-apps.") && !isDir) {
+                "https://drive.google.com/file/d/$effectiveId/view"
+            } else null
+        }
+
+        val itemId = if (isShortcut && isDir && !shortcutTargetId.isNullOrBlank()) shortcutTargetId else f.id
+
         return FileItem(
-            id = f.id,
+            id = itemId,
             name = f.name,
-            path = f.id,
+            path = itemId,
             size = f.getSize() ?: 0L,
             lastModified = f.modifiedTime?.value ?: 0L,
             isDirectory = isDir,
-            mimeType = f.mimeType ?: "*/*",
+            mimeType = effectiveMimeType,
             extension = ext,
-            itemCount = 0
+            itemCount = 0,
+            webViewLink = webViewLink
         )
     }
 
@@ -182,7 +209,7 @@ class GoogleDriveApiClient @Inject constructor(
                 currentCoroutineContext().ensureActive()
                 val result = drive.files().list()
                     .setQ(query)
-                    .setFields("nextPageToken, files(id,name,mimeType,size,modifiedTime)")
+                    .setFields("nextPageToken, files(id,name,mimeType,size,modifiedTime,webViewLink,shortcutDetails)")
                     .setPageSize(200)
                     .setPageToken(pageToken)
                     .setIncludeItemsFromAllDrives(true)
@@ -287,10 +314,22 @@ class GoogleDriveApiClient @Inject constructor(
             val drive = buildDrive(account)
             var meta: DriveFile? = null
             try {
-                meta = drive.files().get(fileId).setFields("id,name,mimeType,size").setSupportsAllDrives(true).execute()
+                meta = drive.files().get(fileId).setFields("id,name,mimeType,size,shortcutDetails").setSupportsAllDrives(true).execute()
                 android.util.Log.d("GoogleDriveApiClient", "get($fileId) meta: name=${meta?.name}, mimeType=${meta?.mimeType}")
             } catch (e: Exception) {
                 android.util.Log.w("GoogleDriveApiClient", "Could not fetch metadata for $fileId: ${e.message}")
+            }
+
+            val isShortcut = meta?.mimeType == "application/vnd.google-apps.shortcut"
+            val actualFileId = if (isShortcut && !meta?.shortcutDetails?.targetId.isNullOrBlank()) {
+                meta!!.shortcutDetails.targetId
+            } else {
+                fileId
+            }
+            val actualMimeType = if (isShortcut && !meta?.shortcutDetails?.targetMimeType.isNullOrBlank()) {
+                meta!!.shortcutDetails.targetMimeType
+            } else {
+                meta?.mimeType ?: ""
             }
 
             val rawName = if (fileName.isNotBlank() && fileName != fileId && fileName != "cloud_file") {
@@ -300,22 +339,21 @@ class GoogleDriveApiClient @Inject constructor(
             }
 
             val safeName = sanitizeLocalFileName(rawName)
-            val mimeType = meta?.mimeType ?: ""
             val totalBytes = meta?.getSize() ?: 0L
             val (actualFileName, exportMimeType) = when {
-                mimeType == "application/vnd.google-apps.document" -> Pair(
+                actualMimeType == "application/vnd.google-apps.document" -> Pair(
                     if (safeName.endsWith(".docx", ignoreCase = true)) safeName else "$safeName.docx",
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
-                mimeType == "application/vnd.google-apps.spreadsheet" -> Pair(
+                actualMimeType == "application/vnd.google-apps.spreadsheet" -> Pair(
                     if (safeName.endsWith(".xlsx", ignoreCase = true)) safeName else "$safeName.xlsx",
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-                mimeType == "application/vnd.google-apps.presentation" -> Pair(
+                actualMimeType == "application/vnd.google-apps.presentation" -> Pair(
                     if (safeName.endsWith(".pptx", ignoreCase = true)) safeName else "$safeName.pptx",
                     "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 )
-                mimeType.startsWith("application/vnd.google-apps.") && !mimeType.contains("folder") -> Pair(
+                actualMimeType.startsWith("application/vnd.google-apps.") && !actualMimeType.contains("folder") -> Pair(
                     if (safeName.endsWith(".pdf", ignoreCase = true)) safeName else "$safeName.pdf",
                     "application/pdf"
                 )
@@ -331,11 +369,11 @@ class GoogleDriveApiClient @Inject constructor(
             var written: File = targetFile
             try {
                 if (exportMimeType != null) {
-                    drive.files().export(fileId, exportMimeType).executeMediaAsInputStream()
+                    drive.files().export(actualFileId, exportMimeType).executeMediaAsInputStream()
                         .use { copyWithProgress(it, targetFile, totalBytes, onProgress) }
                 } else {
                     try {
-                        drive.files().get(fileId).setSupportsAllDrives(true).executeMediaAsInputStream()
+                        drive.files().get(actualFileId).setSupportsAllDrives(true).executeMediaAsInputStream()
                             .use { copyWithProgress(it, targetFile, totalBytes, onProgress) }
                     } catch (e: Exception) {
                         if (e is kotlinx.coroutines.CancellationException) throw e
@@ -344,14 +382,14 @@ class GoogleDriveApiClient @Inject constructor(
                         // too, replacing the real error with a confusing export failure.
                         val msg = e.message.orEmpty()
                         if (!msg.contains("fileNotDownloadable") && !msg.contains("Use Export")) throw e
-                        android.util.Log.i("GoogleDriveApiClient", "Binary download rejected; attempting Google Docs export for $fileId")
+                        android.util.Log.i("GoogleDriveApiClient", "Binary download rejected; attempting Google Docs export for $actualFileId")
                         targetFile.delete()
                         written = if (targetFile.name.contains(".")) targetFile else File(targetFile.parentFile, "${targetFile.name}.docx")
                         if (written.exists()) written.delete()
                         val exportStream = try {
-                            drive.files().export(fileId, "application/vnd.openxmlformats-officedocument.wordprocessingml.document").executeMediaAsInputStream()
+                            drive.files().export(actualFileId, "application/vnd.openxmlformats-officedocument.wordprocessingml.document").executeMediaAsInputStream()
                         } catch (e2: Exception) {
-                            drive.files().export(fileId, "application/pdf").executeMediaAsInputStream()
+                            drive.files().export(actualFileId, "application/pdf").executeMediaAsInputStream()
                         }
                         exportStream.use { copyWithProgress(it, written, totalBytes, onProgress) }
                     }

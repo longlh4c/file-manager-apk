@@ -82,10 +82,22 @@ data class FileItem(
     val appSourceBadge: AppSourceBadge = AppSourceBadge.NONE,
     val folderBadgeType: FolderBadgeType = FolderBadgeType.STANDARD,
     val isHidden: Boolean = false,
-    val isSelected: Boolean = false
+    val isSelected: Boolean = false,
+    val webViewLink: String? = null
 ) {
+    val isGoogleWorkspaceDoc: Boolean
+        get() = (mimeType.startsWith("application/vnd.google-apps.") || extension in setOf("gsheet", "gdoc", "gslides", "gform", "gdraw", "gshortcut")) && !isDirectory
+
     val formattedSize: String
-        get() = formatBytes(size)
+        get() = when {
+            extension == "gsheet" -> "Google Sheets"
+            extension == "gdoc" -> "Google Docs"
+            extension == "gslides" -> "Google Slides"
+            extension == "gform" -> "Google Forms"
+            extension == "gshortcut" -> "Shortcut"
+            isGoogleWorkspaceDoc -> "Google Workspace"
+            else -> formatBytes(size)
+        }
 
     val formattedDate: String
         get() {
