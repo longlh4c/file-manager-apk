@@ -436,7 +436,7 @@
     <span id="phoneModel" style="color: var(--text-secondary);">Android Storage</span>
     <span id="storageBadge" class="storage-pill">
       <svg width="13" height="13" fill="currentColor" viewBox="0 0 24 24"><path d="M2 20h20v-4H2v4zm2-3h2v2H4v-2zM2 4v4h20V4H2zm4 3H4V5h2v2zm-4 7h20v-4H2v4zm2-3h2v2H4v-2z"/></svg>
-      <span id="storageText">Kiểm tra bộ nhớ...</span>
+      <span id="storageText">Checking storage...</span>
     </span>
   </div>
 </header>
@@ -445,11 +445,11 @@
   <div class="disconnect-content">
     <svg class="disconnect-icon" viewBox="0 0 24 24"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
     <div>
-      <div style="font-weight: 700; font-size: 14px;">⚠️ CẢNH BÁO: Chế độ FTP / Web trên điện thoại đã bị tắt hoặc mất kết nối!</div>
-      <div style="font-size: 12px; opacity: 0.95;">Kết nối tới điện thoại đã bị ngắt. Vui lòng bật lại chế độ FTP / Dịch vụ mạng trên điện thoại để tiếp tục sao chép và quản lý tệp.</div>
+      <div style="font-weight: 700; font-size: 14px;">⚠️ WARNING: FTP / Web mode on phone is stopped or disconnected!</div>
+      <div style="font-size: 12px; opacity: 0.95;">Connection to phone lost. Please turn on FTP / Network Service on your phone to continue file operations.</div>
     </div>
   </div>
-  <button class="btn btn-secondary" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.3); color: #fff; padding: 6px 12px; font-size: 12px;" onclick="checkServerStatus(true)">Kiểm tra lại</button>
+  <button class="btn btn-secondary" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.3); color: #fff; padding: 6px 12px; font-size: 12px;" onclick="checkServerStatus(true)">Retry</button>
 </div>
 
 <div class="container">
@@ -523,15 +523,15 @@
 <div class="modal-overlay" id="uploadModal">
   <div class="modal-content" style="max-width: 500px;">
     <div class="modal-header">
-      <div class="modal-title" id="uploadStatusTitle" style="font-size: 16px;">Đang tải lên...</div>
+      <div class="modal-title" id="uploadStatusTitle" style="font-size: 16px;">Uploading...</div>
       <span class="status-badge" id="uploadTotalPercentBadge" style="font-size: 13px; font-weight: 700;">0%</span>
     </div>
 
     <!-- Overall Progress Section -->
     <div style="margin-bottom: 16px;">
       <div style="display:flex; justify-content:space-between; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px;">
-        <span>Tiến trình tổng cộng</span>
-        <span id="uploadTotalMeta" style="font-weight: 600; color: var(--text-primary);">0 / 0 tệp</span>
+        <span>Overall progress</span>
+        <span id="uploadTotalMeta" style="font-weight: 600; color: var(--text-primary);">0 / 0 files</span>
       </div>
       <div class="progress-bar-wrap" style="height: 10px; margin-top: 0;">
         <div class="progress-bar-fill" id="uploadTotalProgressBar" style="width: 0%; background: var(--accent);"></div>
@@ -553,11 +553,11 @@
     <div id="uploadQueueCount" style="display:none; font-size: 12px; color: var(--accent); margin-bottom: 12px; font-weight: 500;"></div>
     <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 16px; display: flex; align-items: center; gap: 6px;">
       <svg width="14" height="14" fill="var(--accent)" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>
-      <span>Mẹo: Kéo thả thêm tệp vào trình duyệt bất cứ lúc nào để thêm vào hàng đợi.</span>
+      <span>Tip: Drag and drop more files or folders anytime to add to queue.</span>
     </div>
 
     <div style="display:flex; justify-content:flex-end;">
-      <button class="btn btn-secondary" style="color: var(--danger); border-color: rgba(239,68,68,0.3);" onclick="cancelUpload()">Hủy tải lên (Cancel)</button>
+      <button class="btn btn-secondary" style="color: var(--danger); border-color: rgba(239,68,68,0.3);" onclick="cancelUpload()">Cancel Upload</button>
     </div>
   </div>
 </div>
@@ -567,14 +567,14 @@
     <div class="modal-header">
       <div class="modal-title" style="color: var(--danger); display: flex; align-items: center; gap: 8px;">
         <svg width="22" height="22" fill="var(--danger)" viewBox="0 0 24 24"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
-        <span id="storageWarningTitle">Cảnh báo dung lượng bộ nhớ</span>
+        <span id="storageWarningTitle">Storage Warning</span>
       </div>
       <button class="icon-btn" onclick="closeModal('storageWarningModal')">&times;</button>
     </div>
     <div id="storageWarningMessage" style="font-size: 14px; line-height: 1.6; color: var(--text-primary); margin-bottom: 20px; white-space: pre-line;"></div>
     <div style="display:flex; justify-content:flex-end; gap: 10px;">
-      <button class="btn btn-secondary" onclick="closeModal('storageWarningModal')">Đóng (Hủy)</button>
-      <button class="btn" id="storageWarningProceedBtn" style="display: none; background: #eab308; color: #000;" onclick="confirmProceedUpload()">Vẫn tiếp tục</button>
+      <button class="btn btn-secondary" onclick="closeModal('storageWarningModal')">Close</button>
+      <button class="btn" id="storageWarningProceedBtn" style="display: none; background: #eab308; color: #000;" onclick="confirmProceedUpload()">Proceed Anyway</button>
     </div>
   </div>
 </div>
@@ -608,7 +608,7 @@
     totalBytes: 0,
     completedBytes: 0,
     currentFileLoadedBytes: 0,
-    currentFile: null,
+    currentItem: null,
     currentXhr: null,
     isCancelled: false
   };
@@ -630,7 +630,7 @@
     } else {
       if (badge) badge.className = 'status-badge offline';
       if (dot) dot.className = 'status-dot offline';
-      if (text) text.innerText = 'Đã ngắt kết nối';
+      if (text) text.innerText = 'Disconnected';
       if (banner) banner.style.display = 'flex';
     }
   }
@@ -653,7 +653,7 @@
         const wasOffline = !isServerOnline;
         setServerOnline(true);
         if (wasOffline && manual) {
-          showToast('Đã kết nối lại thành công với điện thoại!');
+          showToast('Successfully reconnected to phone!');
           loadDirectory(currentPath);
         }
       } else {
@@ -662,7 +662,7 @@
     } catch (e) {
       setServerOnline(false);
       if (manual) {
-        showToast('Không thể kết nối. Chế độ FTP/Web trên điện thoại vẫn đang tắt.');
+        showToast('Cannot connect. FTP/Web mode on phone is currently turned off.');
       }
     }
   }
@@ -679,7 +679,7 @@
     if (storageBadge && storageText) {
       const free = storage.freeBytes || 0;
       const total = storage.totalBytes || 0;
-      storageText.innerText = `Trống: ${formatBytes(free)} / ${formatBytes(total)}`;
+      storageText.innerText = `Free: ${formatBytes(free)} / ${formatBytes(total)}`;
       if (free < 200 * 1024 * 1024) {
         storageBadge.className = 'storage-pill danger';
       } else if (free < 1024 * 1024 * 1024) {
@@ -1052,7 +1052,7 @@
     const titleEl = document.getElementById('storageWarningTitle');
     const msgEl = document.getElementById('storageWarningMessage');
     const proceedBtn = document.getElementById('storageWarningProceedBtn');
-    if (titleEl) titleEl.innerText = 'Cảnh báo dung lượng bộ nhớ';
+    if (titleEl) titleEl.innerText = 'Storage Warning';
     if (msgEl) msgEl.innerText = message;
     if (proceedBtn) {
       proceedBtn.style.display = allowProceed ? 'inline-flex' : 'none';
@@ -1064,73 +1064,77 @@
     const titleEl = document.getElementById('storageWarningTitle');
     const msgEl = document.getElementById('storageWarningMessage');
     const proceedBtn = document.getElementById('storageWarningProceedBtn');
-    if (titleEl) titleEl.innerText = '⚠️ Bộ nhớ trên điện thoại đã đầy!';
+    if (titleEl) titleEl.innerText = '⚠️ Phone storage is full!';
     if (msgEl) {
-      msgEl.innerText = `Không thể sao chép tệp "${fileName}".\n\nỔ lưu trữ trên điện thoại đã đầy dung lượng hoặc không đủ dung lượng để tiếp tục (${errMsg}).\n\nĐã dừng toàn bộ các tệp còn lại trong hàng đợi. Vui lòng giải phóng bớt bộ nhớ trên điện thoại trước khi thử lại.`;
+      msgEl.innerText = `Cannot upload file "${fileName}".\n\nPhone storage is full or has insufficient space to continue (${errMsg}).\n\nAll remaining files in the queue have been stopped. Please free up space on your phone before trying again.`;
     }
     if (proceedBtn) proceedBtn.style.display = 'none';
     openModal('storageWarningModal');
-    checkServerStatus(true);
+    checkServerStatus(false);
   }
 
   function confirmProceedUpload() {
     closeModal('storageWarningModal');
     if (pendingFilesToUpload && pendingFilesToUpload.length > 0) {
-      const files = pendingFilesToUpload;
+      const items = pendingFilesToUpload;
       pendingFilesToUpload = [];
-      enqueueAndStartUpload(files);
+      enqueueAndStartUpload(items);
     }
   }
 
   function handleFileSelect(e) {
     if (e.target.files && e.target.files.length > 0) {
-      handleFilesSelected(e.target.files);
+      const items = Array.from(e.target.files).map(f => ({ file: f, relativeDir: '' }));
+      handleItemsSelected(items);
       e.target.value = '';
     }
   }
 
-  function handleFilesSelected(files) {
-    const fileList = Array.from(files).filter(f => f && f.size !== undefined);
-    if (!fileList.length) return;
+  function handleItemsSelected(items) {
+    const validItems = Array.from(items).filter(it => it && it.file && it.file.size !== undefined);
+    if (!validItems.length) return;
 
-    const totalNewBytes = fileList.reduce((acc, f) => acc + f.size, 0);
+    const totalNewBytes = validItems.reduce((acc, it) => acc + it.file.size, 0);
 
     // Pre-check storage
     if (serverStorage && typeof serverStorage.freeBytes === 'number') {
       const free = serverStorage.freeBytes;
       if (free <= 5 * 1024 * 1024) {
         showStorageWarningModal(
-          `Bộ nhớ trên điện thoại đã đầy (chỉ còn ${formatBytes(free)} trống).\nKhông thể sao chép thêm tệp vào điện thoại lúc này. Vui lòng giải phóng bộ nhớ trên điện thoại trước khi tải lên.`,
+          `Phone storage is full (only ${formatBytes(free)} free).\nCannot copy more files to the phone right now. Please free up space on your phone before uploading.`,
           false
         );
         return;
       }
       if (totalNewBytes > free) {
-        pendingFilesToUpload = fileList;
+        pendingFilesToUpload = validItems;
         showStorageWarningModal(
-          `Cảnh báo: Tổng dung lượng các tệp cần sao chép (${formatBytes(totalNewBytes)}) lớn hơn dung lượng trống hiện có trên điện thoại (${formatBytes(free)}).\n\nQuá trình sao chép có thể sẽ bị dừng khi điện thoại hết dung lượng. Bạn có muốn tiếp tục tải lên không?`,
+          `Warning: Total size of files to upload (${formatBytes(totalNewBytes)}) exceeds current free space on phone (${formatBytes(free)}).\n\nUpload may stop when phone storage runs out. Do you want to proceed anyway?`,
           true
         );
         return;
       }
     }
 
-    enqueueAndStartUpload(fileList);
+    enqueueAndStartUpload(validItems);
   }
 
-  function enqueueAndStartUpload(files) {
+  function enqueueAndStartUpload(items) {
     const isAlreadyUploading = uploadState.isUploading;
 
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      uploadState.queue.push({ file: f, path: currentPath });
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const targetPath = it.relativeDir
+        ? (currentPath ? (currentPath + '/' + it.relativeDir) : it.relativeDir)
+        : currentPath;
+      uploadState.queue.push({ file: it.file, path: targetPath, relativeDir: it.relativeDir || '' });
       uploadState.totalFilesCount++;
-      uploadState.totalBytes += f.size;
+      uploadState.totalBytes += it.file.size;
     }
 
     if (isAlreadyUploading) {
       updateUploadProgressUI();
-      showToast(`Đã thêm ${files.length} tệp vào hàng đợi! Tổng cộng: ${uploadState.totalFilesCount} tệp`);
+      showToast(`Added ${items.length} file(s) to queue! Total: ${uploadState.totalFilesCount} files`);
     } else {
       uploadState.isUploading = true;
       uploadState.isCancelled = false;
@@ -1157,15 +1161,15 @@
     const totalBytes = uploadState.totalBytes || 1;
     const totalPercent = Math.min(100, Math.round((totalLoaded / totalBytes) * 100));
 
-    const currentFile = uploadState.currentFile;
+    const currentItem = uploadState.currentItem;
     const currentLoaded = uploadState.currentFileLoadedBytes;
-    const currentSize = currentFile ? currentFile.size : 1;
-    const filePercent = currentFile ? Math.min(100, Math.round((currentLoaded / currentSize) * 100)) : 0;
+    const currentSize = (currentItem && currentItem.file) ? currentItem.file.size : 1;
+    const filePercent = currentItem ? Math.min(100, Math.round((currentLoaded / currentSize) * 100)) : 0;
 
     const currentFileIndex = Math.min(uploadState.completedFilesCount + 1, uploadState.totalFilesCount);
 
     if (title) {
-      title.innerText = `Đang tải lên: Tệp ${currentFileIndex} / ${uploadState.totalFilesCount} (${totalPercent}%)`;
+      title.innerText = `Uploading: File ${currentFileIndex} / ${uploadState.totalFilesCount} (${totalPercent}%)`;
     }
     if (badge) {
       badge.innerText = `${totalPercent}%`;
@@ -1174,22 +1178,24 @@
       totalBar.style.width = `${totalPercent}%`;
     }
     if (totalMeta) {
-      totalMeta.innerText = `${uploadState.completedFilesCount} / ${uploadState.totalFilesCount} tệp • ${formatBytes(totalLoaded)} / ${formatBytes(totalBytes)}`;
+      totalMeta.innerText = `${uploadState.completedFilesCount} / ${uploadState.totalFilesCount} files • ${formatBytes(totalLoaded)} / ${formatBytes(totalBytes)}`;
     }
-    if (currentNameEl && currentFile) {
-      currentNameEl.innerText = `${currentFile.name}`;
+    if (currentNameEl && currentItem && currentItem.file) {
+      const displayPath = currentItem.relativeDir ? (currentItem.relativeDir + '/' + currentItem.file.name) : currentItem.file.name;
+      currentNameEl.innerText = displayPath;
+      currentNameEl.title = displayPath;
     }
     if (currentBar) {
       currentBar.style.width = `${filePercent}%`;
     }
-    if (currentMeta && currentFile) {
-      currentMeta.innerText = `${formatBytes(currentLoaded)} / ${formatBytes(currentFile.size)} (${filePercent}%)`;
+    if (currentMeta && currentItem && currentItem.file) {
+      currentMeta.innerText = `${formatBytes(currentLoaded)} / ${formatBytes(currentItem.file.size)} (${filePercent}%)`;
     }
     if (queueCountEl) {
       const remaining = uploadState.queue.length;
       if (remaining > 0) {
         queueCountEl.style.display = 'block';
-        queueCountEl.innerText = `+${remaining} tệp đang đợi trong hàng đợi (kéo thả thêm tệp bất kỳ lúc nào)`;
+        queueCountEl.innerText = `+${remaining} file(s) waiting in queue (drag & drop more files or folders anytime)`;
       } else {
         queueCountEl.style.display = 'none';
       }
@@ -1199,7 +1205,7 @@
   async function runUploadLoop() {
     while (uploadState.queue.length > 0 && !uploadState.isCancelled) {
       const item = uploadState.queue.shift();
-      uploadState.currentFile = item.file;
+      uploadState.currentItem = item;
       uploadState.currentFileLoadedBytes = 0;
 
       const file = item.file;
@@ -1228,10 +1234,10 @@
         // General error for this file, skip and continue
         uploadState.completedBytes += file.size;
         uploadState.completedFilesCount++;
-        showToast(`Lỗi khi tải tệp ${file.name}: ${err.message}`);
+        showToast(`Error uploading ${file.name}: ${err.message}`);
       }
 
-      uploadState.currentFile = null;
+      uploadState.currentItem = null;
       uploadState.currentFileLoadedBytes = 0;
       updateUploadProgressUI();
     }
@@ -1241,7 +1247,7 @@
     if (!uploadState.isCancelled) {
       closeModal('uploadModal');
       loadDirectory(currentPath);
-      checkServerStatus(true);
+      checkServerStatus(false);
     }
   }
 
@@ -1285,12 +1291,35 @@
         }
       };
 
-      xhr.onerror = () => {
+      xhr.onerror = async () => {
         uploadState.currentXhr = null;
-        const err = new Error('Network error during upload');
-        err.isDisconnect = true;
-        checkServerStatus(true);
-        reject(err);
+        // Verify if the phone server is actually unreachable or if this was just a local file-read error
+        let reallyDisconnected = false;
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2000);
+          const probe = await fetch('/api/status', {
+            headers: authToken ? { 'X-Auth-Token': authToken } : {},
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
+          if (!probe.ok) {
+            reallyDisconnected = true;
+          }
+        } catch (_) {
+          reallyDisconnected = true;
+        }
+
+        if (reallyDisconnected) {
+          const err = new Error('Connection to phone lost');
+          err.isDisconnect = true;
+          setServerOnline(false);
+          reject(err);
+        } else {
+          const err = new Error('Could not read or upload file');
+          err.isDisconnect = false;
+          reject(err);
+        }
       };
 
       xhr.onabort = () => {
@@ -1304,7 +1333,7 @@
 
   function cancelUpload() {
     if (!uploadState.isUploading) return;
-    if (confirm("Bạn có chắc chắn muốn hủy quá trình tải lên các tệp còn lại không?")) {
+    if (confirm("Are you sure you want to cancel the remaining uploads?")) {
       uploadState.isCancelled = true;
       uploadState.queue = [];
       if (uploadState.currentXhr) {
@@ -1313,7 +1342,7 @@
       uploadState.isUploading = false;
       closeModal('uploadModal');
       loadDirectory(currentPath);
-      showToast("Đã hủy quá trình tải lên");
+      showToast("Upload cancelled");
     }
   }
 
@@ -1333,6 +1362,93 @@
     }, 3000);
   }
 
+  // Recursive directory scanner for Drag & Drop
+  async function scanEntryRecursively(entry, currentSubDir) {
+    if (!entry) return [];
+    if (entry.isFile) {
+      return new Promise((resolve) => {
+        entry.file((file) => {
+          resolve([{ file: file, relativeDir: currentSubDir }]);
+        }, (err) => {
+          console.warn('Error reading file entry:', entry.name, err);
+          resolve([]);
+        });
+      });
+    } else if (entry.isDirectory) {
+      const dirPath = currentSubDir ? (currentSubDir + '/' + entry.name) : entry.name;
+      const reader = entry.createReader();
+      const entries = [];
+
+      const readBatch = () => new Promise((resolve, reject) => {
+        reader.readEntries((batch) => {
+          if (!batch || batch.length === 0) {
+            resolve(entries);
+          } else {
+            entries.push(...batch);
+            readBatch().then(resolve).catch(reject);
+          }
+        }, (err) => {
+          console.warn('Error reading directory entry:', entry.name, err);
+          resolve(entries);
+        });
+      });
+
+      const childEntries = await readBatch();
+      if (childEntries.length === 0) {
+        // Empty folder: create it on the phone immediately
+        try {
+          const parentDir = currentPath ? (currentPath + (currentSubDir ? '/' + currentSubDir : '')) : currentSubDir;
+          const url = '/api/mkdir?path=' + encodeURIComponent(parentDir) + '&name=' + encodeURIComponent(entry.name);
+          await fetch(url, {
+            method: 'POST',
+            headers: authToken ? { 'X-Auth-Token': authToken, 'X-WebShare': '1' } : { 'X-WebShare': '1' }
+          });
+        } catch (_) {}
+        return [];
+      }
+
+      const results = [];
+      for (const child of childEntries) {
+        const subFiles = await scanEntryRecursively(child, dirPath);
+        results.push(...subFiles);
+      }
+      return results;
+    }
+    return [];
+  }
+
+  async function handleDropEvent(dataTransfer) {
+    const items = dataTransfer.items;
+    if (items && items.length > 0 && typeof items[0].webkitGetAsEntry === 'function') {
+      const entryList = [];
+      for (let i = 0; i < items.length; i++) {
+        const entry = items[i].webkitGetAsEntry();
+        if (entry) entryList.push(entry);
+      }
+      if (entryList.length > 0) {
+        showToast('Scanning files and folders...');
+        const collectedFiles = [];
+        for (const entry of entryList) {
+          const scanned = await scanEntryRecursively(entry, '');
+          collectedFiles.push(...scanned);
+        }
+        if (collectedFiles.length > 0) {
+          handleItemsSelected(collectedFiles);
+          return;
+        } else {
+          // Dropped items may have been only empty folder(s) which were created
+          loadDirectory(currentPath);
+          return;
+        }
+      }
+    }
+
+    if (dataTransfer.files && dataTransfer.files.length > 0) {
+      const fallbackList = Array.from(dataTransfer.files).map(f => ({ file: f, relativeDir: '' }));
+      handleItemsSelected(fallbackList);
+    }
+  }
+
   // Drag and drop support
   const dropzone = document.getElementById('dropzone');
   ['dragenter', 'dragover'].forEach(name => {
@@ -1340,9 +1456,9 @@
       e.preventDefault();
       dropzone.classList.add('dragover');
       if (uploadState.isUploading) {
-        dropzone.innerText = "Thả tệp vào đây để thêm vào hàng đợi tải lên!";
+        dropzone.innerText = "Drop files or folders here to add to upload queue!";
       } else {
-        dropzone.innerText = "Kéo và thả các tệp vào đây để tải lên thư mục này";
+        dropzone.innerText = "Drag and drop files or folders here to upload to this directory";
       }
     }, false);
   });
@@ -1350,13 +1466,13 @@
     window.addEventListener(name, (e) => {
       e.preventDefault();
       dropzone.classList.remove('dragover');
-      dropzone.innerText = "Kéo và thả các tệp vào đây để tải lên thư mục này";
+      dropzone.innerText = "Drag and drop files or folders here to upload to this directory";
     }, false);
   });
   window.addEventListener('drop', (e) => {
     e.preventDefault();
-    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleFilesSelected(e.dataTransfer.files);
+    if (e.dataTransfer) {
+      handleDropEvent(e.dataTransfer);
     }
   });
 
