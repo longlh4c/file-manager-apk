@@ -287,7 +287,7 @@ class CloudExplorerViewModel @Inject constructor(
             val cachedAccount = baseAccount?.copy(totalSpaceBytes = cachedTotal, usedSpaceBytes = cachedUsed)
 
             // 2. Try to show cached folder contents immediately (Stale phase)
-            val cached = folderCacheManager.getCloudFolder(accountId, path)
+            val cached = if (forceFullRefresh) null else folderCacheManager.getCloudFolder(accountId, path)
             var skipRevalidate = false
             if (cached != null && cached.files.isNotEmpty()) {
                 val cachedWithThumbs = applyLocalThumbnailCache(cached.files, accountId)
@@ -303,7 +303,7 @@ class CloudExplorerViewModel @Inject constructor(
                     selectedPaths = emptySet(),
                     isSelectionMode = false
                 ) }
-                if (cached.isFresh) {
+                if (cached.isFresh && !forceFullRefresh) {
                     // Already reconciled once this process (see FolderCacheManager.
                     // reconciledOnceKeys) — every mutation invalidates the cache explicitly, so
                     // there's nothing this revalidate would catch that isn't already handled.
@@ -329,7 +329,7 @@ class CloudExplorerViewModel @Inject constructor(
 
             // 3. Revalidate: fetch fresh data from API in background
             if (!skipRevalidate) {
-                launch {
+                launch fetchFiles@ {
                     val result = cloudUseCase.getFiles(accountId, path, forceFullRefresh)
                     if (result.isFailure) {
                         android.util.Log.e("CloudExplorerViewModel", "loadAccountAndFiles: getFiles failed for path='$path' forceFullRefresh=$forceFullRefresh", result.exceptionOrNull())
@@ -349,7 +349,7 @@ class CloudExplorerViewModel @Inject constructor(
                         } else {
                             _uiState.update { old -> old.copy(isLoading = false) }
                         }
-                        return@launch
+                        return@fetchFiles
                     }
                     val rawFilesList = result.getOrDefault(emptyList())
 
@@ -1063,7 +1063,7 @@ class CloudExplorerViewModel @Inject constructor(
         return false
     }
 
-    fun refresh(isManual: Boolean = false) {
+    fun refresh(isManual: Boolean = false, forceFull: Boolean = false) {
         val currentPath = _uiState.value.currentPath
         // forceFullRefresh only matters for Dropbox/MEGA — their tree cache is kept forever until
         // explicitly told otherwise (see MegaApiClient/DropboxApiClient), so a manual pull-to-
@@ -1078,9 +1078,9 @@ class CloudExplorerViewModel @Inject constructor(
         // fetchFolderItemCounts backfills them, and other folders not picking up concurrent
         // changes until they're themselves refreshed).
         val provider = _uiState.value.account?.provider
-        val forceFullRefresh = isManual &&
+        val forceFullRefresh = forceFull || (isManual &&
             (provider == com.antigravity.filemanager.domain.model.CloudProvider.DROPBOX ||
-                provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA)
+                provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA))
         // notify=false: this is this exact screen invalidating its own current folder to re-fetch
         // it — emitting the change signal here would make this screen's own cloudFolderChanges
         // collector (below) see it and call refresh() again, invalidating again, forever.
@@ -1505,9 +1505,61 @@ class CloudExplorerViewModel @Inject constructor(
                         }
                     }
 
-                    _uiState.update { old -> old.copy(
-                        toastMessage = "Successfully resized ${resizedFiles.size} image(s)"
-                    ) }
+                    // Cache new resized files directly into CloudDownloadCache so tapping them opens instantly without re-downloading
+                    val thumbDir = File(context.cacheDir, "cloud_thumbs/$accountId")
+                    val updatedFilesMap = mutableMapOf<String, FileItem>()
+                    for (resized in resizedFiles) {
+                        val newRemotePath = if (currentRemotePath == "/" || currentRemotePath.isBlank()) "/${resized.name}" else "${currentRemotePath.trimEnd('/')}/${resized.name}"
+                        val cacheFile = com.antigravity.filemanager.utils.CloudDownloadCache.fileFor(context, accountId, newRemotePath, resized.name)
+                        try {
+                            cacheFile.parentFile?.mkdirs()
+                            resized.copyTo(cacheFile, overwrite = true)
+                        } catch (e: Exception) {
+                            android.util.Log.w("CloudResize", "Could not copy resized file to download cache", e)
+                        }
+
+                        // Remove old/stale thumbnail caches for this file
+                        val matchingOriginal = imageItems.find { it.name == resized.name || it.name.substringBeforeLast(".") == resized.nameWithoutExtension }
+                        if (matchingOriginal != null) {
+                            val safeOldId = matchingOriginal.id.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                            val safeOldPath = matchingOriginal.path.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                            File(thumbDir, "$safeOldId.jpg").delete()
+                            File(thumbDir, "${matchingOriginal.id}.jpg").delete()
+                            File(thumbDir, "$safeOldPath.jpg").delete()
+                            if (matchingOriginal.path != newRemotePath) {
+                                com.antigravity.filemanager.utils.CloudDownloadCache.dirFor(context, accountId, matchingOriginal.path).deleteRecursively()
+                            }
+                        }
+                        val safeNewPath = newRemotePath.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                        File(thumbDir, "$safeNewPath.jpg").delete()
+
+                        val orig = matchingOriginal ?: FileItem(id = newRemotePath, name = resized.name, path = newRemotePath, isDirectory = false)
+                        updatedFilesMap[resized.name] = orig.copy(
+                            name = resized.name,
+                            path = newRemotePath,
+                            size = resized.length(),
+                            thumbnailUri = if (cacheFile.exists()) cacheFile.absolutePath else resized.absolutePath
+                        )
+                    }
+
+                    // Invalidate Coil memory cache so Coil doesn't keep showing stale image bitmaps
+                    try {
+                        coil.Coil.imageLoader(context).memoryCache?.clear()
+                    } catch (_: Exception) {}
+
+                    // Immediately update UI state in memory
+                    _uiState.update { old ->
+                        val updatedList = old.files.map { item ->
+                            val itemBase = item.name.substringBeforeLast(".")
+                            val replaced = updatedFilesMap[item.name]
+                                ?: updatedFilesMap.values.find { it.name.substringBeforeLast(".") == itemBase }
+                            replaced ?: item
+                        }
+                        old.copy(
+                            files = updatedList,
+                            toastMessage = "Successfully resized ${resizedFiles.size} image(s)"
+                        )
+                    }
                 } else {
                     _uiState.update { old -> old.copy(
                         toastMessage = "Failed to upload resized images: ${uploadResult.exceptionOrNull()?.message}"
@@ -1526,7 +1578,7 @@ class CloudExplorerViewModel @Inject constructor(
                     ) }
                     clearSelection()
                     folderCacheManager.invalidateCloud(accountId, currentRemotePath, notify = false)
-                    loadAccountAndFiles(currentRemotePath, forceFullRefresh = true)
+                    refresh(isManual = true, forceFull = true)
                 }
             }
         }
