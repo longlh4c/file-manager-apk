@@ -1401,6 +1401,8 @@ class CloudExplorerViewModel @Inject constructor(
 
             try {
                 val total = imageItems.size
+                val totalSizeBytes = imageItems.sumOf { it.size }
+                var downloadedBytes = 0L
                 val downloadedFiles = mutableListOf<java.io.File>()
 
                 // 1. Download each selected image
@@ -1408,18 +1410,16 @@ class CloudExplorerViewModel @Inject constructor(
                     kotlinx.coroutines.currentCoroutineContext().ensureActive()
                     if (_uiState.value.transferCancelledByUser) return@launch
 
-                    val percent = if (total > 0) ((index.toFloat() / (total * 2).toFloat()) * 100).toInt().coerceIn(0, 50) else 0
                     _uiState.update { old -> old.copy(
                         downloadProgress = CloudTransferProgress(
                             currentFileName = item.name,
-                            currentIndex = index,
+                            currentIndex = index + 1,
                             totalFiles = total,
-                            bytesTransferred = index.toLong(),
-                            totalBytes = total.toLong(),
+                            bytesTransferred = downloadedBytes,
+                            totalBytes = totalSizeBytes,
                             isIndeterminate = false,
                             isUpload = false,
-                            operationLabel = "Downloading",
-                            percent = percent
+                            operationLabel = "Downloading"
                         )
                     ) }
 
@@ -1427,6 +1427,7 @@ class CloudExplorerViewModel @Inject constructor(
                     val localFile = dlResult.getOrNull()
                     if (localFile != null && localFile.exists()) {
                         downloadedFiles.add(localFile)
+                        downloadedBytes += if (item.size > 0L) item.size else localFile.length()
                     }
                 }
 
@@ -1442,16 +1443,12 @@ class CloudExplorerViewModel @Inject constructor(
                     if (_uiState.value.transferCancelledByUser) return@launch
 
                     _uiState.update { old -> old.copy(
-                        downloadProgress = CloudTransferProgress(
-                            currentFileName = file.name,
-                            currentIndex = index,
+                        downloadProgress = CloudTransferProgress.forItemCount(
+                            currentFile = file.name,
+                            currentIndex = index + 1,
                             totalFiles = downloadedFiles.size,
-                            bytesTransferred = index.toLong(),
-                            totalBytes = downloadedFiles.size.toLong(),
-                            isIndeterminate = false,
-                            isUpload = true,
-                            operationLabel = "Resizing",
-                            percent = 50 + ((index.toFloat() / downloadedFiles.size.toFloat()) * 25).toInt()
+                            isUpload = false,
+                            operationLabel = "Resizing"
                         )
                     ) }
 
@@ -1468,8 +1465,19 @@ class CloudExplorerViewModel @Inject constructor(
                     return@launch
                 }
 
-                // 3. Create remote Resized/ folder if needed
-                cloudUseCase.createFolder(accountId, params.subfolderName, currentRemotePath)
+                // 3. Create remote Resized/ folder if needed (check first to avoid duplicate folders on MEGA / Google Drive)
+                val allFilesInCurrent = if (_uiState.value.searchQuery.isBlank() && _uiState.value.files.isNotEmpty()) {
+                    _uiState.value.files
+                } else {
+                    cloudUseCase.getFiles(accountId, currentRemotePath).getOrDefault(emptyList())
+                }
+                val existingResizedFolder = allFilesInCurrent.firstOrNull { item ->
+                    item.isDirectory && item.name.equals(params.subfolderName, ignoreCase = true)
+                }
+
+                if (existingResizedFolder == null) {
+                    cloudUseCase.createFolder(accountId, params.subfolderName, currentRemotePath)
+                }
 
                 val targetRemoteDir = if (currentRemotePath == "/" || currentRemotePath.isBlank()) {
                     "/${params.subfolderName}"
@@ -1484,7 +1492,6 @@ class CloudExplorerViewModel @Inject constructor(
                     remoteDir = targetRemoteDir
                 ) { currentFile, currentIndex, totalFiles, bytesSent, totalBytes ->
                     if (!this@launch.isActive || _uiState.value.transferCancelledByUser) return@uploadFiles
-                    val percent = if (totalFiles > 0) 75 + ((currentIndex.toFloat() / totalFiles.toFloat()) * 25).toInt().coerceIn(0, 25) else 75
                     _uiState.update { old -> old.copy(
                         downloadProgress = CloudTransferProgress(
                             currentFileName = currentFile,
@@ -1494,8 +1501,7 @@ class CloudExplorerViewModel @Inject constructor(
                             totalBytes = totalBytes,
                             isIndeterminate = false,
                             isUpload = true,
-                            operationLabel = "Uploading",
-                            percent = percent
+                            operationLabel = "Uploading"
                         )
                     ) }
                 }

@@ -1423,18 +1423,13 @@ class CategoriesViewModel @Inject constructor(
                     params = params
                 ) { currentFile, currentIndex, totalFiles ->
                     if (!this@launch.isActive || _uiState.value.transferCancelledByUser) return@resizeImages
-                    val percent = if (totalFiles > 0) ((currentIndex.toFloat() / totalFiles.toFloat()) * 100).toInt().coerceIn(0, 100) else 0
                     _uiState.update { old -> old.copy(
-                        downloadProgress = CloudTransferProgress(
-                            currentFileName = currentFile,
+                        downloadProgress = CloudTransferProgress.forItemCount(
+                            currentFile = currentFile,
                             currentIndex = currentIndex,
                             totalFiles = totalFiles,
-                            bytesTransferred = currentIndex.toLong(),
-                            totalBytes = totalFiles.toLong(),
-                            isIndeterminate = false,
-                            isUpload = true,
-                            operationLabel = "Resizing",
-                            percent = percent
+                            isUpload = false,
+                            operationLabel = "Resizing"
                         )
                     ) }
                 }.onSuccess { resizedPaths ->

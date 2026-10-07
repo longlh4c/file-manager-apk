@@ -2349,6 +2349,7 @@ fun CloudDownloadProgressDialog(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = when {
+                        operationLabel == "Resizing" -> Icons.Default.PhotoSizeSelectLarge
                         operationLabel != null -> if (isUpload) Icons.Default.FolderZip else Icons.Default.Unarchive
                         isUpload -> Icons.Default.CloudUpload
                         else -> Icons.Default.CloudDownload
