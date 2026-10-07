@@ -111,4 +111,39 @@ class ImageResizerEngineTest {
         val file3 = ImageResizerEngine.resolveUniqueDestinationFile(rootDir, "photo", "jpg")
         assertEquals("photo (2).jpg", file3.name)
     }
+
+    @Test
+    fun estimateFileSize_calculatesExpectedApproximations() {
+        val originalSize = 10_000_000L // 10 MB
+
+        // 50% scale -> pixelRatio = 0.25 -> 2.5 MB (quality 85)
+        val size50 = ImageResizerEngine.estimateFileSize(originalSize, 50, 85, com.antigravity.filemanager.domain.model.OutputImageFormat.ORIGINAL)
+        assertEquals(2_500_000L, size50)
+
+        // 100% scale -> pixelRatio = 1.0 -> 10 MB (quality 85)
+        val size100 = ImageResizerEngine.estimateFileSize(originalSize, 100, 85, com.antigravity.filemanager.domain.model.OutputImageFormat.JPEG)
+        assertEquals(10_000_000L, size100)
+
+        // WebP format should apply 0.8 multiplier
+        val sizeWebP = ImageResizerEngine.estimateFileSize(originalSize, 50, 85, com.antigravity.filemanager.domain.model.OutputImageFormat.WEBP)
+        assertEquals(2_000_000L, sizeWebP)
+
+        // PNG format should apply 1.5 multiplier
+        val sizePng = ImageResizerEngine.estimateFileSize(originalSize, 50, 85, com.antigravity.filemanager.domain.model.OutputImageFormat.PNG)
+        assertEquals(3_750_000L, sizePng)
+
+        // Zero original size
+        assertEquals(0L, ImageResizerEngine.estimateFileSize(0L, 50))
+    }
+
+    @Test
+    fun calculateTargetDimensions_percentageOverload() {
+        val (w, h) = ImageResizerEngine.calculateTargetDimensions(1920, 1080, 50)
+        assertEquals(960, w)
+        assertEquals(540, h)
+
+        val (w75, h75) = ImageResizerEngine.calculateTargetDimensions(2000, 1000, 75)
+        assertEquals(1500, w75)
+        assertEquals(750, h75)
+    }
 }

@@ -68,6 +68,39 @@ object ImageResizerEngine {
     fun calculateTargetDimensions(
         origWidth: Int,
         origHeight: Int,
+        percentage: Int
+    ): Pair<Int, Int> {
+        if (origWidth <= 0 || origHeight <= 0) return 1 to 1
+        val scale = percentage.coerceIn(1, 1000) / 100.0
+        val targetW = (origWidth * scale).roundToInt().coerceAtLeast(1)
+        val targetH = (origHeight * scale).roundToInt().coerceAtLeast(1)
+        return targetW to targetH
+    }
+
+    fun estimateFileSize(
+        originalSizeBytes: Long,
+        percentage: Int,
+        quality: Int = 85,
+        format: OutputImageFormat = OutputImageFormat.ORIGINAL
+    ): Long {
+        if (originalSizeBytes <= 0L) return 0L
+        val scale = percentage.coerceIn(1, 100) / 100.0
+        val pixelRatio = scale * scale
+        val qualityRatio = (quality.coerceIn(10, 100) / 85.0).coerceIn(0.2, 1.3)
+        val formatMultiplier = when (format) {
+            OutputImageFormat.WEBP -> 0.8
+            OutputImageFormat.PNG -> 1.5
+            OutputImageFormat.JPEG, OutputImageFormat.ORIGINAL -> 1.0
+        }
+        val estimated = (originalSizeBytes * pixelRatio * qualityRatio * formatMultiplier).toLong()
+        val minBound = minOf(128L, originalSizeBytes)
+        val maxBound = maxOf(minBound, originalSizeBytes * 3)
+        return estimated.coerceIn(minBound, maxBound)
+    }
+
+    fun calculateTargetDimensions(
+        origWidth: Int,
+        origHeight: Int,
         params: ImageResizeParams
     ): Pair<Int, Int> {
         if (origWidth <= 0 || origHeight <= 0) return 1 to 1

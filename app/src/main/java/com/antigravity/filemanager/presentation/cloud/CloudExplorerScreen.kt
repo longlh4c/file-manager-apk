@@ -151,9 +151,11 @@ fun CloudExplorerScreen(
         val selectedIds = uiState.selectedPaths
         val selectedItems = filteredFiles.filter { it.id in selectedIds || it.path in selectedIds }
         val imageItems = selectedItems.filter { !it.isDirectory && com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it.name) }
+        val totalSize = imageItems.sumOf { it.size }
         com.antigravity.filemanager.presentation.components.ImageResizerDialog(
             totalSelectedCount = selectedItems.size,
             validImagesCount = imageItems.size,
+            totalSizeBytes = totalSize,
             singleImageDimensions = uiState.singleImageDimensions,
             isCloud = true,
             cloudAccountProviderName = uiState.account?.provider?.name,

@@ -218,9 +218,15 @@ fun MediaCategoriesScreen(
     if (uiState.showImageResizerDialog) {
         val selected = uiState.selectedPaths.toList()
         val imageFiles = selected.filter { com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it) }
+        val totalSize = imageFiles.sumOf { path ->
+            uiState.subfolderFiles.firstOrNull { it.path == path }?.size
+                ?: uiState.searchResults.firstOrNull { it.path == path }?.size
+                ?: java.io.File(path).length()
+        }
         com.antigravity.filemanager.presentation.components.ImageResizerDialog(
             totalSelectedCount = selected.size,
             validImagesCount = imageFiles.size,
+            totalSizeBytes = totalSize,
             singleImageDimensions = uiState.singleImageDimensions,
             isCloud = false,
             onConfirm = { params -> viewModel.resizeSelectedImages(params) },
