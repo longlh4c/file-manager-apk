@@ -215,6 +215,19 @@ fun MediaCategoriesScreen(
         )
     }
 
+    if (uiState.showImageResizerDialog) {
+        val selected = uiState.selectedPaths.toList()
+        val imageFiles = selected.filter { com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it) }
+        com.antigravity.filemanager.presentation.components.ImageResizerDialog(
+            totalSelectedCount = selected.size,
+            validImagesCount = imageFiles.size,
+            singleImageDimensions = uiState.singleImageDimensions,
+            isCloud = false,
+            onConfirm = { params -> viewModel.resizeSelectedImages(params) },
+            onDismiss = { viewModel.dismissImageResizer() }
+        )
+    }
+
     val title = when (category) {
         CategoryType.IMAGES -> "Images"
         CategoryType.AUDIO -> "Audio"
@@ -506,6 +519,17 @@ fun MediaCategoriesScreen(
                                         viewModel.setShowCompressDialog(true)
                                     }
                                 )
+                                val imageCount = uiState.selectedPaths.count { com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it) }
+                                if (imageCount > 0) {
+                                    DropdownMenuItem(
+                                        text = { Text(if (imageCount == 1) "Resize Image" else "Resize Images", color = TextPrimary) },
+                                        leadingIcon = { Icon(Icons.Default.PhotoSizeSelectLarge, contentDescription = null, tint = TealPrimary) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            viewModel.openImageResizer()
+                                        }
+                                    )
+                                }
                                 DropdownMenuItem(
                                     text = { Text("Open with", color = TextPrimary) },
                                     leadingIcon = { Icon(Icons.Default.OpenInBrowser, contentDescription = null, tint = TextPrimary) },

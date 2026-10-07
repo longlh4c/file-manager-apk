@@ -95,7 +95,9 @@ data class CategoryUiState(
     val toastMessage: String? = null,
     val overwriteConflicts: List<com.antigravity.filemanager.domain.model.OverwriteConflict> = emptyList(),
     val downloadProgress: CloudTransferProgress? = null,
-    val transferCancelledByUser: Boolean = false
+    val transferCancelledByUser: Boolean = false,
+    val showImageResizerDialog: Boolean = false,
+    val singleImageDimensions: com.antigravity.filemanager.domain.model.ImageDimensions? = null
 ) {
     val currentSubfolderPath: String?
         get() = folderHistory.lastOrNull()?.first
@@ -1378,5 +1380,80 @@ class CategoriesViewModel @Inject constructor(
 
     fun setShowDeleteDialog(show: Boolean) {
         _uiState.update { old -> old.copy(showDeleteDialog = show) }
+    }
+
+    fun openImageResizer() {
+        val selected = _uiState.value.selectedPaths.toList()
+        val imageFiles = selected.filter { com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it) }
+        if (imageFiles.isEmpty()) return
+
+        val singleDim = if (imageFiles.size == 1) {
+            com.antigravity.filemanager.utils.ImageResizerEngine.getImageDimensions(imageFiles[0])
+        } else null
+
+        _uiState.update { old -> old.copy(
+            showImageResizerDialog = true,
+            singleImageDimensions = singleDim
+        ) }
+    }
+
+    fun dismissImageResizer() {
+        _uiState.update { old -> old.copy(
+            showImageResizerDialog = false,
+            singleImageDimensions = null
+        ) }
+    }
+
+    fun resizeSelectedImages(params: com.antigravity.filemanager.domain.model.ImageResizeParams) {
+        val selected = _uiState.value.selectedPaths.toList()
+        val imageFiles = selected.filter { com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it) }
+        val targetDir = _uiState.value.currentSubfolderPath
+            ?: imageFiles.firstOrNull()?.let { File(it).parent }
+            ?: return
+
+        dismissImageResizer()
+        if (imageFiles.isEmpty()) return
+
+        activeTransferJob?.cancel()
+        activeTransferJob = viewModelScope.launch {
+            try {
+                fileOperationsUseCase.resizeImages(
+                    sourcePaths = imageFiles,
+                    targetParentDir = targetDir,
+                    params = params
+                ) { currentFile, currentIndex, totalFiles ->
+                    if (!this@launch.isActive || _uiState.value.transferCancelledByUser) return@resizeImages
+                    val percent = if (totalFiles > 0) ((currentIndex.toFloat() / totalFiles.toFloat()) * 100).toInt().coerceIn(0, 100) else 0
+                    _uiState.update { old -> old.copy(
+                        downloadProgress = CloudTransferProgress(
+                            currentFileName = currentFile,
+                            currentIndex = currentIndex,
+                            totalFiles = totalFiles,
+                            bytesTransferred = currentIndex.toLong(),
+                            totalBytes = totalFiles.toLong(),
+                            isIndeterminate = false,
+                            isUpload = true,
+                            operationLabel = "Resizing",
+                            percent = percent
+                        )
+                    ) }
+                }.onSuccess { resizedPaths ->
+                    _uiState.update { old -> old.copy(
+                        toastMessage = "Successfully resized ${resizedPaths.size} image(s) to 'Resized' folder"
+                    ) }
+                }.onFailure { e ->
+                    _uiState.update { old -> old.copy(toastMessage = "Resize failed: ${e.message}") }
+                }
+            } finally {
+                withContext(NonCancellable) {
+                    _uiState.update { old -> old.copy(
+                        downloadProgress = null,
+                        transferCancelledByUser = false
+                    ) }
+                    clearSelection()
+                    refresh()
+                }
+            }
+        }
     }
 }

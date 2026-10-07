@@ -466,6 +466,14 @@ class FileRepositoryImpl @Inject constructor(
             extension = if (isDir) "" else f.extension
         )
     }
+
+    override suspend fun resizeImages(
+        sourcePaths: List<String>,
+        targetParentDir: String,
+        params: com.antigravity.filemanager.domain.model.ImageResizeParams,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)?
+    ): Result<List<String>> =
+        operationsHelper.resizeImages(sourcePaths, targetParentDir, params, onProgress)
 }
 
 @Singleton

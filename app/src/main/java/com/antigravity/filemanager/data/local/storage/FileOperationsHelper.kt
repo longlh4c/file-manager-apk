@@ -1330,6 +1330,44 @@ class FileOperationsHelper @Inject constructor(
             try { zipFile.close() } catch (_: Exception) {}
         }
     }
+
+    suspend fun resizeImages(
+        sourcePaths: List<String>,
+        targetParentDir: String,
+        params: com.antigravity.filemanager.domain.model.ImageResizeParams,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
+        try {
+            val validImageFiles = sourcePaths.map { File(it) }
+                .filter { com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it) && it.exists() }
+
+            if (validImageFiles.isEmpty()) {
+                return@withContext Result.failure(IOException("No valid image files found to resize"))
+            }
+
+            val targetDir = File(targetParentDir, params.subfolderName)
+            if (!targetDir.exists()) {
+                targetDir.mkdirs()
+            }
+
+            val resizedPaths = mutableListOf<String>()
+            val total = validImageFiles.size
+
+            validImageFiles.forEachIndexed { index, file ->
+                currentCoroutineContext().ensureActive()
+                onProgress?.invoke(file.name, index, total)
+                val resizedFile = com.antigravity.filemanager.utils.ImageResizerEngine.resizeFile(file, targetDir, params)
+                resizedPaths.add(resizedFile.absolutePath)
+                onProgress?.invoke(resizedFile.name, index + 1, total)
+            }
+
+            scanMedia(resizedPaths)
+            Result.success(resizedPaths)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Result.failure(e)
+        }
+    }
 }
 
 private object DiscardingOutputStream : java.io.OutputStream() {

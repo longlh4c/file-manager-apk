@@ -25,6 +25,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -88,7 +89,9 @@ data class CloudExplorerUiState(
     // this ViewModel being recreated) — cancelling doesn't stop in-flight parallel workers
     // instantly, so one of them can still emit a late progress update and resurrect the dialog
     // right after it was dismissed. While this is true, that mirror is ignored.
-    val transferCancelledByUser: Boolean = false
+    val transferCancelledByUser: Boolean = false,
+    val showImageResizerDialog: Boolean = false,
+    val singleImageDimensions: com.antigravity.filemanager.domain.model.ImageDimensions? = null
 ) {
     /** True when browsing inside a provider's real trash/rubbish bin (Google Drive's "/Trash" or
      * MEGA's "/Rubbish Bin" virtual root entries, or any folder nested under them) — the
@@ -1361,6 +1364,168 @@ class CloudExplorerViewModel @Inject constructor(
 
     fun setShowEmptyTrashDialog(show: Boolean) {
         _uiState.update { old -> old.copy(showEmptyTrashDialog = show) }
+    }
+
+    fun openImageResizer() {
+        val allItems = if (_uiState.value.searchQuery.isBlank()) _uiState.value.files else _uiState.value.searchResults
+        val selectedItems = allItems.filter { it.id in _uiState.value.selectedPaths || it.path in _uiState.value.selectedPaths }
+        val imageItems = selectedItems.filter { !it.isDirectory && com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it.name) }
+        if (imageItems.isEmpty()) return
+
+        _uiState.update { old -> old.copy(
+            showImageResizerDialog = true,
+            singleImageDimensions = null
+        ) }
+    }
+
+    fun dismissImageResizer() {
+        _uiState.update { old -> old.copy(
+            showImageResizerDialog = false,
+            singleImageDimensions = null
+        ) }
+    }
+
+    fun resizeSelectedImages(params: com.antigravity.filemanager.domain.model.ImageResizeParams) {
+        val currentRemotePath = _uiState.value.currentPath
+        val allItems = if (_uiState.value.searchQuery.isBlank()) _uiState.value.files else _uiState.value.searchResults
+        val selectedItems = allItems.filter { it.id in _uiState.value.selectedPaths || it.path in _uiState.value.selectedPaths }
+        val imageItems = selectedItems.filter { !it.isDirectory && com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it.name) }
+
+        dismissImageResizer()
+        if (imageItems.isEmpty()) return
+
+        activeTransferJob?.cancel()
+        activeTransferJob = viewModelScope.launch {
+            val tempDir = java.io.File(context.cacheDir, "cloud_resize_${System.currentTimeMillis()}").apply { mkdirs() }
+            val tempResizedDir = java.io.File(tempDir, params.subfolderName).apply { mkdirs() }
+
+            try {
+                val total = imageItems.size
+                val downloadedFiles = mutableListOf<java.io.File>()
+
+                // 1. Download each selected image
+                for ((index, item) in imageItems.withIndex()) {
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    if (_uiState.value.transferCancelledByUser) return@launch
+
+                    val percent = if (total > 0) ((index.toFloat() / (total * 2).toFloat()) * 100).toInt().coerceIn(0, 50) else 0
+                    _uiState.update { old -> old.copy(
+                        downloadProgress = CloudTransferProgress(
+                            currentFileName = item.name,
+                            currentIndex = index,
+                            totalFiles = total,
+                            bytesTransferred = index.toLong(),
+                            totalBytes = total.toLong(),
+                            isIndeterminate = false,
+                            isUpload = false,
+                            operationLabel = "Downloading",
+                            percent = percent
+                        )
+                    ) }
+
+                    val dlResult = cloudUseCase.downloadFile(accountId, item.path, tempDir.absolutePath)
+                    val localFile = dlResult.getOrNull()
+                    if (localFile != null && localFile.exists()) {
+                        downloadedFiles.add(localFile)
+                    }
+                }
+
+                if (downloadedFiles.isEmpty()) {
+                    _uiState.update { old -> old.copy(toastMessage = "Failed to download selected images from Cloud") }
+                    return@launch
+                }
+
+                // 2. Resize each downloaded image
+                val resizedFiles = mutableListOf<java.io.File>()
+                for ((index, file) in downloadedFiles.withIndex()) {
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    if (_uiState.value.transferCancelledByUser) return@launch
+
+                    _uiState.update { old -> old.copy(
+                        downloadProgress = CloudTransferProgress(
+                            currentFileName = file.name,
+                            currentIndex = index,
+                            totalFiles = downloadedFiles.size,
+                            bytesTransferred = index.toLong(),
+                            totalBytes = downloadedFiles.size.toLong(),
+                            isIndeterminate = false,
+                            isUpload = true,
+                            operationLabel = "Resizing",
+                            percent = 50 + ((index.toFloat() / downloadedFiles.size.toFloat()) * 25).toInt()
+                        )
+                    ) }
+
+                    try {
+                        val resized = com.antigravity.filemanager.utils.ImageResizerEngine.resizeFile(file, tempResizedDir, params)
+                        resizedFiles.add(resized)
+                    } catch (e: Exception) {
+                        android.util.Log.e("CloudResize", "Error resizing ${file.name}", e)
+                    }
+                }
+
+                if (resizedFiles.isEmpty()) {
+                    _uiState.update { old -> old.copy(toastMessage = "No images were resized successfully") }
+                    return@launch
+                }
+
+                // 3. Create remote Resized/ folder if needed
+                cloudUseCase.createFolder(accountId, params.subfolderName, currentRemotePath)
+
+                val targetRemoteDir = if (currentRemotePath == "/" || currentRemotePath.isBlank()) {
+                    "/${params.subfolderName}"
+                } else {
+                    "${currentRemotePath.trimEnd('/')}/${params.subfolderName}"
+                }
+
+                // 4. Upload resized images
+                val uploadResult = cloudUseCase.uploadFiles(
+                    accountId = accountId,
+                    localPaths = resizedFiles.map { it.absolutePath },
+                    remoteDir = targetRemoteDir
+                ) { currentFile, currentIndex, totalFiles, bytesSent, totalBytes ->
+                    if (!this@launch.isActive || _uiState.value.transferCancelledByUser) return@uploadFiles
+                    val percent = if (totalFiles > 0) 75 + ((currentIndex.toFloat() / totalFiles.toFloat()) * 25).toInt().coerceIn(0, 25) else 75
+                    _uiState.update { old -> old.copy(
+                        downloadProgress = CloudTransferProgress(
+                            currentFileName = currentFile,
+                            currentIndex = currentIndex,
+                            totalFiles = totalFiles,
+                            bytesTransferred = bytesSent,
+                            totalBytes = totalBytes,
+                            isIndeterminate = false,
+                            isUpload = true,
+                            operationLabel = "Uploading",
+                            percent = percent
+                        )
+                    ) }
+                }
+
+                if (uploadResult.isSuccess) {
+                    _uiState.update { old -> old.copy(
+                        toastMessage = "Successfully resized ${resizedFiles.size} image(s) to 'Resized' folder on Cloud"
+                    ) }
+                } else {
+                    _uiState.update { old -> old.copy(
+                        toastMessage = "Failed to upload resized images: ${uploadResult.exceptionOrNull()?.message}"
+                    ) }
+                }
+            } catch (e: Exception) {
+                if (e !is kotlinx.coroutines.CancellationException) {
+                    _uiState.update { old -> old.copy(toastMessage = "Cloud resize failed: ${e.message}") }
+                }
+            } finally {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    tempDir.deleteRecursively()
+                    _uiState.update { old -> old.copy(
+                        downloadProgress = null,
+                        transferCancelledByUser = false
+                    ) }
+                    clearSelection()
+                    folderCacheManager.invalidateCloud(accountId, currentRemotePath, notify = false)
+                    loadAccountAndFiles(currentRemotePath, forceFullRefresh = true)
+                }
+            }
+        }
     }
 
     fun createFolder(folderName: String) {

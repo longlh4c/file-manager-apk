@@ -239,6 +239,19 @@ class FileOperationsUseCase @Inject constructor(
             }
         }
 
+    suspend fun resizeImages(
+        sourcePaths: List<String>,
+        targetParentDir: String,
+        params: com.antigravity.filemanager.domain.model.ImageResizeParams,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
+    ): Result<List<String>> =
+        fileRepository.resizeImages(sourcePaths, targetParentDir, params, onProgress).also {
+            if (it.isSuccess) {
+                folderCacheManager.invalidateMediaFolders()
+                mediaChangeSignal.notifyChanged()
+            }
+        }
+
     suspend fun getArchiveConflicts(
         archivePath: String,
         targetDir: String,

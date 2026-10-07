@@ -94,6 +94,12 @@ interface IFileRepository {
         password: String?
     ): Result<List<java.io.File>>
     suspend fun getFileDetails(filePath: String): FileItem?
+    suspend fun resizeImages(
+        sourcePaths: List<String>,
+        targetParentDir: String,
+        params: com.antigravity.filemanager.domain.model.ImageResizeParams,
+        onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
+    ): Result<List<String>>
 }
 
 interface IRecycleBinRepository {

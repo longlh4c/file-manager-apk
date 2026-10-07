@@ -143,6 +143,25 @@ fun CloudExplorerScreen(
         )
     }
 
+    // Search results come recursively from the ViewModel (this folder + every subfolder), not a
+    // plain filter of the current listing — see CloudExplorerViewModel.onSearchQueryChanged.
+    val filteredFiles = if (uiState.searchQuery.isBlank()) uiState.files else uiState.searchResults
+
+    if (uiState.showImageResizerDialog) {
+        val selectedIds = uiState.selectedPaths
+        val selectedItems = filteredFiles.filter { it.id in selectedIds || it.path in selectedIds }
+        val imageItems = selectedItems.filter { !it.isDirectory && com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it.name) }
+        com.antigravity.filemanager.presentation.components.ImageResizerDialog(
+            totalSelectedCount = selectedItems.size,
+            validImagesCount = imageItems.size,
+            singleImageDimensions = uiState.singleImageDimensions,
+            isCloud = true,
+            cloudAccountProviderName = uiState.account?.provider?.name,
+            onConfirm = { params -> viewModel.resizeSelectedImages(params) },
+            onDismiss = { viewModel.dismissImageResizer() }
+        )
+    }
+
     if (uiState.showEmptyTrashDialog) {
         DeleteConfirmDialog(
             itemCount = uiState.files.size,
@@ -162,10 +181,6 @@ fun CloudExplorerScreen(
             keyboardController?.show()
         }
     }
-
-    // Search results come recursively from the ViewModel (this folder + every subfolder), not a
-    // plain filter of the current listing — see CloudExplorerViewModel.onSearchQueryChanged.
-    val filteredFiles = if (uiState.searchQuery.isBlank()) uiState.files else uiState.searchResults
 
     Scaffold(
         topBar = {
@@ -412,6 +427,18 @@ fun CloudExplorerScreen(
                                     modifier = Modifier.weight(1f)
                                 )
                             }
+                            val selectedIds = uiState.selectedPaths
+                            val selectedItems = filteredFiles.filter { it.id in selectedIds || it.path in selectedIds }
+                            val imageCount = selectedItems.count { !it.isDirectory && com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it.name) }
+                            if (imageCount > 0) {
+                                BottomBarActionItem(
+                                    icon = Icons.Default.PhotoSizeSelectLarge,
+                                    label = "Resize",
+                                    tint = TealPrimary,
+                                    onClick = { viewModel.openImageResizer() },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
                             BottomBarActionItem(
                                 icon = Icons.Default.Delete,
                                 label = "Delete",
@@ -424,9 +451,7 @@ fun CloudExplorerScreen(
                                 label = "Properties",
                                 tint = TextPrimary,
                                 onClick = {
-                                    val selectedIds = uiState.selectedPaths
-                                    val items = filteredFiles.filter { it.id in selectedIds || it.path in selectedIds }
-                                    viewModel.showPropertiesForSelection(items)
+                                    viewModel.showPropertiesForSelection(selectedItems)
                                 },
                                 modifier = Modifier.weight(1f)
                             )
