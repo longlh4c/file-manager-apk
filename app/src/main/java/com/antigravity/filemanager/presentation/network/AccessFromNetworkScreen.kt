@@ -51,7 +51,6 @@ fun AccessFromNetworkScreen(
     val scrollState = rememberScrollState()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
-    var showStopConfirmDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(uiState.copiedMessage) {
         uiState.copiedMessage?.let { message ->
@@ -235,11 +234,7 @@ fun AccessFromNetworkScreen(
             // START / STOP SERVICE Button
             Button(
                 onClick = {
-                    if (uiState.isRunning) {
-                        showStopConfirmDialog = true
-                    } else {
-                        viewModel.toggleService()
-                    }
+                    viewModel.toggleService()
                 },
                 shape = RoundedCornerShape(8.dp),
                 colors = ButtonDefaults.buttonColors(
@@ -257,53 +252,6 @@ fun AccessFromNetworkScreen(
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.8.sp
-                )
-            }
-
-            if (showStopConfirmDialog) {
-                AlertDialog(
-                    onDismissRequest = { showStopConfirmDialog = false },
-                    title = {
-                        Text(
-                            text = "Cảnh báo tắt dịch vụ",
-                            fontWeight = FontWeight.Bold,
-                            color = TextPrimary
-                        )
-                    },
-                    text = {
-                        Text(
-                            text = "Dịch vụ FTP và Web Browser đang hoạt động. Việc tắt dịch vụ sẽ ngắt kết nối với máy tính và dừng tất cả quá trình truyền/sao chép tệp đang diễn ra.\n\nBạn có chắc chắn muốn tắt?",
-                            color = TextSecondary,
-                            fontSize = 14.sp,
-                            lineHeight = 20.sp
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                showStopConfirmDialog = false
-                                viewModel.toggleService()
-                            }
-                        ) {
-                            Text(
-                                text = "Tắt dịch vụ",
-                                color = PastelCoral,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(
-                            onClick = { showStopConfirmDialog = false }
-                        ) {
-                            Text(
-                                text = "Hủy",
-                                color = TextSecondary
-                            )
-                        }
-                    },
-                    containerColor = DarkCard,
-                    shape = RoundedCornerShape(12.dp)
                 )
             }
 
