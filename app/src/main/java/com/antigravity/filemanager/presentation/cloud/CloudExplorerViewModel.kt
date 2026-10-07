@@ -1397,8 +1397,6 @@ class CloudExplorerViewModel @Inject constructor(
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
             val tempDir = java.io.File(context.cacheDir, "cloud_resize_${System.currentTimeMillis()}").apply { mkdirs() }
-            val tempResizedDir = java.io.File(tempDir, params.subfolderName).apply { mkdirs() }
-
             try {
                 val total = imageItems.size
                 val totalSizeBytes = imageItems.sumOf { it.size }
@@ -1436,7 +1434,7 @@ class CloudExplorerViewModel @Inject constructor(
                     return@launch
                 }
 
-                // 2. Resize each downloaded image
+                // 2. Resize each downloaded image in place
                 val resizedFiles = mutableListOf<java.io.File>()
                 for ((index, file) in downloadedFiles.withIndex()) {
                     kotlinx.coroutines.currentCoroutineContext().ensureActive()
@@ -1453,7 +1451,12 @@ class CloudExplorerViewModel @Inject constructor(
                     ) }
 
                     try {
-                        val resized = com.antigravity.filemanager.utils.ImageResizerEngine.resizeFile(file, tempResizedDir, params)
+                        val resized = com.antigravity.filemanager.utils.ImageResizerEngine.resizeFile(
+                            sourceFile = file,
+                            targetDir = tempDir,
+                            params = params,
+                            overwrite = true
+                        )
                         resizedFiles.add(resized)
                     } catch (e: Exception) {
                         android.util.Log.e("CloudResize", "Error resizing ${file.name}", e)
@@ -1465,31 +1468,12 @@ class CloudExplorerViewModel @Inject constructor(
                     return@launch
                 }
 
-                // 3. Create remote Resized/ folder if needed (check first to avoid duplicate folders on MEGA / Google Drive)
-                val allFilesInCurrent = if (_uiState.value.searchQuery.isBlank() && _uiState.value.files.isNotEmpty()) {
-                    _uiState.value.files
-                } else {
-                    cloudUseCase.getFiles(accountId, currentRemotePath).getOrDefault(emptyList())
-                }
-                val existingResizedFolder = allFilesInCurrent.firstOrNull { item ->
-                    item.isDirectory && item.name.equals(params.subfolderName, ignoreCase = true)
-                }
-
-                if (existingResizedFolder == null) {
-                    cloudUseCase.createFolder(accountId, params.subfolderName, currentRemotePath)
-                }
-
-                val targetRemoteDir = if (currentRemotePath == "/" || currentRemotePath.isBlank()) {
-                    "/${params.subfolderName}"
-                } else {
-                    "${currentRemotePath.trimEnd('/')}/${params.subfolderName}"
-                }
-
-                // 4. Upload resized images
+                // 3. Upload resized images directly back to currentRemotePath, overwriting originals
                 val uploadResult = cloudUseCase.uploadFiles(
                     accountId = accountId,
                     localPaths = resizedFiles.map { it.absolutePath },
-                    remoteDir = targetRemoteDir
+                    remoteDir = currentRemotePath,
+                    overwriteNames = resizedFiles.map { it.name }.toSet()
                 ) { currentFile, currentIndex, totalFiles, bytesSent, totalBytes ->
                     if (!this@launch.isActive || _uiState.value.transferCancelledByUser) return@uploadFiles
                     _uiState.update { old -> old.copy(
@@ -1507,8 +1491,22 @@ class CloudExplorerViewModel @Inject constructor(
                 }
 
                 if (uploadResult.isSuccess) {
+                    // If format conversion changed extension (e.g. .png -> .jpg), delete the old file with different extension
+                    val newNames = resizedFiles.map { it.name }.toSet()
+                    val newBaseNames = resizedFiles.map { it.nameWithoutExtension }.toSet()
+                    for (item in imageItems) {
+                        val itemBaseName = item.name.substringBeforeLast(".")
+                        if (item.name !in newNames && itemBaseName in newBaseNames) {
+                            try {
+                                cloudUseCase.deleteItem(accountId, item.path, moveToTrash = false)
+                            } catch (e: Exception) {
+                                android.util.Log.w("CloudResize", "Could not remove old format file ${item.name}", e)
+                            }
+                        }
+                    }
+
                     _uiState.update { old -> old.copy(
-                        toastMessage = "Successfully resized ${resizedFiles.size} image(s) to 'Resized' folder on Cloud"
+                        toastMessage = "Successfully resized ${resizedFiles.size} image(s)"
                     ) }
                 } else {
                     _uiState.update { old -> old.copy(

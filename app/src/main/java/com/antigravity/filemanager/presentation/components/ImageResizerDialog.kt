@@ -322,14 +322,14 @@ fun ImageResizerDialog(
                     }
                 }
 
-                // Destination Note
+                // Overwrite Notice
                 Text(
                     text = if (isCloud) {
-                        "Output will be saved to: Resized/ folder on ${cloudAccountProviderName ?: "Cloud"}"
+                        "Warning: Original file(s) on ${cloudAccountProviderName ?: "Cloud"} will be directly overwritten."
                     } else {
-                        "Output will be saved to: Resized/ subfolder"
+                        "Warning: Original file(s) will be directly overwritten."
                     },
-                    color = TextSecondary,
+                    color = Color(0xFFFFD54F),
                     fontSize = 12.sp
                 )
             }
@@ -341,8 +341,7 @@ fun ImageResizerDialog(
                         mode = ImageResizeMode.PERCENTAGE,
                         percentage = percentage.toInt().coerceIn(1, 100),
                         quality = quality.toInt().coerceIn(1, 100),
-                        format = selectedFormat,
-                        subfolderName = "Resized"
+                        format = selectedFormat
                     )
                     onConfirm(params)
                 },

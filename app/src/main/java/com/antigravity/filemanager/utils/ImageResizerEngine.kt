@@ -151,7 +151,12 @@ object ImageResizerEngine {
         return candidate
     }
 
-    fun resizeFile(sourceFile: File, targetDir: File, params: ImageResizeParams): File {
+    fun resizeFile(
+        sourceFile: File,
+        targetDir: File = sourceFile.parentFile ?: sourceFile,
+        params: ImageResizeParams,
+        overwrite: Boolean = true
+    ): File {
         if (!sourceFile.exists()) {
             throw IOException("Source file does not exist: ${sourceFile.path}")
         }
@@ -280,15 +285,44 @@ object ImageResizerEngine {
         }
 
         val baseName = sourceFile.nameWithoutExtension
-        val destFile = resolveUniqueDestinationFile(targetDir, baseName, outExt)
+        val destFile = if (overwrite) {
+            File(targetDir, "$baseName.$outExt")
+        } else {
+            resolveUniqueDestinationFile(targetDir, baseName, outExt)
+        }
+
+        val tempOutput = File(targetDir, ".tmp_resize_${System.currentTimeMillis()}_$baseName.$outExt")
 
         try {
-            FileOutputStream(destFile).use { fos ->
+            FileOutputStream(tempOutput).use { fos ->
                 finalBitmap.compress(compressFormat, params.quality.coerceIn(1, 100), fos)
                 fos.flush()
             }
+
+            if (overwrite) {
+                if (destFile.exists()) {
+                    destFile.delete()
+                }
+                val renamed = tempOutput.renameTo(destFile)
+                if (!renamed) {
+                    tempOutput.copyTo(destFile, overwrite = true)
+                    tempOutput.delete()
+                }
+                if (sourceFile.absolutePath != destFile.absolutePath && sourceFile.exists()) {
+                    sourceFile.delete()
+                }
+            } else {
+                val renamed = tempOutput.renameTo(destFile)
+                if (!renamed) {
+                    tempOutput.copyTo(destFile, overwrite = true)
+                    tempOutput.delete()
+                }
+            }
         } finally {
             finalBitmap.recycle()
+            if (tempOutput.exists()) {
+                tempOutput.delete()
+            }
         }
 
         return destFile

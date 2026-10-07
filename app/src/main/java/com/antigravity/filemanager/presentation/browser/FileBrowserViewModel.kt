@@ -1499,7 +1499,7 @@ class FileBrowserViewModel @Inject constructor(
                     ) }
                 }.onSuccess { resizedPaths ->
                     _uiState.update { old -> old.copy(
-                        toastMessage = "Successfully resized ${resizedPaths.size} image(s) to 'Resized' folder"
+                        toastMessage = "Successfully resized ${resizedPaths.size} image(s)"
                     ) }
                 }.onFailure { e ->
                     _uiState.update { old -> old.copy(toastMessage = "Resize failed: ${e.message}") }

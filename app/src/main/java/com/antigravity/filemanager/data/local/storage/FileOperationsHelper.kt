@@ -1345,23 +1345,30 @@ class FileOperationsHelper @Inject constructor(
                 return@withContext Result.failure(IOException("No valid image files found to resize"))
             }
 
-            val targetDir = File(targetParentDir, params.subfolderName)
-            if (!targetDir.exists()) {
-                targetDir.mkdirs()
-            }
-
             val resizedPaths = mutableListOf<String>()
+            val mediaScanPaths = mutableListOf<String>()
             val total = validImageFiles.size
 
             validImageFiles.forEachIndexed { index, file ->
                 currentCoroutineContext().ensureActive()
                 onProgress?.invoke(file.name, index, total)
-                val resizedFile = com.antigravity.filemanager.utils.ImageResizerEngine.resizeFile(file, targetDir, params)
+                val originalPath = file.absolutePath
+                val targetDir = file.parentFile ?: File(targetParentDir)
+                val resizedFile = com.antigravity.filemanager.utils.ImageResizerEngine.resizeFile(
+                    sourceFile = file,
+                    targetDir = targetDir,
+                    params = params,
+                    overwrite = true
+                )
                 resizedPaths.add(resizedFile.absolutePath)
+                mediaScanPaths.add(resizedFile.absolutePath)
+                if (originalPath != resizedFile.absolutePath) {
+                    mediaScanPaths.add(originalPath)
+                }
                 onProgress?.invoke(resizedFile.name, index + 1, total)
             }
 
-            scanMedia(resizedPaths)
+            scanMedia(mediaScanPaths)
             Result.success(resizedPaths)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
