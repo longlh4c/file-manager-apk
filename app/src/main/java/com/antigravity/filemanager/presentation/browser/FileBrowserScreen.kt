@@ -261,23 +261,6 @@ fun FileBrowserScreen(
         )
     }
 
-    if (uiState.showImageResizerDialog) {
-        val selected = uiState.selectedPaths.toList()
-        val imageFiles = selected.filter { com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it) }
-        val totalSize = imageFiles.sumOf { path ->
-            uiState.files.firstOrNull { it.path == path }?.size ?: java.io.File(path).length()
-        }
-        com.antigravity.filemanager.presentation.components.ImageResizerDialog(
-            totalSelectedCount = selected.size,
-            validImagesCount = imageFiles.size,
-            totalSizeBytes = totalSize,
-            singleImageDimensions = uiState.singleImageDimensions,
-            isCloud = false,
-            onConfirm = { params -> viewModel.resizeSelectedImages(params) },
-            onDismiss = { viewModel.dismissImageResizer() }
-        )
-    }
-
     if (uiState.showPropertiesDialog) {
         SelectionPropertiesDialog(
             items = uiState.propertiesItems,
@@ -561,17 +544,6 @@ fun FileBrowserScreen(
                                         viewModel.setShowCompressDialog(true)
                                     }
                                 )
-                                val imageCount = uiState.selectedPaths.count { com.antigravity.filemanager.utils.ImageResizerEngine.isImageFile(it) }
-                                if (imageCount > 0) {
-                                    DropdownMenuItem(
-                                        text = { Text(if (imageCount == 1) "Resize Image" else "Resize Images", color = TextPrimary) },
-                                        leadingIcon = { Icon(Icons.Default.PhotoSizeSelectLarge, contentDescription = null, tint = TealPrimary) },
-                                        onClick = {
-                                            showMoreMenu = false
-                                            viewModel.openImageResizer()
-                                        }
-                                    )
-                                }
                                 // Open with
                                 DropdownMenuItem(
                                     text = { Text("Open with", color = TextPrimary) },

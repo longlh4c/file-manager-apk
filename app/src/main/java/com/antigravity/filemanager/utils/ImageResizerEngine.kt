@@ -14,6 +14,8 @@ import com.antigravity.filemanager.domain.model.OutputImageFormat
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -151,11 +153,95 @@ object ImageResizerEngine {
         return candidate
     }
 
+    fun extractOriginalCreationDate(file: File, fallbackTimestamp: Long = 0L): Long {
+        if (file.exists()) {
+            try {
+                val exif = ExifInterface(file.absolutePath)
+                val dateStr = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+                    ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
+                    ?: exif.getAttribute(ExifInterface.TAG_DATETIME_DIGITIZED)
+                if (!dateStr.isNullOrBlank()) {
+                    val sdf = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.ROOT)
+                    val parsed = sdf.parse(dateStr)?.time
+                    if (parsed != null && parsed > 0L) {
+                        return parsed
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        if (fallbackTimestamp > 0L) {
+            return fallbackTimestamp
+        }
+        val mtime = file.lastModified()
+        return if (mtime > 0L) mtime else System.currentTimeMillis()
+    }
+
+    private fun copyExifAndTimestamp(sourceFile: File, targetFile: File, customTimestamp: Long? = null) {
+        val targetTimestamp = customTimestamp?.takeIf { it > 0L }
+            ?: extractOriginalCreationDate(sourceFile)
+
+        try {
+            val sourceExif = ExifInterface(sourceFile.absolutePath)
+            val destExif = ExifInterface(targetFile.absolutePath)
+
+            val tagsToCopy = arrayOf(
+                ExifInterface.TAG_DATETIME,
+                ExifInterface.TAG_DATETIME_ORIGINAL,
+                ExifInterface.TAG_DATETIME_DIGITIZED,
+                ExifInterface.TAG_SUBSEC_TIME,
+                ExifInterface.TAG_GPS_DATESTAMP,
+                ExifInterface.TAG_GPS_TIMESTAMP,
+                ExifInterface.TAG_GPS_LATITUDE,
+                ExifInterface.TAG_GPS_LATITUDE_REF,
+                ExifInterface.TAG_GPS_LONGITUDE,
+                ExifInterface.TAG_GPS_LONGITUDE_REF,
+                ExifInterface.TAG_GPS_ALTITUDE,
+                ExifInterface.TAG_GPS_ALTITUDE_REF,
+                ExifInterface.TAG_MAKE,
+                ExifInterface.TAG_MODEL,
+                ExifInterface.TAG_FOCAL_LENGTH,
+                ExifInterface.TAG_F_NUMBER,
+                ExifInterface.TAG_EXPOSURE_TIME,
+                ExifInterface.TAG_WHITE_BALANCE,
+                ExifInterface.TAG_FLASH
+            )
+
+            for (tag in tagsToCopy) {
+                val value = sourceExif.getAttribute(tag)
+                if (!value.isNullOrBlank()) {
+                    destExif.setAttribute(tag, value)
+                }
+            }
+
+            // Ensure original date is present in EXIF tags
+            if (targetTimestamp > 0L) {
+                val sdf = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.ROOT)
+                val dateStr = sdf.format(Date(targetTimestamp))
+                if (destExif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL).isNullOrBlank()) {
+                    destExif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, dateStr)
+                }
+                if (destExif.getAttribute(ExifInterface.TAG_DATETIME).isNullOrBlank()) {
+                    destExif.setAttribute(ExifInterface.TAG_DATETIME, dateStr)
+                }
+            }
+
+            destExif.saveAttributes()
+        } catch (_: Exception) {
+            // Some file formats might not support all EXIF attributes
+        }
+
+        if (targetTimestamp > 0L) {
+            targetFile.setLastModified(targetTimestamp)
+        }
+    }
+
     fun resizeFile(
         sourceFile: File,
         targetDir: File = sourceFile.parentFile ?: sourceFile,
         params: ImageResizeParams,
-        overwrite: Boolean = true
+        overwrite: Boolean = true,
+        customTimestamp: Long? = null
     ): File {
         if (!sourceFile.exists()) {
             throw IOException("Source file does not exist: ${sourceFile.path}")
@@ -299,6 +385,8 @@ object ImageResizerEngine {
                 fos.flush()
             }
 
+            copyExifAndTimestamp(sourceFile, tempOutput, customTimestamp)
+
             if (overwrite) {
                 if (destFile.exists()) {
                     destFile.delete()
@@ -317,6 +405,12 @@ object ImageResizerEngine {
                     tempOutput.copyTo(destFile, overwrite = true)
                     tempOutput.delete()
                 }
+            }
+
+            val finalTimestamp = customTimestamp?.takeIf { it > 0L }
+                ?: extractOriginalCreationDate(sourceFile)
+            if (finalTimestamp > 0L) {
+                destFile.setLastModified(finalTimestamp)
             }
         } finally {
             finalBitmap.recycle()

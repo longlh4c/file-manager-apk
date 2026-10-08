@@ -439,6 +439,9 @@ class GoogleDriveApiClient @Inject constructor(
             val metadata = DriveFile().apply {
                 name = localFile.name
                 parents = listOf(effectiveParent)
+                if (localFile.lastModified() > 0) {
+                    modifiedTime = com.google.api.client.util.DateTime(localFile.lastModified())
+                }
             }
             // execute() blocks until the whole file is sent, so cancelling the coroutine left the
             // upload running to the end. Reading through a stream that checks the job stops it.

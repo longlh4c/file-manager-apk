@@ -155,7 +155,8 @@ class DropboxApiClient @Inject constructor(
         val cached = cachedTree(accountId) ?: return
         val path = metadata.pathDisplay ?: return
         val parent = path.substringBeforeLast('/', "")
-        val entry = DropboxEntry(path, parent, metadata.name, false, metadata.size, metadata.serverModified.time, metadata.id)
+        val modTime = metadata.clientModified.time
+        val entry = DropboxEntry(path, parent, metadata.name, false, metadata.size, modTime, metadata.id)
         // WriteMode.OVERWRITE means a re-upload of an existing name reuses the same path, so drop
         // any stale entry for that path before adding the fresh one.
         val updated = cached.entries.filterNot { it.path.equals(path, ignoreCase = true) } + entry
@@ -328,7 +329,7 @@ class DropboxApiClient @Inject constructor(
         val parent = p.substringBeforeLast('/', "")
         return when (meta) {
             is FolderMetadata -> DropboxEntry(p, parent, meta.name, true, 0L, 0L, meta.id)
-            is FileMetadata -> DropboxEntry(p, parent, meta.name, false, meta.size, meta.serverModified.time, meta.id)
+            is FileMetadata -> DropboxEntry(p, parent, meta.name, false, meta.size, meta.clientModified.time, meta.id)
             else -> null
         }
     }
@@ -504,7 +505,7 @@ class DropboxApiClient @Inject constructor(
                         name = metadata.name,
                         path = metadata.pathDisplay ?: "/${metadata.name}",
                         size = metadata.size,
-                        lastModified = metadata.serverModified.time,
+                        lastModified = metadata.clientModified.time,
                         isDirectory = false,
                         extension = metadata.name.substringAfterLast(".", "")
                     )
@@ -639,11 +640,14 @@ class DropboxApiClient @Inject constructor(
             try {
                 val metadata = progressStream.use { input ->
                     if (totalBytes <= SINGLE_UPLOAD_LIMIT) {
-                        client.files().uploadBuilder(targetPath)
+                        val uploadBuilder = client.files().uploadBuilder(targetPath)
                             .withMode(WriteMode.OVERWRITE)
                             .withAutorename(false)
                             .withMute(false)
-                            .uploadAndFinish(input)
+                        if (localFile.lastModified() > 0) {
+                            uploadBuilder.withClientModified(java.util.Date(localFile.lastModified()))
+                        }
+                        uploadBuilder.uploadAndFinish(input)
                     } else {
                         // /upload rejects anything over 150 MB outright; bigger files have to go
                         // through an upload session, one chunk per request.
@@ -653,11 +657,14 @@ class DropboxApiClient @Inject constructor(
                             client.files().uploadSessionAppendV2(UploadSessionCursor(sessionId, offset)).uploadAndFinish(input, UPLOAD_CHUNK_SIZE)
                             offset += UPLOAD_CHUNK_SIZE
                         }
-                        val commit = CommitInfo.newBuilder(targetPath)
+                        val commitBuilder = CommitInfo.newBuilder(targetPath)
                             .withMode(WriteMode.OVERWRITE)
                             .withAutorename(false)
                             .withMute(false)
-                            .build()
+                        if (localFile.lastModified() > 0) {
+                            commitBuilder.withClientModified(java.util.Date(localFile.lastModified()))
+                        }
+                        val commit = commitBuilder.build()
                         client.files().uploadSessionFinish(UploadSessionCursor(sessionId, offset), commit)
                             .uploadAndFinish(input, totalBytes - offset)
                     }

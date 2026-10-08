@@ -125,7 +125,8 @@ class MegaApiClient @Inject constructor(
         name: String,
         size: Long,
         encodedKey: String,
-        fileAttrStr: String
+        fileAttrStr: String,
+        timestamp: Long = System.currentTimeMillis()
     ) {
         val cached = nodeTreeCache[accountId] ?: return
         val newNode = MegaNode(
@@ -133,7 +134,7 @@ class MegaApiClient @Inject constructor(
             parentHandle = parentHandle,
             type = 0,
             size = size,
-            timestamp = System.currentTimeMillis(), // fetched nodes carry milliseconds too
+            timestamp = timestamp, // fetched nodes carry milliseconds too
             name = name,
             keyStr = encodedKey,
             fileAttrStr = fileAttrStr
@@ -1515,6 +1516,9 @@ class MegaApiClient @Inject constructor(
                 put("t", 0)
                 put("a", encodedAttr)
                 put("k", encodedKey)
+                if (localFile.lastModified() > 0) {
+                    put("ts", localFile.lastModified() / 1000)
+                }
                 if (faField != null) put("fa", faField)
             }
             val createNodeCommand = JSONArray().apply {
@@ -1549,7 +1553,8 @@ class MegaApiClient @Inject constructor(
                     name = localFile.name,
                     size = totalBytes,
                     encodedKey = encodedKey,
-                    fileAttrStr = faField ?: ""
+                    fileAttrStr = faField ?: "",
+                    timestamp = if (localFile.lastModified() > 0) localFile.lastModified() else System.currentTimeMillis()
                 )
                 realHandle
             }
@@ -1561,7 +1566,7 @@ class MegaApiClient @Inject constructor(
                     name = localFile.name,
                     path = nodeHandle,
                     size = totalBytes,
-                    lastModified = System.currentTimeMillis(),
+                    lastModified = if (localFile.lastModified() > 0) localFile.lastModified() else System.currentTimeMillis(),
                     isDirectory = false,
                     extension = localFile.extension
                 )

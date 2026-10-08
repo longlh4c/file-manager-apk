@@ -1424,6 +1424,10 @@ class CloudExplorerViewModel @Inject constructor(
                     val dlResult = cloudUseCase.downloadFile(accountId, item.path, tempDir.absolutePath)
                     val localFile = dlResult.getOrNull()
                     if (localFile != null && localFile.exists()) {
+                        val origTime = com.antigravity.filemanager.utils.ImageResizerEngine.extractOriginalCreationDate(localFile, item.lastModified)
+                        if (origTime > 0L) {
+                            localFile.setLastModified(origTime)
+                        }
                         downloadedFiles.add(localFile)
                         downloadedBytes += if (item.size > 0L) item.size else localFile.length()
                     }
@@ -1450,12 +1454,16 @@ class CloudExplorerViewModel @Inject constructor(
                         )
                     ) }
 
+                    val matchingItem = imageItems.find { it.name == file.name }
+                    val originalDate = com.antigravity.filemanager.utils.ImageResizerEngine.extractOriginalCreationDate(file, matchingItem?.lastModified ?: 0L)
+
                     try {
                         val resized = com.antigravity.filemanager.utils.ImageResizerEngine.resizeFile(
                             sourceFile = file,
                             targetDir = tempDir,
                             params = params,
-                            overwrite = true
+                            overwrite = true,
+                            customTimestamp = originalDate
                         )
                         resizedFiles.add(resized)
                     } catch (e: Exception) {
@@ -1509,17 +1517,22 @@ class CloudExplorerViewModel @Inject constructor(
                     val thumbDir = File(context.cacheDir, "cloud_thumbs/$accountId")
                     val updatedFilesMap = mutableMapOf<String, FileItem>()
                     for (resized in resizedFiles) {
+                        val matchingOriginal = imageItems.find { it.name == resized.name || it.name.substringBeforeLast(".") == resized.nameWithoutExtension }
+                        val originalDate = com.antigravity.filemanager.utils.ImageResizerEngine.extractOriginalCreationDate(resized, matchingOriginal?.lastModified ?: 0L)
+
                         val newRemotePath = if (currentRemotePath == "/" || currentRemotePath.isBlank()) "/${resized.name}" else "${currentRemotePath.trimEnd('/')}/${resized.name}"
                         val cacheFile = com.antigravity.filemanager.utils.CloudDownloadCache.fileFor(context, accountId, newRemotePath, resized.name)
                         try {
                             cacheFile.parentFile?.mkdirs()
                             resized.copyTo(cacheFile, overwrite = true)
+                            if (originalDate > 0L) {
+                                cacheFile.setLastModified(originalDate)
+                            }
                         } catch (e: Exception) {
                             android.util.Log.w("CloudResize", "Could not copy resized file to download cache", e)
                         }
 
                         // Remove old/stale thumbnail caches for this file
-                        val matchingOriginal = imageItems.find { it.name == resized.name || it.name.substringBeforeLast(".") == resized.nameWithoutExtension }
                         if (matchingOriginal != null) {
                             val safeOldId = matchingOriginal.id.replace(Regex("[^A-Za-z0-9._-]"), "_")
                             val safeOldPath = matchingOriginal.path.replace(Regex("[^A-Za-z0-9._-]"), "_")
@@ -1538,6 +1551,7 @@ class CloudExplorerViewModel @Inject constructor(
                             name = resized.name,
                             path = newRemotePath,
                             size = resized.length(),
+                            lastModified = originalDate,
                             thumbnailUri = if (cacheFile.exists()) cacheFile.absolutePath else resized.absolutePath
                         )
                     }

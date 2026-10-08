@@ -1006,7 +1006,7 @@ class TeraBoxApiClient @Inject constructor(
         path = targetPath,
         size = size,
         isDirectory = false,
-        lastModified = System.currentTimeMillis(),
+        lastModified = if (localFile.lastModified() > 0) localFile.lastModified() else System.currentTimeMillis(),
         extension = localFile.extension
     )
 
