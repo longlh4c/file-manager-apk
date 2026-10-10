@@ -226,12 +226,79 @@
   .item-row {
     cursor: pointer;
   }
+  th.select-cell, td.select-cell {
+    width: 44px;
+    padding-right: 0;
+  }
+  .select-cell input {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--accent);
+  }
+  tr.selected td {
+    background: rgba(45, 212, 191, 0.10);
+  }
+  tr.selected:hover td {
+    background: rgba(45, 212, 191, 0.16);
+  }
+  .selection-bar {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    background: rgba(45, 212, 191, 0.10);
+    border: 1px solid rgba(45, 212, 191, 0.35);
+    border-radius: 8px;
+    font-size: 14px;
+  }
+  .selection-bar.open { display: flex; }
+  .selection-bar .selection-count {
+    font-weight: 600;
+    margin-right: auto;
+  }
+  .btn-danger {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+  }
+  .btn-danger:hover {
+    background: rgba(239, 68, 68, 0.12);
+  }
+  .conflict-list {
+    list-style: none;
+    max-height: 200px;
+    overflow-y: auto;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin-bottom: 18px;
+    font-size: 13px;
+  }
+  .conflict-list li {
+    padding: 3px 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .item-name-cell {
     display: flex;
     align-items: center;
     gap: 12px;
     color: var(--text-primary);
     font-weight: 500;
+    min-width: 0;
+  }
+  /* The name column takes whatever width is left, and a long name is cut with an ellipsis
+     instead of pushing the other columns off screen. */
+  td.name-td {
+    width: 100%;
+    max-width: 0;
+  }
+  #fileTableBody td:nth-child(3) {
+    white-space: nowrap;
   }
   .item-icon {
     width: 22px;
@@ -482,10 +549,24 @@
     Drag and drop files here to upload to this directory
   </div>
 
+  <div class="selection-bar" id="selectionBar">
+    <span class="selection-count" id="selectionCount">0 selected</span>
+    <button class="btn btn-secondary" onclick="downloadSelected()">
+      <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/></svg>
+      Download
+    </button>
+    <button class="btn btn-danger" onclick="deleteSelected()">
+      <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+      Delete
+    </button>
+    <button class="btn btn-secondary" onclick="clearSelection()">Clear</button>
+  </div>
+
   <div class="file-table-container">
     <table>
       <thead>
         <tr>
+          <th class="select-cell"><input type="checkbox" id="selectAllCheckbox" title="Select all" onclick="toggleSelectAll(this.checked)"></th>
           <th class="sortable sorted" id="th-name" onclick="handleSort('name')">
             Name <span class="sort-indicator" id="sort-icon-name">▲</span>
           </th>
@@ -499,7 +580,7 @@
         </tr>
       </thead>
       <tbody id="fileTableBody">
-        <tr><td colspan="4" class="empty-state">Loading files...</td></tr>
+        <tr><td colspan="5" class="empty-state">Loading files...</td></tr>
       </tbody>
     </table>
   </div>
@@ -579,6 +660,23 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="conflictModal">
+  <div class="modal-content" style="max-width: 480px;">
+    <div class="modal-header">
+      <div class="modal-title" id="conflictTitle">File already exists</div>
+      <button class="icon-btn" title="Cancel upload" onclick="resolveConflict(null)">&times;</button>
+    </div>
+    <div id="conflictMessage" style="font-size: 14px; line-height: 1.6; margin-bottom: 12px;"></div>
+    <ul class="conflict-list" id="conflictList"></ul>
+    <div style="display:flex; justify-content:flex-end; gap: 8px; flex-wrap: wrap;">
+      <button class="btn btn-secondary" onclick="resolveConflict(null)">Cancel</button>
+      <button class="btn btn-secondary" id="conflictSkipBtn" onclick="resolveConflict('skip')">Skip</button>
+      <button class="btn btn-secondary" onclick="resolveConflict('keep')">Keep both</button>
+      <button class="btn" onclick="resolveConflict('overwrite')">Overwrite</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="previewModal">
   <div class="modal-content" style="max-width: 800px;">
     <div class="modal-header">
@@ -599,6 +697,12 @@
   let isServerOnline = true;
   let serverStorage = null;
   let pendingFilesToUpload = [];
+  // Paths of the checked rows, and the rows as last rendered (for shift-click ranges).
+  const selectedPaths = new Set();
+  let renderedPaths = [];
+  let renderedItems = [];
+  let lastToggledIndex = -1;
+  let conflictResolver = null;
 
   const uploadState = {
     isUploading: false,
@@ -783,12 +887,13 @@
   }
 
   async function loadDirectory(path) {
+    if (path !== currentPath) clearSelection();
     currentPath = path;
     const searchInput = document.getElementById('searchInput');
     if (searchInput) searchInput.value = '';
     updateBreadcrumbs(path);
     const tbody = document.getElementById('fileTableBody');
-    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Loading files...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Loading files...</td></tr>';
 
     try {
       const res = await fetch('/api/list?path=' + encodeURIComponent(path), {
@@ -813,7 +918,7 @@
       if (e.message && (e.message.includes('Failed to fetch') || e.message.includes('NetworkError'))) {
         setServerOnline(false);
       }
-      tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="color:var(--danger)">Error loading directory: ' + escapeHtml(String(e.message)) + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state" style="color:var(--danger)">Error loading directory: ' + escapeHtml(String(e.message)) + '</td></tr>';
     }
   }
 
@@ -831,10 +936,18 @@
     const items = sortList(filteredItems);
     const query = (document.getElementById('searchInput')?.value || '').trim();
 
+    // Keep only the checked items still on screen (a reload or a search changes what's shown).
+    renderedItems = items;
+    renderedPaths = items.map(item => item.path || (currentPath ? currentPath + '/' + item.name : item.name));
+    const shown = new Set(renderedPaths);
+    [...selectedPaths].forEach(p => { if (!shown.has(p)) selectedPaths.delete(p); });
+    lastToggledIndex = -1;
+    updateSelectionUI();
+
     if (!items || items.length === 0) {
       tbody.innerHTML = query
-        ? `<tr><td colspan="4" class="empty-state">No files found matching "${escapeHtml(query)}"</td></tr>`
-        : '<tr><td colspan="4" class="empty-state">This folder is empty</td></tr>';
+        ? `<tr><td colspan="5" class="empty-state">No files found matching "${escapeHtml(query)}"</td></tr>`
+        : '<tr><td colspan="5" class="empty-state">This folder is empty</td></tr>';
       return;
     }
 
@@ -845,10 +958,11 @@
       const parentPath = currentPath.includes('/') ? currentPath.substring(0, currentPath.lastIndexOf('/')) : "";
       html += `
         <tr class="item-row" onclick="navigateTo('${escapeJs(parentPath)}')">
-          <td class="item-name-cell">
+          <td class="select-cell"></td>
+          <td class="name-td"><div class="item-name-cell">
             <svg class="item-icon" fill="var(--accent)" viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
             <span>.. (Parent Folder)</span>
-          </td>
+          </div></td>
           <td>-</td>
           <td>-</td>
           <td></td>
@@ -856,21 +970,25 @@
       `;
     }
 
-    items.forEach(item => {
-      const itemPath = item.path || (currentPath ? currentPath + '/' + item.name : item.name);
+    items.forEach((item, index) => {
+      const itemPath = renderedPaths[index];
       const downloadUrl = downloadUrlFor(itemPath);
       const isMedia = isPreviewable(item.name);
       const isSubfolderItem = isSearching && item.path && item.path.includes('/') && item.path !== (currentPath ? currentPath + '/' + item.name : item.name);
+      const isSelected = selectedPaths.has(itemPath);
 
       html += `
-        <tr class="item-row">
-          <td class="item-name-cell" onclick="${item.isDir ? `navigateTo('${escapeJs(itemPath)}')` : (isMedia ? `previewFile('${escapeJs(item.name)}', '${escapeJs(itemPath)}')` : `downloadFile('${escapeJs(itemPath)}')`)}">
+        <tr class="item-row${isSelected ? ' selected' : ''}" data-index="${index}">
+          <td class="select-cell" onclick="event.stopPropagation(); toggleSelect(${index}, event)">
+            <input type="checkbox" ${isSelected ? 'checked' : ''} aria-label="Select ${escapeHtml(item.name)}">
+          </td>
+          <td class="name-td" onclick="${item.isDir ? `navigateTo('${escapeJs(itemPath)}')` : (isMedia ? `previewFile('${escapeJs(item.name)}', '${escapeJs(itemPath)}')` : `downloadFile('${escapeJs(itemPath)}')`)}"><div class="item-name-cell">
             ${getIcon(item)}
             <div style="display:flex; flex-direction:column; gap:2px; min-width:0; overflow:hidden;">
               <span style="text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">${escapeHtml(item.name)}</span>
               ${isSubfolderItem ? `<span style="font-size:11px; color:var(--text-secondary); opacity:0.8; text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">📁 ${escapeHtml(item.path)}</span>` : ''}
             </div>
-          </td>
+          </div></td>
           <td>${item.isDir ? '-' : formatBytes(item.size)}</td>
           <td>${formatDate(item.lastModified)}</td>
           <td>
@@ -951,7 +1069,7 @@
 
   async function executeSubfolderSearch(query) {
     const tbody = document.getElementById('fileTableBody');
-    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Searching subfolders...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Searching subfolders...</td></tr>';
 
     try {
       const res = await fetch(`/api/search?path=${encodeURIComponent(currentPath)}&q=${encodeURIComponent(query)}`, {
@@ -968,7 +1086,7 @@
       displayedItems = (data.items || []).filter(item => !isSystemOrHiddenItem(item));
       renderItems(displayedItems);
     } catch (e) {
-      tbody.innerHTML = '<tr><td colspan="4" class="empty-state" style="color:var(--danger)">Error searching: ' + escapeHtml(String(e.message)) + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state" style="color:var(--danger)">Error searching: ' + escapeHtml(String(e.message)) + '</td></tr>';
     }
   }
 
@@ -1021,6 +1139,207 @@
     } catch (e) {
       alert('Error: ' + e.message);
     }
+  }
+
+  function authHeaders(extra) {
+    const headers = Object.assign({ 'X-WebShare': '1' }, extra || {});
+    if (authToken) headers['X-Auth-Token'] = authToken;
+    return headers;
+  }
+
+  async function postJson(url, body) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body)
+    });
+    if (res.status === 401) {
+      promptPassword();
+      throw new Error('Password required');
+    }
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok) throw new Error(data.error || ('Request failed with status ' + res.status));
+    return data;
+  }
+
+  // ---- Selection ----
+
+  // Shift-click selects (or clears) the whole range from the last row toggled.
+  function toggleSelect(index, event) {
+    const path = renderedPaths[index];
+    if (path === undefined) return;
+    const select = !selectedPaths.has(path);
+    if (event && event.shiftKey && lastToggledIndex >= 0 && lastToggledIndex !== index) {
+      const from = Math.min(lastToggledIndex, index);
+      const to = Math.max(lastToggledIndex, index);
+      for (let i = from; i <= to; i++) {
+        if (select) selectedPaths.add(renderedPaths[i]); else selectedPaths.delete(renderedPaths[i]);
+      }
+    } else if (select) {
+      selectedPaths.add(path);
+    } else {
+      selectedPaths.delete(path);
+    }
+    lastToggledIndex = index;
+    refreshRowSelection();
+  }
+
+  function toggleSelectAll(checked) {
+    if (checked) renderedPaths.forEach(p => selectedPaths.add(p));
+    else selectedPaths.clear();
+    refreshRowSelection();
+  }
+
+  function clearSelection() {
+    selectedPaths.clear();
+    lastToggledIndex = -1;
+    refreshRowSelection();
+  }
+
+  function refreshRowSelection() {
+    document.querySelectorAll('#fileTableBody tr[data-index]').forEach(row => {
+      const isSelected = selectedPaths.has(renderedPaths[Number(row.dataset.index)]);
+      row.classList.toggle('selected', isSelected);
+      const box = row.querySelector('.select-cell input');
+      if (box) box.checked = isSelected;
+    });
+    updateSelectionUI();
+  }
+
+  function updateSelectionUI() {
+    const count = selectedPaths.size;
+    const bar = document.getElementById('selectionBar');
+    if (bar) bar.classList.toggle('open', count > 0);
+    const countEl = document.getElementById('selectionCount');
+    if (countEl) countEl.innerText = count === 1 ? '1 item selected' : `${count} items selected`;
+    const all = document.getElementById('selectAllCheckbox');
+    if (all) {
+      all.checked = count > 0 && count === renderedPaths.length;
+      all.indeterminate = count > 0 && count < renderedPaths.length;
+    }
+  }
+
+  function selectedItems() {
+    return renderedItems
+      .map((item, i) => ({ item, path: renderedPaths[i] }))
+      .filter(entry => selectedPaths.has(entry.path));
+  }
+
+  // One file downloads as itself; anything else (several items, or a folder) as one ZIP, since
+  // browsers block a page from starting many downloads at once.
+  async function downloadSelected() {
+    const entries = selectedItems();
+    if (entries.length === 0) return;
+    if (entries.length === 1 && !entries[0].item.isDir) {
+      downloadFile(entries[0].path);
+      return;
+    }
+    const folderName = currentPath ? currentPath.split('/').pop() : 'Storage';
+    const zipName = entries.length === 1 ? entries[0].item.name : `${folderName} (${entries.length} items)`;
+    try {
+      showToast('Preparing ZIP...');
+      const data = await postJson('/api/zip-prepare', { paths: entries.map(e => e.path), name: zipName });
+      window.location.href = '/api/download-zip?token=' + encodeURIComponent(data.token) +
+        (authToken ? '&auth=' + encodeURIComponent(authToken) : '');
+    } catch (e) {
+      alert('Could not download: ' + e.message);
+    }
+  }
+
+  async function deleteSelected() {
+    const entries = selectedItems();
+    if (entries.length === 0) return;
+    const folders = entries.filter(e => e.item.isDir).length;
+    const files = entries.length - folders;
+    const parts = [];
+    if (files) parts.push(files === 1 ? '1 file' : `${files} files`);
+    if (folders) parts.push(folders === 1 ? '1 folder' : `${folders} folders`);
+    const preview = entries.slice(0, 5).map(e => '• ' + e.item.name).join('\n') +
+      (entries.length > 5 ? `\n…and ${entries.length - 5} more` : '');
+    const warning = folders ? '\n\nFolders are deleted with everything inside them.' : '';
+    if (!confirm(`Delete ${parts.join(' and ')}? This cannot be undone.\n\n${preview}${warning}`)) return;
+
+    try {
+      const data = await postJson('/api/delete-batch', { paths: entries.map(e => e.path) });
+      const failed = data.failed || [];
+      if (failed.length) {
+        alert(`Deleted ${data.deleted} item(s). Could not delete ${failed.length}:\n` +
+          failed.slice(0, 10).map(p => '• ' + p).join('\n'));
+      } else {
+        showToast(`Deleted ${data.deleted} item(s)`);
+      }
+    } catch (e) {
+      alert('Error: ' + e.message);
+    }
+    clearSelection();
+    reloadView();
+  }
+
+  // Reloads the folder, or re-runs the search when results are showing.
+  function reloadView() {
+    const query = (document.getElementById('searchInput')?.value || '').trim();
+    if (query) executeSubfolderSearch(query); else loadDirectory(currentPath);
+  }
+
+  // ---- Upload conflicts ----
+
+  function uploadTargetFor(it) {
+    return it.relativeDir
+      ? (currentPath ? (currentPath + '/' + it.relativeDir) : it.relativeDir)
+      : currentPath;
+  }
+
+  // Asks the user what to do with files already on the phone: resolves to 'overwrite', 'keep',
+  // 'skip', or null to cancel the whole upload.
+  function askConflict(conflicts, totalCount) {
+    const single = conflicts.length === 1;
+    document.getElementById('conflictTitle').innerText = single ? 'File already exists' : `${conflicts.length} files already exist`;
+    document.getElementById('conflictMessage').innerText = single
+      ? 'A file with this name is already in the destination folder:'
+      : `${conflicts.length} of the ${totalCount} files you are uploading are already in the destination. Your choice applies to all of them:`;
+    const shown = conflicts.slice(0, 50);
+    document.getElementById('conflictList').innerHTML = shown.map(p => `<li title="${escapeHtml(p)}">${escapeHtml(p)}</li>`).join('') +
+      (conflicts.length > shown.length ? `<li style="color:var(--text-secondary)">…and ${conflicts.length - shown.length} more</li>` : '');
+    // Skipping only makes sense when something else will still be uploaded.
+    document.getElementById('conflictSkipBtn').style.display = conflicts.length < totalCount ? '' : 'none';
+    openModal('conflictModal');
+    return new Promise(resolve => { conflictResolver = resolve; });
+  }
+
+  function resolveConflict(choice) {
+    closeModal('conflictModal');
+    const resolve = conflictResolver;
+    conflictResolver = null;
+    if (resolve) resolve(choice);
+  }
+
+  // Marks the items whose target already exists with the user's choice. Returns the items to
+  // upload, or null when the user cancelled.
+  async function resolveUploadConflicts(items) {
+    items.forEach(it => {
+      it.targetPath = uploadTargetFor(it);
+      it.fullPath = it.targetPath ? it.targetPath + '/' + it.file.name : it.file.name;
+    });
+    let existing;
+    try {
+      const data = await postJson('/api/exists', { paths: items.map(it => it.fullPath) });
+      existing = new Set(data.existing || []);
+    } catch (e) {
+      // Can't tell: upload anyway, and the phone keeps both copies rather than replacing one.
+      showToast('Could not check for existing files; duplicates will be kept as copies');
+      return items;
+    }
+    if (existing.size === 0) return items;
+
+    const conflicts = items.filter(it => existing.has(it.fullPath)).map(it => it.fullPath);
+    // Another drop may already be waiting on the dialog; answer that one first.
+    while (conflictResolver) await new Promise(r => setTimeout(r, 200));
+    const choice = await askConflict(conflicts, items.length);
+    if (choice === null) return null;
+    if (choice === 'skip') return items.filter(it => !existing.has(it.fullPath));
+    if (choice === 'overwrite') items.forEach(it => { if (existing.has(it.fullPath)) it.conflict = 'overwrite'; });
+    return items;
   }
 
   function openNewFolderModal() {
@@ -1090,9 +1409,19 @@
     }
   }
 
-  function handleItemsSelected(items) {
-    const validItems = Array.from(items).filter(it => it && it.file && it.file.size !== undefined);
+  async function handleItemsSelected(items) {
+    let validItems = Array.from(items).filter(it => it && it.file && it.file.size !== undefined);
     if (!validItems.length) return;
+
+    validItems = await resolveUploadConflicts(validItems);
+    if (validItems === null) {
+      showToast('Upload cancelled');
+      return;
+    }
+    if (!validItems.length) {
+      showToast('All files were skipped');
+      return;
+    }
 
     const totalNewBytes = validItems.reduce((acc, it) => acc + it.file.size, 0);
 
@@ -1124,10 +1453,9 @@
 
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      const targetPath = it.relativeDir
-        ? (currentPath ? (currentPath + '/' + it.relativeDir) : it.relativeDir)
-        : currentPath;
-      uploadState.queue.push({ file: it.file, path: targetPath, relativeDir: it.relativeDir || '' });
+      // The target was fixed when the files were checked for conflicts.
+      const targetPath = it.targetPath !== undefined ? it.targetPath : uploadTargetFor(it);
+      uploadState.queue.push({ file: it.file, path: targetPath, relativeDir: it.relativeDir || '', conflict: it.conflict || 'keep' });
       uploadState.totalFilesCount++;
       uploadState.totalBytes += it.file.size;
     }
@@ -1214,7 +1542,7 @@
       updateUploadProgressUI();
 
       try {
-        await uploadSingleFile(file, path);
+        await uploadSingleFile(file, path, item.conflict);
         uploadState.completedBytes += file.size;
         uploadState.completedFilesCount++;
       } catch (err) {
@@ -1251,13 +1579,14 @@
     }
   }
 
-  function uploadSingleFile(file, path) {
+  function uploadSingleFile(file, path, conflict) {
     return new Promise((resolve, reject) => {
       if (uploadState.isCancelled) {
         return reject(new Error('Cancelled'));
       }
 
-      const uploadUrl = '/api/upload?path=' + encodeURIComponent(path) + '&filename=' + encodeURIComponent(file.name);
+      const uploadUrl = '/api/upload?path=' + encodeURIComponent(path) + '&filename=' + encodeURIComponent(file.name) +
+        '&conflict=' + encodeURIComponent(conflict || 'keep');
       const xhr = new XMLHttpRequest();
       uploadState.currentXhr = xhr;
 

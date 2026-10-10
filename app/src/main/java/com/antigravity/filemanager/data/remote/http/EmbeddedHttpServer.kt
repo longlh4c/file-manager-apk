@@ -10,7 +10,6 @@ import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.zip.ZipEntry
@@ -64,6 +63,11 @@ class EmbeddedHttpServer @Inject constructor(
         private val expectedPassword: String,
         private val appContext: Context
     ) : NanoHTTPD(port) {
+
+        private companion object {
+            const val MAX_JSON_BODY = 4 * 1024 * 1024
+            const val ZIP_TOKEN_LIFETIME_MS = 10 * 60 * 1000L
+        }
 
         private val storageRoot: File = Environment.getExternalStorageDirectory()
 
@@ -138,6 +142,10 @@ class EmbeddedHttpServer @Inject constructor(
                     uri == "/api/upload" && method == Method.POST -> handleUpload(session)
                     uri == "/api/mkdir" && method == Method.POST -> handleMkdir(session)
                     uri == "/api/delete" && method == Method.POST -> handleDelete(session)
+                    uri == "/api/delete-batch" && method == Method.POST -> handleDeleteBatch(session)
+                    uri == "/api/exists" && method == Method.POST -> handleExists(session)
+                    uri == "/api/zip-prepare" && method == Method.POST -> handleZipPrepare(session)
+                    uri == "/api/download-zip" -> handleDownloadZip(session)
                     else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
                 }
             } catch (e: Exception) {
@@ -327,51 +335,8 @@ class EmbeddedHttpServer @Inject constructor(
             if (targetFile.isDirectory) {
                 val rawName = if (relPath.isEmpty() || targetFile == storageRoot) "Storage" else targetFile.name
                 val cleanName = rawName.replace("\"", "").replace("\\", "").trim().ifEmpty { "folder" }
-                val zipName = "$cleanName.zip"
-
-                val pos = PipedOutputStream()
-                val pis = PipedInputStream(pos, 64 * 1024)
-
-                thread(name = "ZipFolderThread", isDaemon = true) {
-                    try {
-                        ZipOutputStream(BufferedOutputStream(pos, 64 * 1024)).use { zos ->
-                            fun addDirToZip(dir: File, basePath: String) {
-                                val files = dir.listFiles() ?: return
-                                for (file in files) {
-                                    if (isSystemOrHidden(file)) continue
-                                    val entryPath = if (basePath.isEmpty()) file.name else "$basePath/${file.name}"
-                                    if (file.isDirectory) {
-                                        val zipEntry = ZipEntry("$entryPath/")
-                                        zipEntry.time = file.lastModified()
-                                        zos.putNextEntry(zipEntry)
-                                        zos.closeEntry()
-                                        addDirToZip(file, entryPath)
-                                    } else if (file.isFile) {
-                                        val zipEntry = ZipEntry(entryPath)
-                                        zipEntry.time = file.lastModified()
-                                        zos.putNextEntry(zipEntry)
-                                        file.inputStream().buffered(32 * 1024).use { fis ->
-                                            fis.copyTo(zos, bufferSize = 32 * 1024)
-                                        }
-                                        zos.closeEntry()
-                                    }
-                                }
-                            }
-                            addDirToZip(targetFile, "")
-                            zos.finish()
-                        }
-                    } catch (e: Exception) {
-                        // Client aborted download or pipe was closed
-                    }
-                }
-
-                val response = newChunkedResponse(
-                    Response.Status.OK,
-                    "application/zip",
-                    pis
-                )
-                response.addHeader("Content-Disposition", contentDisposition("attachment", zipName))
-                return finalizeResponse(response)
+                // The folder's contents go at the top of the ZIP, not inside a folder of its own.
+                return zipResponse("$cleanName.zip") { zos -> addDirToZip(zos, targetFile, "") }
             }
 
             val fileLen = targetFile.length()
@@ -433,6 +398,165 @@ class EmbeddedHttpServer @Inject constructor(
             }
         }
 
+        /** Streams a ZIP named [zipName] whose entries [write] adds, built on the fly. */
+        private fun zipResponse(zipName: String, write: (ZipOutputStream) -> Unit): Response {
+            val pos = PipedOutputStream()
+            val pis = PipedInputStream(pos, 64 * 1024)
+
+            thread(name = "ZipFolderThread", isDaemon = true) {
+                try {
+                    ZipOutputStream(BufferedOutputStream(pos, 64 * 1024)).use { zos ->
+                        write(zos)
+                        zos.finish()
+                    }
+                } catch (e: Exception) {
+                    // Client aborted download or pipe was closed
+                }
+            }
+
+            val response = newChunkedResponse(Response.Status.OK, "application/zip", pis)
+            response.addHeader("Content-Disposition", contentDisposition("attachment", zipName))
+            return finalizeResponse(response)
+        }
+
+        private fun addFileToZip(zos: ZipOutputStream, file: File, entryPath: String) {
+            val zipEntry = ZipEntry(entryPath)
+            zipEntry.time = file.lastModified()
+            zos.putNextEntry(zipEntry)
+            file.inputStream().buffered(32 * 1024).use { fis ->
+                fis.copyTo(zos, bufferSize = 32 * 1024)
+            }
+            zos.closeEntry()
+        }
+
+        private fun addDirToZip(zos: ZipOutputStream, dir: File, basePath: String) {
+            val files = dir.listFiles() ?: return
+            for (file in files) {
+                if (isSystemOrHidden(file)) continue
+                val entryPath = if (basePath.isEmpty()) file.name else "$basePath/${file.name}"
+                if (file.isDirectory) {
+                    val zipEntry = ZipEntry("$entryPath/")
+                    zipEntry.time = file.lastModified()
+                    zos.putNextEntry(zipEntry)
+                    zos.closeEntry()
+                    addDirToZip(zos, file, entryPath)
+                } else if (file.isFile) {
+                    addFileToZip(zos, file, entryPath)
+                }
+            }
+        }
+
+        /** The JSON body of a POST, or null when it is missing, too big or not JSON. */
+        private fun readJsonBody(session: IHTTPSession): JSONObject? {
+            val length = session.headers["content-length"]?.toIntOrNull() ?: return null
+            if (length !in 1..MAX_JSON_BODY) return null
+            val bytes = ByteArray(length)
+            var read = 0
+            while (read < length) {
+                val n = session.inputStream.read(bytes, read, length - read)
+                if (n < 0) return null
+                read += n
+            }
+            return try { JSONObject(String(bytes, Charsets.UTF_8)) } catch (e: Exception) { null }
+        }
+
+        private fun JSONObject.stringList(key: String): List<String> {
+            val array = optJSONArray(key) ?: return emptyList()
+            return (0 until array.length()).mapNotNull { array.optString(it).takeIf { s -> s.isNotEmpty() } }
+        }
+
+        private fun badRequest(message: String): Response = finalizeResponse(newFixedLengthResponse(
+            Response.Status.BAD_REQUEST, "application/json", JSONObject().put("error", message).toString()
+        ))
+
+        /** Which of the given relative paths are already files on the device, so the web UI can
+         * ask before an upload replaces them. Body: {"paths": ["Folder/a.jpg", ...]}. */
+        private fun handleExists(session: IHTTPSession): Response {
+            val body = readJsonBody(session) ?: return badRequest("Expected a JSON body")
+            val existing = JSONArray()
+            for (path in body.stringList("paths")) {
+                val file = resolveSafeFile(path) ?: continue
+                if (file.isFile && !isInsideSystemOrHiddenFolder(file)) existing.put(path)
+            }
+            return finalizeResponse(newFixedLengthResponse(
+                Response.Status.OK, "application/json", JSONObject().put("existing", existing).toString()
+            ))
+        }
+
+        /** Deletes several items at once. Body: {"paths": [...]}. Reports what could not be deleted. */
+        private fun handleDeleteBatch(session: IHTTPSession): Response {
+            val body = readJsonBody(session) ?: return badRequest("Expected a JSON body")
+            var deleted = 0
+            val failed = JSONArray()
+            for (path in body.stringList("paths")) {
+                val target = resolveSafeFile(path)
+                val allowed = target != null && target.exists() &&
+                        target.canonicalPath != storageRoot.canonicalPath && !isInsideSystemOrHiddenFolder(target)
+                if (allowed && target!!.deleteRecursively()) deleted++ else failed.put(path)
+            }
+            return finalizeResponse(newFixedLengthResponse(
+                Response.Status.OK, "application/json",
+                JSONObject().put("success", failed.length() == 0).put("deleted", deleted).put("failed", failed).toString()
+            ))
+        }
+
+        /** Selected items to download as one ZIP, keyed by a short-lived token: the list can be far
+         * too long for a URL, and a browser download has to be a plain GET. */
+        private val pendingZips = java.util.concurrent.ConcurrentHashMap<String, PendingZip>()
+
+        private class PendingZip(val files: List<File>, val name: String, val expiresAt: Long)
+
+        /** Body: {"paths": [...], "name": "Photos"}. Replies with a token for /api/download-zip. */
+        private fun handleZipPrepare(session: IHTTPSession): Response {
+            val body = readJsonBody(session) ?: return badRequest("Expected a JSON body")
+            val files = body.stringList("paths").mapNotNull { path ->
+                resolveSafeFile(path)?.takeIf {
+                    it.exists() && it.canonicalPath != storageRoot.canonicalPath && !isInsideSystemOrHiddenFolder(it)
+                }
+            }.distinct()
+            if (files.isEmpty()) return badRequest("Nothing to download")
+
+            val now = System.currentTimeMillis()
+            pendingZips.values.removeIf { it.expiresAt < now }
+            val rawName = body.optString("name").replace("\"", "").replace("\\", "").replace("/", "").trim()
+            val token = java.util.UUID.randomUUID().toString()
+            pendingZips[token] = PendingZip(files, rawName.ifEmpty { "Selected" }, now + ZIP_TOKEN_LIFETIME_MS)
+            return finalizeResponse(newFixedLengthResponse(
+                Response.Status.OK, "application/json", JSONObject().put("token", token).toString()
+            ))
+        }
+
+        private fun handleDownloadZip(session: IHTTPSession): Response {
+            val pending = session.parms["token"]?.let { pendingZips[it] }
+                ?.takeIf { it.expiresAt >= System.currentTimeMillis() }
+                ?: return finalizeResponse(newFixedLengthResponse(
+                    Response.Status.NOT_FOUND, "text/plain", "This download link has expired. Select the files again."
+                ))
+            return zipResponse("${pending.name}.zip") { zos ->
+                // Items picked from search results can share a name; number the later ones.
+                val usedNames = HashSet<String>()
+                for (file in pending.files) {
+                    if (!file.exists()) continue
+                    var entryName = file.name
+                    var n = 1
+                    while (!usedNames.add(entryName.lowercase(java.util.Locale.ROOT))) {
+                        entryName = if (file.isDirectory || '.' !in file.name) "${file.name} ($n)"
+                        else "${file.nameWithoutExtension} ($n).${file.extension}"
+                        n++
+                    }
+                    if (file.isDirectory) {
+                        val dirEntry = ZipEntry("$entryName/")
+                        dirEntry.time = file.lastModified()
+                        zos.putNextEntry(dirEntry)
+                        zos.closeEntry()
+                        addDirToZip(zos, file, entryName)
+                    } else {
+                        addFileToZip(zos, file, entryName)
+                    }
+                }
+            }
+        }
+
         private fun decodeUrlSafe(value: String): String {
             return try {
                 java.net.URLDecoder.decode(value, "UTF-8")
@@ -460,6 +584,10 @@ class EmbeddedHttpServer @Inject constructor(
             val explicitFileName = session.headers["x-file-name"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
                 ?: session.parms["filename"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
 
+            // A same-named file gets a numbered name unless the web UI asked (after checking with
+            // /api/exists and the user) to replace it.
+            val overwrite = session.parms["conflict"] == "overwrite"
+
             // The web UI posts the file as the raw body (see webshare/index.html): written
             // straight to its destination, so an upload is limited only by free space. The
             // multipart branch below stays for other clients (curl -F, a plain HTML form).
@@ -476,7 +604,7 @@ class EmbeddedHttpServer @Inject constructor(
                     ))
                 }
                 return try {
-                    val written = writeUploadStream(targetDir, name, session.inputStream, length)
+                    val written = writeUploadStream(targetDir, name, session.inputStream, length, overwrite)
                     MediaScannerConnection.scanFile(appContext, arrayOf(written.absolutePath), null, null)
                     finalizeResponse(newFixedLengthResponse(
                         Response.Status.OK, "application/json",
@@ -522,29 +650,19 @@ class EmbeddedHttpServer @Inject constructor(
                     File(tempFilePath).delete()
                     continue
                 }
-                // A same-named file used to be overwritten without warning, destroying the file
-                // already on the device; keep both instead, like the app's own paste does.
-                val destFile = com.antigravity.filemanager.data.local.storage.uniqueFile(targetDir, safeFileName)
-
+                // Same rules as the raw upload: keep both unless asked to overwrite, and never
+                // leave a truncated file behind.
                 val tempFile = File(tempFilePath)
                 if (tempFile.exists()) {
-                    try {
+                    val destFile = try {
                         FileInputStream(tempFile).use { input ->
-                            FileOutputStream(destFile).use { output ->
-                                input.copyTo(output)
-                            }
+                            writeUploadStream(targetDir, safeFileName, input, tempFile.length(), overwrite)
                         }
-                    } catch (e: Exception) {
-                        destFile.delete() // don't leave a truncated file behind
-                        val isSpace = e.message?.contains("ENOSPC", ignoreCase = true) == true ||
-                                e.message?.contains("No space left", ignoreCase = true) == true
-                        if (isSpace) {
-                            return finalizeResponse(newFixedLengthResponse(
-                                Response.Status.INTERNAL_ERROR, "application/json",
-                                JSONObject().put("error", "Storage full: ${e.message}").put("storageFull", true).toString()
-                            ))
-                        }
-                        throw e
+                    } catch (e: NotEnoughSpaceException) {
+                        return finalizeResponse(newFixedLengthResponse(
+                            Response.Status.INTERNAL_ERROR, "application/json",
+                            JSONObject().put("error", "Storage full: ${e.message}").put("storageFull", true).toString()
+                        ))
                     } finally {
                         tempFile.delete()
                     }
