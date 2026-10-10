@@ -50,6 +50,42 @@ class UploadStreamTest {
     }
 
     @Test
+    fun overwriteReplacesTheExistingFileInPlace() {
+        File(dir, "a.txt").writeText("old contents")
+
+        val written = writeUploadStream(dir, "a.txt", ByteArrayInputStream("new".toByteArray()), 3, overwrite = true)
+
+        assertEquals(File(dir, "a.txt"), written)
+        assertEquals("new", written.readText())
+        assertEquals(listOf("a.txt"), dir.list()!!.toList())
+    }
+
+    @Test
+    fun aFailedOverwriteKeepsTheOldFile() {
+        File(dir, "a.txt").writeText("old contents")
+
+        try {
+            writeUploadStream(dir, "a.txt", ByteArrayInputStream(ByteArray(10)), 5_000, overwrite = true)
+            error("expected the short stream to fail")
+        } catch (e: IOException) {
+            // expected
+        }
+
+        assertEquals("old contents", File(dir, "a.txt").readText())
+        assertEquals(listOf("a.txt"), dir.list()!!.toList())
+    }
+
+    @Test
+    fun overwriteNeverReplacesAFolder() {
+        File(dir, "photos").mkdirs()
+
+        val written = writeUploadStream(dir, "photos", ByteArrayInputStream("x".toByteArray()), 1, overwrite = true)
+
+        assertEquals("photos (1)", written.name)
+        assertTrue(File(dir, "photos").isDirectory)
+    }
+
+    @Test
     fun aConnectionCutShortLeavesNoPartialFile() {
         val cutOff: InputStream = ByteArrayInputStream(ByteArray(10))
 

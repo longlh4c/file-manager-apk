@@ -11,24 +11,29 @@ class NotEnoughSpaceException(val required: Long, val available: Long) :
     IOException("Needs ${required / (1024 * 1024)} MB, only ${available / (1024 * 1024)} MB free")
 
 /**
- * Writes [length] bytes of [input] into [targetDir] under [fileName], or a numbered name when
- * that one is taken — the whole upload, straight from the connection.
+ * Writes [length] bytes of [input] into [targetDir] under [fileName] — the whole upload, straight
+ * from the connection. When that name is taken the upload gets a numbered name, or, with
+ * [overwrite], replaces the existing file (a folder of that name is never replaced).
  *
  * This is what a large upload needs: the alternative (letting the HTTP library parse a multipart
  * body) buffers the entire request into a temp file and then memory-maps it, which needs twice
  * the free space and cannot handle a body of 2 GiB or more at all — FileChannel.map() rejects
  * anything that big, so the request died without a reply and the browser sat at 100% forever.
  *
- * A stream that ends early, or any failure, leaves no partial file behind.
+ * A stream that ends early, or any failure, leaves no partial file behind, and an overwritten
+ * file is only replaced once the new one has fully arrived.
  */
-fun writeUploadStream(targetDir: File, fileName: String, input: InputStream, length: Long): File {
+fun writeUploadStream(targetDir: File, fileName: String, input: InputStream, length: Long, overwrite: Boolean = false): File {
     if (!targetDir.exists()) targetDir.mkdirs()
+    val existing = File(targetDir, fileName)
+    val replace = overwrite && existing.isFile
     val available = targetDir.usableSpace
-    // A little room to spare, so the device isn't left completely full.
+    // A little room to spare, so the device isn't left completely full. An overwrite still needs
+    // the full size: the old file stays until the new one is complete.
     if (length > 0 && available in 0 until length + 8L * 1024 * 1024) {
         throw NotEnoughSpaceException(length, available)
     }
-    val destination = uniqueFile(targetDir, fileName)
+    val destination = if (replace) uniqueFile(targetDir, ".$fileName.uploading") else uniqueFile(targetDir, fileName)
     var written = 0L
     try {
         FileOutputStream(destination).use { out ->
@@ -48,5 +53,13 @@ fun writeUploadStream(targetDir: File, fileName: String, input: InputStream, len
         }
         throw e
     }
-    return destination
+    if (!replace) return destination
+    try {
+        if (!destination.renameTo(existing)) {
+            destination.copyTo(existing, overwrite = true)
+        }
+    } finally {
+        destination.delete()
+    }
+    return existing
 }
