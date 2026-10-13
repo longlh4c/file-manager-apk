@@ -49,7 +49,7 @@ OwlFM+ is a feature-rich, high-performance Android file manager built with moder
 - Dropping onto cloud root or top-level items (Main Storage, Downloads, Recycle Bin) is supported; excluded for Media categories.
 
 ### 2.6. Model Usage Guidelines
-- Standard models (`inherit`, `flash`, or `pro`) can be used as appropriate. There is **no restriction** requiring routine Git or APK build operations to use a specific model (the historical Haiku-only rule was explicitly revoked by the user).
+- Standard models (`inherit`, `flash`, or `pro`) can be used as appropriate without restrictions on routine Git or APK build operations.
 
 ---
 

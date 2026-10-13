@@ -6,11 +6,10 @@
   - Always verify that `./gradlew assembleRelease` compiles and obfuscates without missing class/interface warnings or runtime crashes.
   - Keep necessary reflection rules in `app/proguard-rules.pro`.
 
-## 2. Unrestricted Model Usage
-- **No Model Restriction for Git / Build**:
-  - Previously, routine Git commands (pull, merge, push) and APK builds were restricted to the Haiku model.
-  - The user has **explicitly revoked** this restriction.
-  - AI agents can use normal/inherited models or lightweight models as best fits the context, without being forced to switch to Haiku.
+## 2. Model Usage Freedom
+- **No Artificial Model Restrictions**:
+  - Routine Git commands (pull, merge, push) and APK builds do not require any specific model.
+  - AI agents can use normal/inherited models or lightweight models as best fits the task.
 
 ## 3. Safe Git Branching Protocol
 - Develop distinct features on dedicated branches (e.g., `feature/<feature-name>`).
