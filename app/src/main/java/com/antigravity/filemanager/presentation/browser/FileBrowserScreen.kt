@@ -38,7 +38,7 @@ import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FileSortOption
 import com.antigravity.filemanager.presentation.components.*
 import com.antigravity.filemanager.presentation.theme.*
-import com.antigravity.filemanager.presentation.theme.TextSecondary
+import com.antigravity.filemanager.presentation.viewers.LocalViewerSession
 import com.antigravity.filemanager.utils.FileOpener
 import java.io.File
 
@@ -702,6 +702,7 @@ fun FileBrowserScreen(
                                         if (file.isDirectory) {
                                             viewModel.loadDirectory(file.path)
                                         } else {
+                                            LocalViewerSession.set(filteredFiles)
                                             onOpenFile(file, uiState.sortOption, null)
                                         }
                                     }
@@ -728,6 +729,7 @@ fun FileBrowserScreen(
                                         if (file.isDirectory) {
                                             viewModel.loadDirectory(file.path)
                                         } else {
+                                            LocalViewerSession.set(filteredFiles)
                                             onOpenFile(file, uiState.sortOption, null)
                                         }
                                     }
@@ -757,6 +759,7 @@ fun FileBrowserScreen(
                                         if (file.isDirectory) {
                                             viewModel.loadDirectory(file.path)
                                         } else {
+                                            LocalViewerSession.set(filteredFiles)
                                             onOpenFile(file, uiState.sortOption, null)
                                         }
                                     }

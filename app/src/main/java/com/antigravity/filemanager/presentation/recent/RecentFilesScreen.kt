@@ -48,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import com.antigravity.filemanager.presentation.viewers.LocalViewerSession
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -270,7 +271,10 @@ fun RecentFilesScreen(
                                     isSelected = file.path in uiState.selectedPaths,
                                     onClick = {
                                         if (uiState.isSelectionMode) viewModel.toggleSelection(file.path)
-                                        else onOpenFile(file, FileSortOption.BY_NAME_ASC, null)
+                                        else {
+                                            LocalViewerSession.set(files)
+                                            onOpenFile(file, FileSortOption.BY_NAME_ASC, null)
+                                        }
                                     },
                                     onLongClick = { viewModel.toggleSelection(file.path) },
                                     // Recent files come from anywhere on the device: say where.

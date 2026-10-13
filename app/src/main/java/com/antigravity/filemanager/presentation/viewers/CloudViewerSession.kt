@@ -25,6 +25,27 @@ object CloudViewerSession {
 }
 
 /**
+ * In-memory hand-off from FileBrowserScreen, MediaCategoriesScreen, and RecentFilesScreen
+ * to the media viewers (ImageViewerScreen, VideoPlayerScreen).
+ *
+ * Avoids expensive synchronous disk re-scans (listFiles() and file stat sorts) on the UI thread
+ * when opening a media file.
+ */
+object LocalViewerSession {
+    private var files: List<FileItem>? = null
+
+    fun set(items: List<FileItem>) {
+        files = items
+    }
+
+    fun get(): List<FileItem>? = files
+
+    fun clear() {
+        files = null
+    }
+}
+
+/**
  * In-memory side-channel carrying the HTTP headers (e.g. a Google Drive bearer token) a
  * streamed media URL needs, from the ViewModel that resolved it to the ExoPlayer/Coil request
  * that plays it. Kept out of the navigation route on purpose — an access token has no business

@@ -42,6 +42,7 @@ import com.antigravity.filemanager.domain.model.FileSortOption
 import com.antigravity.filemanager.presentation.components.BottomBarActionItem
 import com.antigravity.filemanager.presentation.components.*
 import com.antigravity.filemanager.presentation.theme.*
+import com.antigravity.filemanager.presentation.viewers.LocalViewerSession
 import com.antigravity.filemanager.utils.FileOpener
 import java.io.File
 
@@ -648,6 +649,7 @@ fun MediaCategoriesScreen(
                                                 if (file.isDirectory) {
                                                     viewModel.openSubfolder(file.path, file.name)
                                                 } else {
+                                                    LocalViewerSession.set(filteredFiles)
                                                     onOpenFile(file, uiState.sortOption, null)
                                                 }
                                             }
@@ -673,6 +675,7 @@ fun MediaCategoriesScreen(
                                                 if (file.isDirectory) {
                                                     viewModel.openSubfolder(file.path, file.name)
                                                 } else {
+                                                    LocalViewerSession.set(filteredFiles)
                                                     onOpenFile(file, uiState.sortOption, null)
                                                 }
                                             }
@@ -709,6 +712,7 @@ fun MediaCategoriesScreen(
                                                     if (file.isDirectory) {
                                                         viewModel.openSubfolder(file.path, file.name)
                                                     } else {
+                                                        LocalViewerSession.set(filteredFiles)
                                                         onOpenFile(file, uiState.sortOption, null)
                                                     }
                                                 }

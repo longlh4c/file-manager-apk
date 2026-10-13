@@ -24,7 +24,9 @@ import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -173,11 +175,15 @@ fun ImageViewerScreen(
                     ?.map { ViewerEntry.Cloud(it) }
                 if (!siblings.isNullOrEmpty()) siblings else listOf(ViewerEntry.Local(File(actualInitialPath)))
             } else {
-                val targetParent = if (actualParentPath.isNotEmpty()) File(actualParentPath) else File(actualInitialPath).parentFile
-                val found = targetParent?.listFiles()?.filter {
-                    it.isFile && !it.name.startsWith(".") && it.extension.lowercase(Locale.getDefault()) in IMAGE_EXTENSIONS
-                }?.let { sortSiblingFiles(it, sortOption) }
-                if (!found.isNullOrEmpty()) found.map { ViewerEntry.Local(it) } else listOf(ViewerEntry.Local(File(actualInitialPath)))
+                val sessionFiles = LocalViewerSession.get()
+                if (sessionFiles != null) {
+                    val siblings = sessionFiles
+                        .filter { !it.isDirectory && it.extension.lowercase(Locale.getDefault()) in IMAGE_EXTENSIONS }
+                        .map { ViewerEntry.Local(File(it.path)) }
+                    if (siblings.isNotEmpty()) siblings else listOf(ViewerEntry.Local(File(actualInitialPath)))
+                } else {
+                    listOf(ViewerEntry.Local(File(actualInitialPath)))
+                }
             }
         )
     }
@@ -195,6 +201,25 @@ fun ImageViewerScreen(
         initialPage = initialIndex,
         pageCount = { imageEntries.size }
     )
+
+    LaunchedEffect(actualInitialPath, actualParentPath, sortOption, cloudAccountId) {
+        if (cloudAccountId == null && LocalViewerSession.get() == null) {
+            val siblings = withContext(Dispatchers.IO) {
+                val targetParent = if (actualParentPath.isNotEmpty()) File(actualParentPath) else File(actualInitialPath).parentFile
+                targetParent?.listFiles { file ->
+                    file.isFile && !file.name.startsWith(".") && file.extension.lowercase(Locale.getDefault()) in IMAGE_EXTENSIONS
+                }?.let { sortSiblingFiles(it.toList(), sortOption) }
+            }
+            if (!siblings.isNullOrEmpty()) {
+                val targetName = File(actualInitialPath).name
+                val newIndex = siblings.indexOfFirst { it.name == targetName }.coerceAtLeast(0)
+                imageEntries = siblings.map { ViewerEntry.Local(it) }
+                if (pagerState.currentPage != newIndex && newIndex < siblings.size) {
+                    pagerState.scrollToPage(newIndex)
+                }
+            }
+        }
+    }
 
     var showControls by remember { mutableStateOf(true) }
 
@@ -651,11 +676,15 @@ fun VideoPlayerScreen(
                     ?.map { ViewerEntry.Cloud(it) }
                 if (!siblings.isNullOrEmpty()) siblings else listOf(ViewerEntry.Local(File(actualInitialPath)))
             } else {
-                val targetParent = if (actualParentPath.isNotEmpty()) File(actualParentPath) else File(actualInitialPath).parentFile
-                val found = targetParent?.listFiles()?.filter {
-                    it.isFile && !it.name.startsWith(".") && it.extension.lowercase(Locale.getDefault()) in VIDEO_EXTENSIONS
-                }?.let { sortSiblingFiles(it, sortOption) }
-                if (!found.isNullOrEmpty()) found.map { ViewerEntry.Local(it) } else listOf(ViewerEntry.Local(File(actualInitialPath)))
+                val sessionFiles = LocalViewerSession.get()
+                if (sessionFiles != null) {
+                    val siblings = sessionFiles
+                        .filter { !it.isDirectory && it.extension.lowercase(Locale.getDefault()) in VIDEO_EXTENSIONS }
+                        .map { ViewerEntry.Local(File(it.path)) }
+                    if (siblings.isNotEmpty()) siblings else listOf(ViewerEntry.Local(File(actualInitialPath)))
+                } else {
+                    listOf(ViewerEntry.Local(File(actualInitialPath)))
+                }
             }
         )
     }
@@ -673,6 +702,25 @@ fun VideoPlayerScreen(
         initialPage = initialIndex,
         pageCount = { videoEntries.size }
     )
+
+    LaunchedEffect(actualInitialPath, actualParentPath, sortOption, cloudAccountId) {
+        if (cloudAccountId == null && LocalViewerSession.get() == null) {
+            val siblings = withContext(Dispatchers.IO) {
+                val targetParent = if (actualParentPath.isNotEmpty()) File(actualParentPath) else File(actualInitialPath).parentFile
+                targetParent?.listFiles { file ->
+                    file.isFile && !file.name.startsWith(".") && file.extension.lowercase(Locale.getDefault()) in VIDEO_EXTENSIONS
+                }?.let { sortSiblingFiles(it.toList(), sortOption) }
+            }
+            if (!siblings.isNullOrEmpty()) {
+                val targetName = File(actualInitialPath).name
+                val newIndex = siblings.indexOfFirst { it.name == targetName }.coerceAtLeast(0)
+                videoEntries = siblings.map { ViewerEntry.Local(it) }
+                if (pagerState.currentPage != newIndex && newIndex < siblings.size) {
+                    pagerState.scrollToPage(newIndex)
+                }
+            }
+        }
+    }
 
     val resolvedCloudMedia = remember(cloudAccountId) {
         mutableStateMapOf<String, ResolvedVideoMedia>().apply {
