@@ -418,7 +418,12 @@ class FileBrowserViewModel @Inject constructor(
         val current = _uiState.value.currentPath
         viewModelScope.launch {
             folderPreferencesRepository.saveSortOption(current, sort, applyToAll)
-            _uiState.update { old -> old.copy(sortOption = sort) }
+            _uiState.update { old ->
+                val sortedSearch = if (old.searchResults.isNotEmpty()) {
+                    com.antigravity.filemanager.utils.sortFileItems(old.searchResults, sort)
+                } else old.searchResults
+                old.copy(sortOption = sort, searchResults = sortedSearch)
+            }
             loadDirectory(current)
         }
     }
@@ -474,8 +479,7 @@ class FileBrowserViewModel @Inject constructor(
                 if (matches.isNotEmpty()) {
                     resultsMutex.withLock {
                         found.addAll(matches)
-                        // Default sort: newest first, matching Cloud/Media category search.
-                        _uiState.update { old -> old.copy(searchResults = found.sortedByDescending { it.lastModified }) }
+                        _uiState.update { old -> old.copy(searchResults = com.antigravity.filemanager.utils.sortFileItems(found, old.sortOption)) }
                     }
                 }
                 val subfolders = children.filter { it.isDirectory }

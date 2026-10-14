@@ -415,7 +415,12 @@ class CategoriesViewModel @Inject constructor(
         val targetKey = currentPath ?: "category_${categoryType.name}"
         viewModelScope.launch {
             folderPreferencesRepository.saveSortOption(targetKey, sort, applyToAll)
-            _uiState.update { old -> old.copy(sortOption = sort) }
+            _uiState.update { old ->
+                val sortedSearch = if (old.searchResults.isNotEmpty()) {
+                    com.antigravity.filemanager.utils.sortFileItems(old.searchResults, sort)
+                } else old.searchResults
+                old.copy(sortOption = sort, searchResults = sortedSearch)
+            }
             if (currentPath != null) {
                 openSubfolder(currentPath, _uiState.value.currentSubfolderName)
             } else {
@@ -472,8 +477,8 @@ class CategoriesViewModel @Inject constructor(
                 val currentFolder = _uiState.value.currentSubfolderPath
                 val allMatches = fileOperationsUseCase.search(query, rootPath = currentFolder, category = categoryType)
                 val filtered = filterFilesForCategory(allMatches.filterNot { it.isDirectory })
-                    .sortedByDescending { it.lastModified }
-                _uiState.update { old -> old.copy(searchResults = filtered) }
+                val sorted = com.antigravity.filemanager.utils.sortFileItems(filtered, _uiState.value.sortOption)
+                _uiState.update { old -> old.copy(searchResults = sorted) }
             } finally {
                 if (searchJob === kotlinx.coroutines.currentCoroutineContext().job) {
                     _uiState.update { old -> old.copy(isSearching = false) }

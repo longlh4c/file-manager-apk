@@ -1100,48 +1100,18 @@ class CloudExplorerViewModel @Inject constructor(
         folderCacheManager.notifyCloudFilesAdded(accountId, targetPath, newItems)
     }
 
-    private fun sortCloudFiles(files: List<FileItem>, sort: FileSortOption): List<FileItem> {
-        val locale = java.util.Locale.getDefault()
-        // Name is always the final tiebreaker. It matters most for BY_DATE_*: Dropbox's API
-        // simply doesn't expose a modified-time for folders (every folder entry — real ones from
-        // a listing, not just freshly created ones — comes back with lastModified=0), so sorting
-        // folders "by date" alone has nothing to differentiate them and fell back to whatever
-        // order the API/cache happened to return, which looked arbitrary. Falling back to name
-        // keeps that at least stable and predictable instead of looking shuffled.
-        return when (sort) {
-            FileSortOption.BY_NAME_ASC -> files.sortedWith(
-                compareBy<FileItem> { !it.isDirectory }.thenBy { it.name.lowercase(locale) }
-            )
-            FileSortOption.BY_NAME_DESC -> files.sortedWith(
-                compareBy<FileItem> { !it.isDirectory }.thenByDescending { it.name.lowercase(locale) }
-            )
-            FileSortOption.BY_DATE_DESC -> files.sortedWith(
-                compareBy<FileItem> { !it.isDirectory }.thenByDescending { it.lastModified }.thenBy { it.name.lowercase(locale) }
-            )
-            FileSortOption.BY_DATE_ASC -> files.sortedWith(
-                compareBy<FileItem> { !it.isDirectory }.thenBy { it.lastModified }.thenBy { it.name.lowercase(locale) }
-            )
-            FileSortOption.BY_SIZE_DESC -> files.sortedWith(
-                compareBy<FileItem> { !it.isDirectory }.thenByDescending { it.size }.thenBy { it.name.lowercase(locale) }
-            )
-            FileSortOption.BY_SIZE_ASC -> files.sortedWith(
-                compareBy<FileItem> { !it.isDirectory }.thenBy { it.size }.thenBy { it.name.lowercase(locale) }
-            )
-            FileSortOption.BY_TYPE -> files.sortedWith(
-                compareBy<FileItem> { !it.isDirectory }
-                    .thenBy { it.extension.lowercase(locale) }
-                    .thenBy { it.name.lowercase(locale) }
-            )
-        }
-    }
+    private fun sortCloudFiles(files: List<FileItem>, sort: FileSortOption): List<FileItem> =
+        com.antigravity.filemanager.utils.sortFileItems(files, sort)
 
     private fun sortKey(path: String): String = "cloud:$accountId:$path"
 
     fun onSortChanged(sort: FileSortOption) {
         val resorted = sortCloudFiles(_uiState.value.files, sort)
+        val resortedSearch = sortCloudFiles(_uiState.value.searchResults, sort)
         _uiState.update { old -> old.copy(
             sortOption = sort,
-            files = resorted
+            files = resorted,
+            searchResults = resortedSearch
         ) }
         val path = _uiState.value.currentPath
         viewModelScope.launch {
@@ -1203,10 +1173,7 @@ class CloudExplorerViewModel @Inject constructor(
                 if (matches.isNotEmpty()) {
                     resultsMutex.withLock {
                         found.addAll(matches)
-                        // Default sort: newest first, so results stay meaningful as they stream in
-                        // from many folders concurrently rather than in whatever order those folder
-                        // listings happened to return.
-                        _uiState.update { old -> old.copy(searchResults = found.sortedByDescending { it.lastModified }) }
+                        _uiState.update { old -> old.copy(searchResults = sortCloudFiles(found, old.sortOption)) }
                     }
                 }
                 // The Trash/Rubbish Bin virtual folder is a flat, whole-account view of deleted
