@@ -1448,8 +1448,25 @@
     enqueueAndStartUpload(validItems);
   }
 
+  function resetUploadState() {
+    uploadState.isUploading = false;
+    uploadState.queue = [];
+    uploadState.totalFilesCount = 0;
+    uploadState.completedFilesCount = 0;
+    uploadState.totalBytes = 0;
+    uploadState.completedBytes = 0;
+    uploadState.currentFileLoadedBytes = 0;
+    uploadState.currentItem = null;
+    uploadState.currentXhr = null;
+    uploadState.isCancelled = false;
+  }
+
   function enqueueAndStartUpload(items) {
     const isAlreadyUploading = uploadState.isUploading;
+
+    if (!isAlreadyUploading) {
+      resetUploadState();
+    }
 
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
@@ -1548,13 +1565,13 @@
       } catch (err) {
         console.error('Upload error for file ' + file.name, err);
         if (err.storageFull) {
-          uploadState.queue = [];
+          resetUploadState();
           closeModal('uploadModal');
           showStorageFullModal(err.message, file.name);
           break;
         }
         if (err.isDisconnect) {
-          uploadState.queue = [];
+          resetUploadState();
           closeModal('uploadModal');
           setServerOnline(false);
           break;
@@ -1570,9 +1587,9 @@
       updateUploadProgressUI();
     }
 
-    uploadState.isUploading = false;
-    uploadState.currentXhr = null;
-    if (!uploadState.isCancelled) {
+    const wasCancelled = uploadState.isCancelled;
+    resetUploadState();
+    if (!wasCancelled) {
       closeModal('uploadModal');
       loadDirectory(currentPath);
       checkServerStatus(false);
@@ -1668,7 +1685,7 @@
       if (uploadState.currentXhr) {
         try { uploadState.currentXhr.abort(); } catch (_) {}
       }
-      uploadState.isUploading = false;
+      resetUploadState();
       closeModal('uploadModal');
       loadDirectory(currentPath);
       showToast("Upload cancelled");
