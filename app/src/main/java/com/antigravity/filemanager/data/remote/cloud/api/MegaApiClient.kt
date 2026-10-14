@@ -375,8 +375,12 @@ class MegaApiClient @Inject constructor(
         val rubbish = allNodes.firstOrNull { it.type == 4 }
         val startsInRubbish = segments.first() == "Rubbish Bin" && rubbish != null
         var currentHandle = if (startsInRubbish) rubbish!!.handle else rootHandle
-        for (segment in if (startsInRubbish) segments.drop(1) else segments) {
-            val match = childrenByParent[currentHandle]?.firstOrNull { it.type == 1 && it.name == segment } ?: return null
+        val pathSegments = if (startsInRubbish) segments.drop(1) else segments
+        for ((index, segment) in pathSegments.withIndex()) {
+            val isLast = index == pathSegments.lastIndex
+            val match = childrenByParent[currentHandle]?.firstOrNull {
+                (if (isLast) (it.type == 0 || it.type == 1) else it.type == 1) && it.name == segment
+            } ?: return null
             currentHandle = match.handle
         }
         return currentHandle
@@ -457,10 +461,17 @@ class MegaApiClient @Inject constructor(
                 val faStr = nodeObj.optString("fa", "")
 
                 var name = "Item_$handle"
+                var effectiveTs = ts
 
-                // Decrypt node name
+                // Decrypt node name and preserved timestamp
                 if (attrStr.isNotEmpty()) {
-                    name = decryptNodeAttributes(attrStr, keyStr, masterKeyBytes) ?: if (type == 1 || type == 2) "Folder_$handle" else "File_$handle"
+                    val attrs = decryptNodeAttributes(attrStr, keyStr, masterKeyBytes)
+                    if (attrs != null) {
+                        name = attrs.name
+                        attrs.mtime?.let { effectiveTs = it }
+                    } else {
+                        name = if (type == 1 || type == 2) "Folder_$handle" else "File_$handle"
+                    }
                 }
 
                 if (type == 2) {
@@ -473,7 +484,7 @@ class MegaApiClient @Inject constructor(
                         parentHandle = parent,
                         type = type,
                         size = size,
-                        timestamp = ts,
+                        timestamp = effectiveTs,
                         name = name,
                         keyStr = keyStr,
                         fileAttrStr = faStr
@@ -1074,7 +1085,14 @@ class MegaApiClient @Inject constructor(
                 return@forEach
             }
             try {
-                val jsonArray = JSONArray(response.getOrNull() ?: "[]")
+                val bodyStr = (response.getOrNull() ?: "[]").trim()
+                val topErr = megaErrorCode(bodyStr)
+                if (topErr != null && !bodyStr.startsWith("[")) {
+                    val error = Exception("MEGA batch delete failed: $topErr")
+                    batch.forEach { results[it] = Result.failure(error) }
+                    return@forEach
+                }
+                val jsonArray = JSONArray(bodyStr)
                 batch.forEachIndexed { index, handle ->
                     // A success entry is 0 (or occasionally another non-negative value); MEGA
                     // reports a per-command failure as a negative error code at that same index.
@@ -1190,7 +1208,8 @@ class MegaApiClient @Inject constructor(
                 return Result.failure(java.io.IOException("MEGA request failed: HTTP $code"))
             }
             val body = (response.body?.string() ?: "[]").trim()
-            if (retriesLeft > 0 && (body == "-3" || body == "[-3]")) {
+            val err = megaErrorCode(body)
+            if (retriesLeft > 0 && err == -3) {
                 Thread.sleep((500L * (5 - retriesLeft)).coerceAtMost(3000L))
                 return sendMegaPost(url, json, retriesLeft - 1)
             }
@@ -1503,6 +1522,9 @@ class MegaApiClient @Inject constructor(
             val attrJson = JSONObject().apply {
                 put("n", localFile.name)
                 put("c", fingerprint)
+                if (localFile.lastModified() > 0) {
+                    put("mtime", localFile.lastModified() / 1000L)
+                }
             }.toString()
             val attrBytes = padTo16("MEGA$attrJson".toByteArray(StandardCharsets.UTF_8))
             // Attribute name is always encrypted with the raw content aesKey (same key used for
@@ -1785,11 +1807,51 @@ class MegaApiClient @Inject constructor(
         }
     }
 
-    private fun decryptNodeAttributes(attrEncStr: String, keyStr: String, masterKey: ByteArray?): String? {
+    data class DecryptedNodeAttributes(
+        val name: String,
+        val mtime: Long? = null
+    )
+
+    fun parseMtimeFromFingerprint(fingerprintB64: String): Long? {
+        try {
+            if (fingerprintB64.isBlank()) return null
+            val bytes = base64UrlDecode(fingerprintB64)
+            if (bytes.size < 17) return null
+            val len = bytes[16].toInt() and 0xFF
+            if (len == 0 || len > 8 || bytes.size < 17 + len) return null
+            var mtimeSec = 0L
+            for (i in 0 until len) {
+                mtimeSec = mtimeSec or ((bytes[17 + i].toLong() and 0xFFL) shl (i * 8))
+            }
+            return if (mtimeSec > 0L) mtimeSec else null
+        } catch (_: Exception) {
+            return null
+        }
+    }
+
+    private fun decryptNodeAttributes(attrEncStr: String, keyStr: String, masterKey: ByteArray?): DecryptedNodeAttributes? {
+        fun parseJsonAttributes(jsonStr: String): DecryptedNodeAttributes? {
+            val jsonStart = jsonStr.indexOf('{')
+            val jsonEnd = jsonStr.lastIndexOf('}')
+            if (jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart) {
+                val json = JSONObject(jsonStr.substring(jsonStart, jsonEnd + 1))
+                val n = json.optString("n")
+                if (n.isNotBlank()) {
+                    val mtimeSec = if (json.has("mtime") && json.optLong("mtime", 0L) > 0L) {
+                        json.optLong("mtime")
+                    } else {
+                        parseMtimeFromFingerprint(json.optString("c"))
+                    }
+                    val mtimeMs = if (mtimeSec != null && mtimeSec > 0L) mtimeSec * 1000L else null
+                    return DecryptedNodeAttributes(n, mtimeMs)
+                }
+            }
+            return null
+        }
+
         try {
             if (attrEncStr.startsWith("{")) {
-                val obj = JSONObject(attrEncStr)
-                return obj.optString("n")
+                return parseJsonAttributes(attrEncStr)
             }
 
             val encBytes = base64UrlDecode(attrEncStr)
@@ -1799,29 +1861,13 @@ class MegaApiClient @Inject constructor(
                     // Decrypt attribute with node key (IV is 16 zero bytes)
                     val decBytes = aesCbcDecrypt(encBytes, fileKeyBytes, ByteArray(16))
                     val str = String(decBytes, StandardCharsets.UTF_8).trim('\u0000', ' ')
-                    if (str.contains("\"n\":")) {
-                        val jsonStart = str.indexOf('{')
-                        val jsonEnd = str.lastIndexOf('}')
-                        if (jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart) {
-                            val json = JSONObject(str.substring(jsonStart, jsonEnd + 1))
-                            val n = json.optString("n")
-                            if (n.isNotBlank()) return n
-                        }
-                    }
+                    parseJsonAttributes(str)?.let { return it }
                 }
             }
 
             // Fallback: try raw decode
             val raw = String(encBytes, StandardCharsets.UTF_8)
-            if (raw.contains("\"n\":")) {
-                val jsonStart = raw.indexOf('{')
-                val jsonEnd = raw.lastIndexOf('}')
-                if (jsonStart != -1 && jsonEnd != -1 && jsonEnd > jsonStart) {
-                    val json = JSONObject(raw.substring(jsonStart, jsonEnd + 1))
-                    val n = json.optString("n")
-                    if (n.isNotBlank()) return n
-                }
-            }
+            parseJsonAttributes(raw)?.let { return it }
         } catch (e: Exception) {
             // Ignore decryption error
         }

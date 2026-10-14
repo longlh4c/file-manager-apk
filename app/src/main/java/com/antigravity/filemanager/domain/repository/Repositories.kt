@@ -132,6 +132,7 @@ interface ICloudRepository {
         accountId: String,
         remotePath: String,
         localTargetDir: String,
+        destFileName: String? = null,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Result<File>
     suspend fun uploadCloudFile(

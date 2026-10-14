@@ -1421,7 +1421,7 @@ class CloudExplorerViewModel @Inject constructor(
                         )
                     ) }
 
-                    val dlResult = cloudUseCase.downloadFile(accountId, item.path, tempDir.absolutePath)
+                    val dlResult = cloudUseCase.downloadFile(accountId, item.path, tempDir.absolutePath, destFileName = item.name)
                     val localFile = dlResult.getOrNull()
                     if (localFile != null && localFile.exists()) {
                         val origTime = com.antigravity.filemanager.utils.ImageResizerEngine.extractOriginalCreationDate(localFile, item.lastModified)
@@ -1454,7 +1454,7 @@ class CloudExplorerViewModel @Inject constructor(
                         )
                     ) }
 
-                    val matchingItem = imageItems.find { it.name == file.name }
+                    val matchingItem = imageItems.find { it.name == file.name || it.name.equals(file.name, ignoreCase = true) }
                     val originalDate = com.antigravity.filemanager.utils.ImageResizerEngine.extractOriginalCreationDate(file, matchingItem?.lastModified ?: 0L)
 
                     try {
@@ -1481,7 +1481,7 @@ class CloudExplorerViewModel @Inject constructor(
                     accountId = accountId,
                     localPaths = resizedFiles.map { it.absolutePath },
                     remoteDir = currentRemotePath,
-                    overwriteNames = resizedFiles.map { it.name }.toSet()
+                    overwriteNames = imageItems.map { it.name }.toSet() + resizedFiles.map { it.name }.toSet()
                 ) { currentFile, currentIndex, totalFiles, bytesSent, totalBytes ->
                     if (!this@launch.isActive || _uiState.value.transferCancelledByUser) return@uploadFiles
                     _uiState.update { old -> old.copy(
@@ -1501,12 +1501,14 @@ class CloudExplorerViewModel @Inject constructor(
                 if (uploadResult.isSuccess) {
                     // If format conversion changed extension (e.g. .png -> .jpg), delete the old file with different extension
                     val newNames = resizedFiles.map { it.name }.toSet()
-                    val newBaseNames = resizedFiles.map { it.nameWithoutExtension }.toSet()
+                    val newBaseNames = resizedFiles.map { it.nameWithoutExtension.lowercase(java.util.Locale.ROOT) }.toSet()
                     for (item in imageItems) {
-                        val itemBaseName = item.name.substringBeforeLast(".")
+                        val itemBaseName = item.name.substringBeforeLast(".").lowercase(java.util.Locale.ROOT)
                         if (item.name !in newNames && itemBaseName in newBaseNames) {
                             try {
-                                cloudUseCase.deleteItem(accountId, item.path, moveToTrash = false)
+                                val isMega = _uiState.value.account?.provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA
+                                val targetPathOrId = if (isMega) item.id.ifEmpty { item.path } else item.path
+                                cloudUseCase.deleteItem(accountId, targetPathOrId, moveToTrash = false)
                             } catch (e: Exception) {
                                 android.util.Log.w("CloudResize", "Could not remove old format file ${item.name}", e)
                             }
@@ -1517,7 +1519,11 @@ class CloudExplorerViewModel @Inject constructor(
                     val thumbDir = File(context.cacheDir, "cloud_thumbs/$accountId")
                     val updatedFilesMap = mutableMapOf<String, FileItem>()
                     for (resized in resizedFiles) {
-                        val matchingOriginal = imageItems.find { it.name == resized.name || it.name.substringBeforeLast(".") == resized.nameWithoutExtension }
+                        val matchingOriginal = imageItems.find {
+                            it.name == resized.name ||
+                            it.name.equals(resized.name, ignoreCase = true) ||
+                            it.name.substringBeforeLast(".").equals(resized.nameWithoutExtension, ignoreCase = true)
+                        }
                         val originalDate = com.antigravity.filemanager.utils.ImageResizerEngine.extractOriginalCreationDate(resized, matchingOriginal?.lastModified ?: 0L)
 
                         val newRemotePath = if (currentRemotePath == "/" || currentRemotePath.isBlank()) "/${resized.name}" else "${currentRemotePath.trimEnd('/')}/${resized.name}"
@@ -1671,11 +1677,14 @@ class CloudExplorerViewModel @Inject constructor(
                 // Bin actually needs; everything else below still goes through the generic
                 // bounded-parallel per-item loop (Dropbox/Drive have no equivalent batch endpoint
                 // wired up yet, and a "move to trash" is a different MEGA command anyway).
-                val batchResults = cloudUseCase.deletePermanentlyBatchMega(accountId, megaBatch.map { it.path })
-                batchResults.forEach { (path, result) ->
+                // Use item.id (the real unique node handle) rather than item.path: multiple items
+                // in MEGA's Rubbish Bin can have identical file names, which computes the same
+                // display path and caused all same-named items to collapse into a single deletion.
+                val batchResults = cloudUseCase.deletePermanentlyBatchMega(accountId, megaBatch.map { it.id.ifEmpty { it.path } })
+                batchResults.forEach { (pathOrId, result) ->
                     if (result.isFailure) {
                         failuresCounter.incrementAndGet()
-                        failedPaths.add(path)
+                        failedPaths.add(pathOrId)
                     }
                 }
                 completedCounter.addAndGet(megaBatch.size)
@@ -1702,9 +1711,11 @@ class CloudExplorerViewModel @Inject constructor(
                             // for the common single-file case that read as the whole dialog being
                             // frozen the whole time. Show it going in instead.
                             setTransferProgress(currentFileName = item.name, currentIndex = completedCounter.get() + 1, totalFiles = toDelete.size, isUpload = false, operationLabel = "Deleting")
-                            val result = cloudUseCase.deleteItem(accountId, item.path, effectiveMoveToTrash(item))
+                            val targetPathOrId = if (isMega) item.id.ifEmpty { item.path } else item.path
+                            val result = cloudUseCase.deleteItem(accountId, targetPathOrId, effectiveMoveToTrash(item))
                             if (result.isFailure) {
                                 failuresCounter.incrementAndGet()
+                                failedPaths.add(targetPathOrId)
                                 failedPaths.add(item.path)
                                 // Dropbox's permanently_delete is Business/Team-only — a personal
                                 // account gets a 400 with this exact scope message for every single
@@ -1726,8 +1737,8 @@ class CloudExplorerViewModel @Inject constructor(
             // Only remove items that were actually confirmed deleted server-side — an item whose
             // API call failed (still in failedPaths) stays right where it was instead of vanishing
             // and then reappearing once refresh() below finds it's still really there.
-            val remainingFiles = _uiState.value.files.filterNot { (it.path in selectedIds || it.id in selectedIds) && it.path !in failedPaths }
-            val remainingSearchResults = _uiState.value.searchResults.filterNot { (it.path in selectedIds || it.id in selectedIds) && it.path !in failedPaths }
+            val remainingFiles = _uiState.value.files.filterNot { (it.path in selectedIds || it.id in selectedIds) && (it.path !in failedPaths && it.id !in failedPaths) }
+            val remainingSearchResults = _uiState.value.searchResults.filterNot { (it.path in selectedIds || it.id in selectedIds) && (it.path !in failedPaths && it.id !in failedPaths) }
             _uiState.update { old -> old.copy(
                 isLoading = true,
                 downloadProgress = null,
@@ -1780,7 +1791,9 @@ class CloudExplorerViewModel @Inject constructor(
                     launch {
                         restoreSemaphore.withPermit {
                             kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                            if (cloudUseCase.restoreItem(accountId, item.path).isFailure) restoreFailures.incrementAndGet()
+                            val isMega = _uiState.value.account?.provider == com.antigravity.filemanager.domain.model.CloudProvider.MEGA
+                            val targetPathOrId = if (isMega) item.id.ifEmpty { item.path } else item.path
+                            if (cloudUseCase.restoreItem(accountId, targetPathOrId).isFailure) restoreFailures.incrementAndGet()
                             val done = restoreCompleted.incrementAndGet()
                             setTransferProgress(currentFileName = item.name, currentIndex = done, totalFiles = toRestore.size, isUpload = true, operationLabel = "Restoring")
                         }

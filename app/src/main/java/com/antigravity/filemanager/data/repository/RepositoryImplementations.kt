@@ -861,11 +861,12 @@ class CloudRepositoryImpl @Inject constructor(
         accountId: String,
         remotePath: String,
         localTargetDir: String,
+        destFileName: String?,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)?
     ): Result<File> = withContext(Dispatchers.IO) {
         val account = database.cloudDao().getById(accountId)?.toDomain()
             ?: return@withContext Result.failure(Exception("Account not found"))
-        cloudManager.downloadFile(account, remotePath, localTargetDir, onProgress)
+        cloudManager.downloadFile(account, remotePath, localTargetDir, destFileName, onProgress)
     }
 
     override suspend fun uploadCloudFile(

@@ -776,7 +776,9 @@ class CloudStorageUseCase @Inject constructor(
             for (path in localPaths) {
                 val entry = File(path)
                 if (entry.name in skipNames) continue
-                val overwrite = entry.name in overwriteNames
+                val overwrite = entry.name in overwriteNames ||
+                    overwriteNames.any { it.equals(entry.name, ignoreCase = true) } ||
+                    overwriteNames.any { it.substringBeforeLast(".").equals(entry.nameWithoutExtension, ignoreCase = true) }
                 if (entry.isDirectory) {
                     // "Keep both" for a folder uploads it as "Name (1)", like a local copy does;
                     // it used to be merged into the existing folder, with "(1)" copies of any
@@ -798,12 +800,14 @@ class CloudStorageUseCase @Inject constructor(
             // "Skip" on every conflict still reported "Transferred N file(s) successfully" for
             // zero real uploads. Track what actually went out and hand that back instead.
             var uploadedCount = 0
-            val provider = if (flatFiles.any { it.overwrite }) {
-                cloudRepository.getConnectedAccounts().find { it.id == accountId }?.provider
-            } else null
+            val provider = cloudRepository.getConnectedAccounts().find { it.id == accountId }?.provider
             flatFiles.forEachIndexed { index, (file, targetDir, overwrite) ->
                 val existingNames = existingNamesFor(targetDir)
-                val conflictItem = existingItemsByDir[targetDir]?.find { it.name == file.name }
+                val conflictItem = existingItemsByDir[targetDir]?.find {
+                    it.name == file.name ||
+                    it.name.equals(file.name, ignoreCase = true) ||
+                    (overwrite && it.name.substringBeforeLast(".").equals(file.nameWithoutExtension, ignoreCase = true))
+                }
                 var uploadSource = file
                 var tempDir: File? = null
                 // Overwrite used to delete the existing remote item first, so an upload that then
@@ -815,15 +819,15 @@ class CloudStorageUseCase @Inject constructor(
                     if (overwrite) {
                         when {
                             // A file replacing a folder: nothing can be swapped in one step.
-                            conflictItem.isDirectory -> cloudRepository.deleteCloudFile(accountId, conflictItem.path)
+                            conflictItem.isDirectory -> cloudRepository.deleteCloudFile(accountId, conflictItem.path, moveToTrash = false)
                                 .getOrElse { throw java.io.IOException("Couldn't replace \"${conflictItem.name}\": ${it.message}", it) }
                             // Uploads use WriteMode.OVERWRITE: the new file replaces the old in one step.
                             provider == CloudProvider.DROPBOX -> Unit
                             // Same-named siblings are allowed: upload next to it, then remove the
-                            // old one by its id (its path now also names the new file). A cached
-                            // entry may carry a path instead of a real id; fall back for those.
-                            (provider == CloudProvider.GOOGLE_DRIVE || provider == CloudProvider.MEGA) &&
-                                !conflictItem.id.startsWith("/") -> replaceAfterUpload = conflictItem
+                            // old one by its id/path.
+                            provider == CloudProvider.GOOGLE_DRIVE || provider == CloudProvider.MEGA -> {
+                                replaceAfterUpload = conflictItem
+                            }
                             // Otherwise upload under a temporary name, then remove the old item and
                             // give the new one its real name.
                             else -> {
@@ -865,8 +869,8 @@ class CloudStorageUseCase @Inject constructor(
                     throw uploadResult.exceptionOrNull() ?: Exception("Upload failed for ${uploadSource.name}")
                 }
                 replaceAfterUpload?.let { old ->
-                    val target = if (renameAfterUpload) old.path else old.id
-                    cloudRepository.deleteCloudFile(accountId, target).getOrElse {
+                    val target = if (renameAfterUpload) old.path else old.id.ifEmpty { old.path }
+                    cloudRepository.deleteCloudFile(accountId, target, moveToTrash = false).getOrElse {
                         throw java.io.IOException("Uploaded \"${uploadSource.name}\" but couldn't remove the old \"${old.name}\": ${it.message}", it)
                     }
                     if (renameAfterUpload) {
@@ -942,6 +946,7 @@ class CloudStorageUseCase @Inject constructor(
         accountId: String,
         remotePath: String,
         localTargetDir: String,
+        destFileName: String? = null,
         // false for CloudExplorerViewModel's last-resort thumbnail fetch (small files a provider
         // has no cheap thumbnail endpoint for) — that's an invisible background prefetch the user
         // never asked for, not a transfer worth a persistent notification or (worse, before the
@@ -956,7 +961,7 @@ class CloudStorageUseCase @Inject constructor(
     ): Result<File> {
         if (notifyTransfer) transferGuard.begin()
         try {
-            val result = cloudRepository.downloadCloudFile(accountId, remotePath, localTargetDir, onProgress)
+            val result = cloudRepository.downloadCloudFile(accountId, remotePath, localTargetDir, destFileName, onProgress)
             if (result.isSuccess) folderCacheManager.invalidateMediaFolders()
             return result
         } finally {

@@ -421,6 +421,7 @@ class CloudManager @Inject constructor(
         account: CloudAccount,
         remotePath: String,
         localTargetDir: String,
+        destFileName: String? = null,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
@@ -429,7 +430,7 @@ class CloudManager @Inject constructor(
             // file whenever two folders held same-named files — e.g. every camera's IMG_0001.jpg
             // — and pasted that wrong file into the user's folder. Callers that keep a viewer
             // cache check it themselves, with a size match, before calling this.
-            val fileName = remotePath.substringAfterLast("/").ifEmpty { "cloud_file" }
+            val fileName = destFileName ?: remotePath.substringAfterLast("/").ifEmpty { "cloud_file" }
             val destFile = File(localTargetDir, fileName)
             destFile.parentFile?.mkdirs()
 
@@ -619,14 +620,16 @@ class CloudManager @Inject constructor(
      * so callers can match failures back to what the user actually selected. */
     suspend fun deletePermanentlyBatchMega(account: CloudAccount, remotePathsOrIds: List<String>): Map<String, Result<Unit>> = withContext(Dispatchers.IO) {
         val megaAccount = megaAccount(account)
-        val pathToHandle = remotePathsOrIds.associateWith { megaHandle(megaAccount, it) }
-        val handleResults = megaApi.deleteNodesBatch(megaAccount, pathToHandle.values.toList())
-        remotePathsOrIds.associateWith { remotePathOrId ->
-            val handle = pathToHandle.getValue(remotePathOrId)
+        val handles = remotePathsOrIds.map { megaHandle(megaAccount, it) }
+        val handleResults = megaApi.deleteNodesBatch(megaAccount, handles)
+        val results = LinkedHashMap<String, Result<Unit>>()
+        remotePathsOrIds.forEachIndexed { index, remotePathOrId ->
+            val handle = handles[index]
             val result = handleResults[handle] ?: Result.failure(Exception("No result for '$remotePathOrId'"))
             if (result.isSuccess) forgetId(account.id, remotePathOrId, handle)
-            result
+            results[remotePathOrId] = result
         }
+        results
     }
 
     /** Restores an item out of the provider's real trash/rubbish bin. */
