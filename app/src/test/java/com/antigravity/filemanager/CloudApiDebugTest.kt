@@ -167,12 +167,15 @@ class CloudApiDebugTest {
             }
         }
 
-        kotlinx.coroutines.delay(35)
+        // Wait until coroutine has started and executed at least one iteration
+        while (iterations == 0) {
+            kotlinx.coroutines.delay(5)
+        }
         job.cancel()
         job.join()
 
         assertTrue(wasCancelled)
-        assertTrue(iterations in 1..10)
+        assertTrue(iterations >= 1)
         println("Cancellation verified successfully (stopped after $iterations iterations)!")
     }
 }

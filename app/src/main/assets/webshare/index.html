@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>Owl File + Web Share</title>
 <style>
   :root {
@@ -1462,25 +1465,30 @@
   }
 
   function enqueueAndStartUpload(items) {
-    const isAlreadyUploading = uploadState.isUploading;
+    const isModalOpen = document.getElementById('uploadModal')?.classList.contains('open');
+    const isAlreadyUploading = uploadState.isUploading && isModalOpen;
 
     if (!isAlreadyUploading) {
       resetUploadState();
     }
+
+    const newBytes = items.reduce((acc, it) => acc + (it.file ? it.file.size : 0), 0);
 
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
       // The target was fixed when the files were checked for conflicts.
       const targetPath = it.targetPath !== undefined ? it.targetPath : uploadTargetFor(it);
       uploadState.queue.push({ file: it.file, path: targetPath, relativeDir: it.relativeDir || '', conflict: it.conflict || 'keep' });
-      uploadState.totalFilesCount++;
-      uploadState.totalBytes += it.file.size;
     }
 
     if (isAlreadyUploading) {
+      uploadState.totalFilesCount += items.length;
+      uploadState.totalBytes += newBytes;
       updateUploadProgressUI();
       showToast(`Added ${items.length} file(s) to queue! Total: ${uploadState.totalFilesCount} files`);
     } else {
+      uploadState.totalFilesCount = items.length;
+      uploadState.totalBytes = newBytes;
       uploadState.isUploading = true;
       uploadState.isCancelled = false;
       uploadState.completedFilesCount = 0;
@@ -1574,6 +1582,9 @@
           resetUploadState();
           closeModal('uploadModal');
           setServerOnline(false);
+          break;
+        }
+        if (uploadState.isCancelled || err.message === 'Upload aborted' || err.message === 'Cancelled') {
           break;
         }
         // General error for this file, skip and continue

@@ -3,6 +3,8 @@ package com.antigravity.filemanager.data.remote.http
 import android.content.Context
 import android.media.MediaScannerConnection
 import android.os.Environment
+import com.antigravity.filemanager.data.local.cache.FolderCacheManager
+import com.antigravity.filemanager.data.local.observer.MediaChangeSignal
 import dagger.hilt.android.qualifiers.ApplicationContext
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONArray
@@ -17,10 +19,17 @@ import java.util.zip.ZipOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.concurrent.thread
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 @Singleton
 class EmbeddedHttpServer @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val folderCacheManager: FolderCacheManager,
+    private val mediaChangeSignal: MediaChangeSignal
 ) {
     private var server: InternalServer? = null
     var isRunning: Boolean = false
@@ -30,7 +39,7 @@ class EmbeddedHttpServer @Inject constructor(
         if (isRunning) return true
         val validPort = if (port in 1024..65535) port else 8080
         return try {
-            val s = InternalServer(validPort, password, context)
+            val s = InternalServer(validPort, password, context, folderCacheManager, mediaChangeSignal)
             // 60s instead of the 5s default: an upload is read straight off this socket, and a
             // phone that stalls for a few seconds mid-transfer shouldn't drop a multi-GB file.
             s.start(60_000, false)
@@ -61,7 +70,9 @@ class EmbeddedHttpServer @Inject constructor(
     private class InternalServer(
         port: Int,
         private val expectedPassword: String,
-        private val appContext: Context
+        private val appContext: Context,
+        private val folderCacheManager: FolderCacheManager,
+        private val mediaChangeSignal: MediaChangeSignal
     ) : NanoHTTPD(port) {
 
         private companion object {
@@ -96,6 +107,37 @@ class EmbeddedHttpServer @Inject constructor(
                 curr = curr.parentFile
             }
             return false
+        }
+
+        private fun collectPathsRecursively(file: File, out: MutableList<String>) {
+            if (file.isDirectory) {
+                file.listFiles()?.forEach { collectPathsRecursively(it, out) }
+            }
+            out.add(file.absolutePath)
+        }
+
+        private val serverScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+        private fun notifyDeletedPaths(paths: List<String>) {
+            if (paths.isEmpty()) return
+            try {
+                MediaScannerConnection.scanFile(appContext, paths.toTypedArray(), null, null)
+            } catch (e: Exception) {
+                android.util.Log.e("EmbeddedHttpServer", "Failed to scan deleted paths", e)
+            }
+            serverScope.launch {
+                try {
+                    folderCacheManager.removeFromMediaFolders(paths)
+                } catch (e: Exception) {
+                    android.util.Log.e("EmbeddedHttpServer", "Failed to remove from media folders cache", e)
+                }
+            }
+            mediaChangeSignal.notifyChanged()
+        }
+
+        override fun stop() {
+            super.stop()
+            serverScope.cancel()
         }
 
         override fun serve(session: IHTTPSession): Response {
@@ -133,7 +175,11 @@ class EmbeddedHttpServer @Inject constructor(
             return try {
                 when {
                     uri == "/" || uri == "/index.html" -> {
-                        newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", WebShareAssets.getIndexHtml(appContext))
+                        val resp = newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", WebShareAssets.getIndexHtml(appContext))
+                        resp.addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+                        resp.addHeader("Pragma", "no-cache")
+                        resp.addHeader("Expires", "0")
+                        finalizeResponse(resp)
                     }
                     uri == "/api/list" -> handleList(session)
                     uri == "/api/status" -> handleStatus(session)
@@ -488,12 +534,30 @@ class EmbeddedHttpServer @Inject constructor(
             val body = readJsonBody(session) ?: return badRequest("Expected a JSON body")
             var deleted = 0
             val failed = JSONArray()
+            val allDeletedPaths = mutableListOf<String>()
+
             for (path in body.stringList("paths")) {
                 val target = resolveSafeFile(path)
                 val allowed = target != null && target.exists() &&
                         target.canonicalPath != storageRoot.canonicalPath && !isInsideSystemOrHiddenFolder(target)
-                if (allowed && target!!.deleteRecursively()) deleted++ else failed.put(path)
+                if (allowed) {
+                    val pathsToScan = mutableListOf<String>()
+                    collectPathsRecursively(target!!, pathsToScan)
+                    if (target.deleteRecursively()) {
+                        deleted++
+                        allDeletedPaths.addAll(pathsToScan)
+                    } else {
+                        failed.put(path)
+                    }
+                } else {
+                    failed.put(path)
+                }
             }
+
+            if (allDeletedPaths.isNotEmpty()) {
+                notifyDeletedPaths(allDeletedPaths)
+            }
+
             return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK, "application/json",
                 JSONObject().put("success", failed.length() == 0).put("deleted", deleted).put("failed", failed).toString()
@@ -606,6 +670,7 @@ class EmbeddedHttpServer @Inject constructor(
                 return try {
                     val written = writeUploadStream(targetDir, name, session.inputStream, length, overwrite)
                     MediaScannerConnection.scanFile(appContext, arrayOf(written.absolutePath), null, null)
+                    mediaChangeSignal.notifyChanged()
                     finalizeResponse(newFixedLengthResponse(
                         Response.Status.OK, "application/json",
                         JSONObject().put("success", true).put("count", 1).put("name", written.name).toString()
@@ -678,6 +743,7 @@ class EmbeddedHttpServer @Inject constructor(
                     null,
                     null
                 )
+                mediaChangeSignal.notifyChanged()
             }
 
             return finalizeResponse(newFixedLengthResponse(
@@ -741,7 +807,14 @@ class EmbeddedHttpServer @Inject constructor(
                 ))
             }
 
+            val pathsToScan = mutableListOf<String>()
+            collectPathsRecursively(target, pathsToScan)
+
             val deleted = target.deleteRecursively()
+            if (deleted) {
+                notifyDeletedPaths(pathsToScan)
+            }
+
             return finalizeResponse(newFixedLengthResponse(
                 Response.Status.OK,
                 "application/json",
