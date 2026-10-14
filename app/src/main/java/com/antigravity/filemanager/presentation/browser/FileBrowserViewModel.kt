@@ -233,9 +233,10 @@ class FileBrowserViewModel @Inject constructor(
                             totalBytes = it.totalBytes,
                             // A per-file count (local copy/move) is real progress too; treating it as
                             // indeterminate made the bar flip between the two with every update.
-                            isIndeterminate = it.totalBytes <= 0 && it.totalFiles <= 0,
+                            isIndeterminate = it.totalBytes <= 0 && it.totalFiles <= 0 && it.percent == null,
                             isUpload = it.isUpload,
-                            operationLabel = it.operationLabel
+                            operationLabel = it.operationLabel,
+                            percent = it.percent
                         )
                     },
                     transferCancelledByUser = if (info == null) false else _uiState.value.transferCancelledByUser

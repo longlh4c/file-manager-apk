@@ -108,6 +108,7 @@ class TransferService : Service() {
             // A local copy/move reports only a file count (no bytes), so the percentage used to
             // read 0% with an indeterminate bar for the whole operation. Fall back to the count.
             val percent = when {
+                info.percent != null -> info.percent
                 info.totalBytes > 0 -> (info.bytesTransferred * 100 / info.totalBytes).toInt()
                 info.totalFiles > 0 -> (info.currentIndex * 100L / info.totalFiles).toInt()
                 else -> 0
@@ -115,6 +116,11 @@ class TransferService : Service() {
             if (info.totalFiles > 0) {
                 builder
                     .setContentTitle("$verb ${info.currentIndex}/${info.totalFiles} — $percent%")
+                    .setContentText(info.currentFileName)
+                    .setProgress(100, percent, false)
+            } else if (info.totalBytes > 0 || info.percent != null) {
+                builder
+                    .setContentTitle("$verb — $percent%")
                     .setContentText(info.currentFileName)
                     .setProgress(100, percent, false)
             } else {

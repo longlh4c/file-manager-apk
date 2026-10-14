@@ -244,13 +244,34 @@ class FileOperationsUseCase @Inject constructor(
         targetParentDir: String,
         params: com.antigravity.filemanager.domain.model.ImageResizeParams,
         onProgress: ((currentFile: String, currentIndex: Int, totalFiles: Int) -> Unit)? = null
-    ): Result<List<String>> =
-        fileRepository.resizeImages(sourcePaths, targetParentDir, params, onProgress).also {
-            if (it.isSuccess) {
+    ): Result<List<String>> {
+        transferGuard.begin(initialLabel = "Resizing")
+        try {
+            val result = fileRepository.resizeImages(sourcePaths, targetParentDir, params) { currentFile, currentIndex, totalFiles ->
+                onProgress?.invoke(currentFile, currentIndex, totalFiles)
+                val calculatedPercent = if (totalFiles > 0) (currentIndex * 100 / totalFiles).coerceIn(0, 100) else 0
+                transferGuard.updateProgress(
+                    com.antigravity.filemanager.data.service.TransferProgressInfo(
+                        currentFileName = currentFile,
+                        currentIndex = currentIndex,
+                        totalFiles = totalFiles,
+                        bytesTransferred = 0L,
+                        totalBytes = 0L,
+                        isUpload = false,
+                        operationLabel = "Resizing",
+                        percent = calculatedPercent
+                    )
+                )
+            }
+            if (result.isSuccess) {
                 folderCacheManager.invalidateMediaFolders()
                 mediaChangeSignal.notifyChanged()
             }
+            return result
+        } finally {
+            transferGuard.end()
         }
+    }
 
     suspend fun getArchiveConflicts(
         archivePath: String,
@@ -959,9 +980,41 @@ class CloudStorageUseCase @Inject constructor(
         notifyTransfer: Boolean = true,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Result<File> {
-        if (notifyTransfer) transferGuard.begin()
+        val fileName = destFileName ?: remotePath.substringAfterLast("/")
+        if (notifyTransfer) {
+            transferGuard.begin(initialLabel = "Downloading")
+            transferGuard.updateProgress(
+                com.antigravity.filemanager.data.service.TransferProgressInfo(
+                    currentFileName = fileName,
+                    currentIndex = 1,
+                    totalFiles = 1,
+                    bytesTransferred = 0L,
+                    totalBytes = 0L,
+                    isUpload = false,
+                    operationLabel = "Downloading",
+                    percent = 0
+                )
+            )
+        }
         try {
-            val result = cloudRepository.downloadCloudFile(accountId, remotePath, localTargetDir, destFileName, onProgress)
+            val result = cloudRepository.downloadCloudFile(accountId, remotePath, localTargetDir, destFileName) { bytesRead, totalBytes ->
+                onProgress?.invoke(bytesRead, totalBytes)
+                if (notifyTransfer) {
+                    val p = if (totalBytes > 0) ((bytesRead * 100) / totalBytes).toInt().coerceIn(0, 100) else 0
+                    transferGuard.updateProgress(
+                        com.antigravity.filemanager.data.service.TransferProgressInfo(
+                            currentFileName = fileName,
+                            currentIndex = 1,
+                            totalFiles = 1,
+                            bytesTransferred = bytesRead,
+                            totalBytes = totalBytes,
+                            isUpload = false,
+                            operationLabel = "Downloading",
+                            percent = p
+                        )
+                    )
+                }
+            }
             if (result.isSuccess) folderCacheManager.invalidateMediaFolders()
             return result
         } finally {

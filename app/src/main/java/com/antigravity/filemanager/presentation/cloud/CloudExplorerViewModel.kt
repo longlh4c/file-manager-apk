@@ -247,9 +247,10 @@ class CloudExplorerViewModel @Inject constructor(
                             totalBytes = it.totalBytes,
                             // A per-file count (local copy/move) is real progress too; treating it as
                             // indeterminate made the bar flip between the two with every update.
-                            isIndeterminate = it.totalBytes <= 0 && it.totalFiles <= 0,
+                            isIndeterminate = it.totalBytes <= 0 && it.totalFiles <= 0 && it.percent == null,
                             isUpload = it.isUpload,
-                            operationLabel = it.operationLabel
+                            operationLabel = it.operationLabel,
+                            percent = it.percent
                         )
                     },
                     // A fresh info==null means the whole operation truly ended (TransferGuard.end()
@@ -868,8 +869,14 @@ class CloudExplorerViewModel @Inject constructor(
         isUpload: Boolean,
         bytesTransferred: Long = 0L,
         totalBytes: Long = 0L,
-        operationLabel: String? = null
+        operationLabel: String? = null,
+        percent: Int? = null
     ) {
+        val calculatedPercent = percent ?: when {
+            totalBytes > 0 -> (bytesTransferred * 100 / totalBytes).toInt().coerceIn(0, 100)
+            totalFiles > 0 -> (currentIndex * 100 / totalFiles).coerceIn(0, 100)
+            else -> null
+        }
         _uiState.update { old -> old.copy(
             downloadProgress = CloudTransferProgress(
                 currentFileName = currentFileName,
@@ -879,7 +886,8 @@ class CloudExplorerViewModel @Inject constructor(
                 totalBytes = totalBytes,
                 isIndeterminate = false,
                 isUpload = isUpload,
-                operationLabel = operationLabel
+                operationLabel = operationLabel,
+                percent = calculatedPercent
             )
         ) }
         // Mirrors into the same TransferGuard the persistent notification (TransferService) reads
@@ -895,7 +903,8 @@ class CloudExplorerViewModel @Inject constructor(
                 bytesTransferred = bytesTransferred,
                 totalBytes = totalBytes,
                 isUpload = isUpload,
-                operationLabel = operationLabel
+                operationLabel = operationLabel,
+                percent = calculatedPercent
             )
         )
     }
@@ -1363,7 +1372,10 @@ class CloudExplorerViewModel @Inject constructor(
 
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
+            transferGuard.begin(initialLabel = "Resizing")
             val tempDir = java.io.File(context.cacheDir, "cloud_resize_${System.currentTimeMillis()}").apply { mkdirs() }
+            val downloadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
+            val uploadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
             try {
                 val total = imageItems.size
                 val totalSizeBytes = imageItems.sumOf { it.size }
@@ -1375,20 +1387,37 @@ class CloudExplorerViewModel @Inject constructor(
                     kotlinx.coroutines.currentCoroutineContext().ensureActive()
                     if (_uiState.value.transferCancelledByUser) return@launch
 
-                    _uiState.update { old -> old.copy(
-                        downloadProgress = CloudTransferProgress(
-                            currentFileName = item.name,
-                            currentIndex = index + 1,
-                            totalFiles = total,
-                            bytesTransferred = downloadedBytes,
-                            totalBytes = totalSizeBytes,
-                            isIndeterminate = false,
-                            isUpload = false,
-                            operationLabel = "Downloading"
-                        )
-                    ) }
+                    val initialDownloadedBytes = downloadedBytes
+                    setTransferProgress(
+                        currentFileName = item.name,
+                        currentIndex = index + 1,
+                        totalFiles = total,
+                        bytesTransferred = downloadedBytes,
+                        totalBytes = totalSizeBytes,
+                        isUpload = false,
+                        operationLabel = "Downloading"
+                    )
 
-                    val dlResult = cloudUseCase.downloadFile(accountId, item.path, tempDir.absolutePath, destFileName = item.name)
+                    val dlResult = cloudUseCase.downloadFile(
+                        accountId = accountId,
+                        remotePath = item.path,
+                        localTargetDir = tempDir.absolutePath,
+                        destFileName = item.name,
+                        notifyTransfer = false
+                    ) { bytesRead, _ ->
+                        if (downloadThrottler.shouldEmit(bytesRead, item.size)) {
+                            val currentTransferred = initialDownloadedBytes + bytesRead
+                            setTransferProgress(
+                                currentFileName = item.name,
+                                currentIndex = index + 1,
+                                totalFiles = total,
+                                bytesTransferred = currentTransferred,
+                                totalBytes = totalSizeBytes,
+                                isUpload = false,
+                                operationLabel = "Downloading"
+                            )
+                        }
+                    }
                     val localFile = dlResult.getOrNull()
                     if (localFile != null && localFile.exists()) {
                         val origTime = com.antigravity.filemanager.utils.ImageResizerEngine.extractOriginalCreationDate(localFile, item.lastModified)
@@ -1397,6 +1426,15 @@ class CloudExplorerViewModel @Inject constructor(
                         }
                         downloadedFiles.add(localFile)
                         downloadedBytes += if (item.size > 0L) item.size else localFile.length()
+                        setTransferProgress(
+                            currentFileName = item.name,
+                            currentIndex = index + 1,
+                            totalFiles = total,
+                            bytesTransferred = downloadedBytes,
+                            totalBytes = totalSizeBytes,
+                            isUpload = false,
+                            operationLabel = "Downloading"
+                        )
                     }
                 }
 
@@ -1407,19 +1445,22 @@ class CloudExplorerViewModel @Inject constructor(
 
                 // 2. Resize each downloaded image in place
                 val resizedFiles = mutableListOf<java.io.File>()
+                val totalResizing = downloadedFiles.size
                 for ((index, file) in downloadedFiles.withIndex()) {
                     kotlinx.coroutines.currentCoroutineContext().ensureActive()
                     if (_uiState.value.transferCancelledByUser) return@launch
 
-                    _uiState.update { old -> old.copy(
-                        downloadProgress = CloudTransferProgress.forItemCount(
-                            currentFile = file.name,
-                            currentIndex = index + 1,
-                            totalFiles = downloadedFiles.size,
-                            isUpload = false,
-                            operationLabel = "Resizing"
-                        )
-                    ) }
+                    val startPercent = if (totalResizing > 0) (index * 100 / totalResizing) else 0
+                    setTransferProgress(
+                        currentFileName = file.name,
+                        currentIndex = index + 1,
+                        totalFiles = totalResizing,
+                        bytesTransferred = 0L,
+                        totalBytes = 0L,
+                        isUpload = false,
+                        operationLabel = "Resizing",
+                        percent = startPercent
+                    )
 
                     val matchingItem = imageItems.find { it.name == file.name || it.name.equals(file.name, ignoreCase = true) }
                     val originalDate = com.antigravity.filemanager.utils.ImageResizerEngine.extractOriginalCreationDate(file, matchingItem?.lastModified ?: 0L)
@@ -1436,6 +1477,18 @@ class CloudExplorerViewModel @Inject constructor(
                     } catch (e: Exception) {
                         android.util.Log.e("CloudResize", "Error resizing ${file.name}", e)
                     }
+
+                    val endPercent = if (totalResizing > 0) ((index + 1) * 100 / totalResizing) else 100
+                    setTransferProgress(
+                        currentFileName = file.name,
+                        currentIndex = index + 1,
+                        totalFiles = totalResizing,
+                        bytesTransferred = 0L,
+                        totalBytes = 0L,
+                        isUpload = false,
+                        operationLabel = "Resizing",
+                        percent = endPercent
+                    )
                 }
 
                 if (resizedFiles.isEmpty()) {
@@ -1451,18 +1504,17 @@ class CloudExplorerViewModel @Inject constructor(
                     overwriteNames = imageItems.map { it.name }.toSet() + resizedFiles.map { it.name }.toSet()
                 ) { currentFile, currentIndex, totalFiles, bytesSent, totalBytes ->
                     if (!this@launch.isActive || _uiState.value.transferCancelledByUser) return@uploadFiles
-                    _uiState.update { old -> old.copy(
-                        downloadProgress = CloudTransferProgress(
+                    if (uploadThrottler.shouldEmit(bytesSent, totalBytes)) {
+                        setTransferProgress(
                             currentFileName = currentFile,
                             currentIndex = currentIndex,
                             totalFiles = totalFiles,
                             bytesTransferred = bytesSent,
                             totalBytes = totalBytes,
-                            isIndeterminate = false,
                             isUpload = true,
                             operationLabel = "Uploading"
                         )
-                    ) }
+                    }
                 }
 
                 if (uploadResult.isSuccess) {
@@ -1558,6 +1610,7 @@ class CloudExplorerViewModel @Inject constructor(
                 }
             } finally {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    transferGuard.end()
                     tempDir.deleteRecursively()
                     _uiState.update { old -> old.copy(
                         downloadProgress = null,
