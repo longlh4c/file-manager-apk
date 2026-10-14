@@ -32,7 +32,8 @@ data class TransferProgressInfo(
     // (Deleting, Restoring, Moving...) that still reuses this notification/progress plumbing sets
     // this so the notification text says what's actually happening instead of defaulting to the
     // generic "Uploading"/"Downloading" derived from `isUpload` alone.
-    val operationLabel: String? = null
+    val operationLabel: String? = null,
+    val percent: Int? = null
 )
 
 /**
