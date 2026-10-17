@@ -14,6 +14,7 @@ import com.antigravity.filemanager.domain.usecase.CloudStorageUseCase
 import com.antigravity.filemanager.domain.usecase.FileOperationsUseCase
 import com.antigravity.filemanager.domain.usecase.GetCategorizedMediaUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardManager
+import com.antigravity.filemanager.domain.usecase.GlobalClipboardState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -208,7 +209,11 @@ class CategoriesViewModel @Inject constructor(
      * folder the operation started in pulled the user back there (under the name of the folder
      * they had moved on to) whenever they navigated while it ran. */
     private fun reloadAfterChange(changedDir: String?) {
-        if (changedDir != null) folderCacheManager.invalidateCategorySubfolder(categoryType, changedDir)
+        if (changedDir != null) {
+            folderCacheManager.invalidateLocal(changedDir)
+            folderCacheManager.invalidateCategorySubfolder(categoryType, changedDir)
+        }
+        folderCacheManager.invalidateMediaFolders()
         val current = _uiState.value.currentSubfolderPath
         if (current != null) openSubfolder(current, _uiState.value.currentSubfolderName) else loadFolders()
     }
@@ -569,38 +574,58 @@ class CategoriesViewModel @Inject constructor(
 
     private var pendingOverwriteAction: (suspend (overwriteNames: Set<String>, skipNames: Set<String>) -> Unit)? = null
 
+    /** Items dropped onto a category folder or subfolder from the other dual-panel pane (local or cloud);
+     * follows the same flow as paste (conflict dialog, progress, refresh), leaving clipboard untouched. */
+    fun dropItems(items: GlobalClipboardState, targetDir: String = _uiState.value.currentSubfolderPath ?: "") =
+        pasteItems(items, fromClipboard = false, targetDir = targetDir)
+
     fun paste() {
         val targetDir = _uiState.value.currentSubfolderPath ?: return
-        val cloudAccountId = _uiState.value.clipboardSourceCloudAccountId
+        val clip = globalClipboardManager.state.value
+        pasteItems(clip, fromClipboard = true, targetDir = targetDir)
+    }
+
+    private fun pasteItems(
+        clip: GlobalClipboardState,
+        fromClipboard: Boolean,
+        targetDir: String
+    ) {
+        if (targetDir.isBlank()) return
+        val sources = clip.paths
+        if (sources.isEmpty()) return
+        val cloudAccountId = clip.sourceCloudAccountId
+        val isMove = clip.isCut
+        val clearClipboard = { if (fromClipboard) globalClipboardManager.clear() }
+
         if (cloudAccountId != null) {
-            // Was always calling pasteFromCloud() straight away regardless of name clashes —
-            // unlike FileBrowserViewModel's own cloud-source paste (which already checks this),
-            // a name collision here silently auto-renamed to "name (1)" instead of ever asking,
-            // since pasteFromCloud only auto-renames when a name isn't in overwriteNames.
-            val sources = _uiState.value.clipboardPaths
-            val itemSizes = _uiState.value.clipboardItemSizes
+            val itemSizes = clip.itemSizes
             activeTransferJob?.cancel()
             activeTransferJob = viewModelScope.launch {
-                val conflicts = cloudStorageUseCase.findLocalConflicts(sources, targetDir, itemSizes, _uiState.value.clipboardItemIsDirectory)
+                val conflicts = cloudStorageUseCase.findLocalConflicts(sources, targetDir, itemSizes, clip.itemIsDirectory)
                 if (conflicts.isNotEmpty()) {
                     pendingOverwriteAction = { overwriteNames, skipNames ->
-                        pasteFromCloud(cloudAccountId, targetDir, overwriteNames, skipNames)
+                        pasteFromCloud(cloudAccountId, sources, targetDir, isMove, itemSizes, clip.itemIsDirectory, overwriteNames, skipNames)
+                        clearClipboard()
                     }
                     _uiState.update { old -> old.copy(overwriteConflicts = conflicts) }
                 } else {
-                    pasteFromCloud(cloudAccountId, targetDir)
+                    pasteFromCloud(cloudAccountId, sources, targetDir, isMove, itemSizes, clip.itemIsDirectory)
+                    clearClipboard()
                 }
             }
             return
         }
+
         activeTransferJob?.cancel()
         activeTransferJob = viewModelScope.launch {
-            val sources = _uiState.value.clipboardPaths
-            val isMove = _uiState.value.isCutOperation
-
             suspend fun doPaste(overwriteNames: Set<String>, skipNames: Set<String>) {
-                // Keep the clipboard after a failed paste so the user can retry without re-copying.
-                if (runLocalCopyOrMove(sources, targetDir, isMove, overwriteNames, skipNames).isSuccess) globalClipboardManager.clear()
+                if (runLocalCopyOrMove(sources, targetDir, isMove, overwriteNames, skipNames).isSuccess) clearClipboard()
+                if (isMove) {
+                    sources.mapNotNull { File(it).parent }.distinct().forEach { srcDir ->
+                        folderCacheManager.invalidateLocal(srcDir)
+                        folderCacheManager.invalidateCategorySubfolder(categoryType, srcDir)
+                    }
+                }
                 reloadAfterChange(targetDir)
             }
 
@@ -614,20 +639,16 @@ class CategoriesViewModel @Inject constructor(
         }
     }
 
-    /**
-     * paste() used to have no cloud branch at all — a clipboard entry Copied from a Cloud account
-     * (a remote path like "/CS/photo.jpg") went straight into fileOperationsUseCase.copy/move,
-     * which only ever knows how to operate on real local java.io.File paths. The remote "file"
-     * simply doesn't exist locally, so copyFiles/findConflicts silently found nothing to do and
-     * returned — no exception, no toast, no file, matching exactly "pressed Paste, nothing
-     * happened" for a Dropbox/MEGA/Drive source pasted into a category subfolder (Images >
-     * Pictures, say), while the same paste worked fine from the plain local file browser (Local >
-     * Downloads), which already had this branch. Mirrors FileBrowserViewModel.pasteFromCloud.
-     */
-    private suspend fun pasteFromCloud(accountId: String, targetDir: String, overwriteNames: Set<String> = emptySet(), skipNames: Set<String> = emptySet()) {
-        val sources = _uiState.value.clipboardPaths
-        val isMove = _uiState.value.isCutOperation
-        val itemSizes = _uiState.value.clipboardItemSizes
+    private suspend fun pasteFromCloud(
+        accountId: String,
+        sources: List<String>,
+        targetDir: String,
+        isMove: Boolean,
+        itemSizes: Map<String, Long>,
+        itemIsDirectory: Map<String, Boolean>,
+        overwriteNames: Set<String> = emptySet(),
+        skipNames: Set<String> = emptySet()
+    ) {
         try {
             val result = cloudStorageUseCase.downloadFilesToLocal(
                 context = context,
@@ -638,13 +659,9 @@ class CategoriesViewModel @Inject constructor(
                 isMove = isMove,
                 overwriteNames = overwriteNames,
                 skipNames = skipNames,
-                itemIsDirectory = _uiState.value.clipboardItemIsDirectory
+                itemIsDirectory = itemIsDirectory
             ) { progress -> _uiState.update { old -> old.copy(downloadProgress = progress) } }
 
-            globalClipboardManager.clear()
-            // result.scannedPaths.size is how many actually got written — was always "Pasted
-            // ${sources.size}" regardless of skipNames, so skipping every conflict still reported
-            // success for files that never actually landed.
             _uiState.update { old -> old.copy(
                 downloadProgress = null,
                 toastMessage = when {

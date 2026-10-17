@@ -590,10 +590,18 @@ fun MediaCategoriesScreen(
                 saver = androidx.compose.foundation.lazy.grid.LazyGridState.Saver
             ) { androidx.compose.foundation.lazy.grid.LazyGridState() }
 
+            val subfolderDropModifier = if (uiState.currentSubfolderPath != null) {
+                Modifier.dualPaneDropZone(
+                    location = uiState.currentSubfolderPath!!,
+                    name = File(uiState.currentSubfolderPath!!).name,
+                    isPaneBackground = true
+                ) { items -> viewModel.dropItems(items, targetDir = uiState.currentSubfolderPath!!) }
+            } else Modifier
+
             PullToRefreshWrapper(
                 onRefresh = { viewModel.refresh() },
                 isRefreshing = uiState.isLoading,
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize().then(subfolderDropModifier)
             ) {
             if (uiState.folderHistory.isNotEmpty() || uiState.searchQuery.isNotBlank()) {
                 if (uiState.isSearching && filteredFiles.isEmpty()) {
@@ -636,6 +644,10 @@ fun MediaCategoriesScreen(
                                 )
                             },
                             onFinished = { viewModel.clearSelection() }
+                        ).then(
+                            if (file.isDirectory) Modifier.dualPaneDropZone(location = file.path, name = file.name) { items ->
+                                viewModel.dropItems(items, targetDir = file.path)
+                            } else Modifier
                         )
                     }
 
@@ -775,6 +787,10 @@ fun MediaCategoriesScreen(
                             )
                         },
                         onFinished = { viewModel.clearSelection() }
+                    ).then(
+                        Modifier.dualPaneDropZone(location = folder.path, name = folder.name) { items ->
+                            viewModel.dropItems(items, targetDir = folder.path)
+                        }
                     )
                 }
                 if (filteredFolders.isEmpty() && !uiState.isLoading) {
