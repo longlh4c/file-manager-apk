@@ -55,9 +55,11 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FileSortOption
+import com.antigravity.filemanager.domain.usecase.GlobalClipboardState
 import com.antigravity.filemanager.presentation.components.BottomBarActionItem
 import com.antigravity.filemanager.presentation.components.DeleteConfirmDialog
 import com.antigravity.filemanager.presentation.components.FileListItem
+import com.antigravity.filemanager.presentation.components.dualPaneDragSource
 import com.antigravity.filemanager.presentation.components.FileManagerTopBar
 import com.antigravity.filemanager.presentation.components.verticalScrollbar
 import com.antigravity.filemanager.presentation.theme.DarkBackground
@@ -250,6 +252,20 @@ fun RecentFilesScreen(
                     // A fresh position per tab and filter: each is its own list.
                     val listState = remember(uiState.tab, uiState.filter) { androidx.compose.foundation.lazy.LazyListState() }
                     val groups = remember(visible) { groupByDay(visible) }
+                    val dragSource: (FileItem) -> Modifier = { file ->
+                        Modifier.dualPaneDragSource(
+                            sourceLocation = File(file.path).parent ?: "",
+                            items = {
+                                val paths = (uiState.selectedPaths + file.path).toList()
+                                GlobalClipboardState(
+                                    paths = paths,
+                                    itemSizes = paths.associateWith { File(it).length() },
+                                    itemIsDirectory = paths.associateWith { File(it).isDirectory }
+                                )
+                            },
+                            onFinished = { viewModel.clearSelection() }
+                        )
+                    }
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize().verticalScrollbar(listState)
@@ -267,6 +283,7 @@ fun RecentFilesScreen(
                             items(files, key = { it.path }) { file ->
                                 FileListItem(
                                     file = file,
+                                    modifier = dragSource(file),
                                     isSelectionMode = uiState.isSelectionMode,
                                     isSelected = file.path in uiState.selectedPaths,
                                     onClick = {

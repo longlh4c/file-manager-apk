@@ -39,6 +39,8 @@ import coil.compose.AsyncImage
 import com.antigravity.filemanager.domain.model.CategoryType
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FileSortOption
+import com.antigravity.filemanager.domain.model.MediaFolder
+import com.antigravity.filemanager.domain.usecase.GlobalClipboardState
 import com.antigravity.filemanager.presentation.components.BottomBarActionItem
 import com.antigravity.filemanager.presentation.components.*
 import com.antigravity.filemanager.presentation.theme.*
@@ -622,6 +624,21 @@ fun MediaCategoriesScreen(
                     } else {
                         com.antigravity.filemanager.presentation.viewers.ScrollToLastViewed(filteredFiles, filesListState, uiState.isLoading)
                     }
+                    val dragSource: (FileItem) -> Modifier = { file ->
+                        Modifier.dualPaneDragSource(
+                            sourceLocation = uiState.currentSubfolderPath ?: File(file.path).parent ?: "",
+                            items = {
+                                val paths = (uiState.selectedPaths + file.path).toList()
+                                GlobalClipboardState(
+                                    paths = paths,
+                                    itemSizes = paths.associateWith { File(it).length() },
+                                    itemIsDirectory = paths.associateWith { File(it).isDirectory }
+                                )
+                            },
+                            onFinished = { viewModel.clearSelection() }
+                        )
+                    }
+
                     when (shownMode) {
                         ViewMode.GRID -> {
                             LazyVerticalGrid(
@@ -640,6 +657,7 @@ fun MediaCategoriesScreen(
                                 items(filteredFiles, key = { it.path }) { file ->
                                     FileGridCard(
                                         file = file,
+                                        modifier = dragSource(file),
                                         isSelectionMode = uiState.isSelectionMode,
                                         isSelected = uiState.selectedPaths.contains(file.path),
                                         onClick = {
@@ -666,6 +684,7 @@ fun MediaCategoriesScreen(
                                 items(filteredFiles, key = { it.path }) { file ->
                                     FileDetailedListItem(
                                         file = file,
+                                        modifier = dragSource(file),
                                         isSelectionMode = uiState.isSelectionMode,
                                         isSelected = uiState.selectedPaths.contains(file.path),
                                         onClick = {
@@ -703,6 +722,7 @@ fun MediaCategoriesScreen(
                                     items(filteredFiles, key = { it.path }) { file ->
                                         FileListItem(
                                             file = file,
+                                            modifier = dragSource(file),
                                             isSelectionMode = uiState.isSelectionMode,
                                             isSelected = uiState.selectedPaths.contains(file.path),
                                             onClick = {
@@ -743,6 +763,20 @@ fun MediaCategoriesScreen(
                     CategoryType.DOCUMENTS -> Icons.Default.Description to DocumentsColor
                     else -> Icons.Default.Folder to DownloadFolderColor
                 }
+                val folderDragSource: (MediaFolder) -> Modifier = { folder ->
+                    Modifier.dualPaneDragSource(
+                        sourceLocation = File(folder.path).parent ?: "",
+                        items = {
+                            val paths = (uiState.selectedPaths + folder.path).toList()
+                            GlobalClipboardState(
+                                paths = paths,
+                                itemSizes = paths.associateWith { File(it).length() },
+                                itemIsDirectory = paths.associateWith { true }
+                            )
+                        },
+                        onFinished = { viewModel.clearSelection() }
+                    )
+                }
                 if (filteredFolders.isEmpty() && !uiState.isLoading) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(text = "No folders found", color = TextSecondary, fontSize = 15.sp)
@@ -761,6 +795,7 @@ fun MediaCategoriesScreen(
                         items(filteredFolders, key = { it.id }) { folder ->
                             MediaFolderCard(
                                 folder = folder,
+                                modifier = folderDragSource(folder),
                                 isSelected = uiState.selectedPaths.contains(folder.path),
                                 onClick = {
                                     if (uiState.isSelectionMode) {
@@ -780,6 +815,7 @@ fun MediaCategoriesScreen(
                                 folder = folder,
                                 badgeIcon = badgeIcon,
                                 badgeColor = badgeColor,
+                                modifier = folderDragSource(folder),
                                 isSelected = uiState.selectedPaths.contains(folder.path),
                                 onClick = {
                                     if (uiState.isSelectionMode) {
