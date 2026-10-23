@@ -175,7 +175,9 @@ fun ImageViewerScreen(
                     ?.map { ViewerEntry.Cloud(it) }
                 if (!siblings.isNullOrEmpty()) siblings else listOf(ViewerEntry.Local(File(actualInitialPath)))
             } else {
-                val sessionFiles = LocalViewerSession.get()
+                val sessionFiles = LocalViewerSession.get()?.takeIf { files ->
+                    files.any { it.path == actualInitialPath }
+                }
                 if (sessionFiles != null) {
                     val siblings = sessionFiles
                         .filter { !it.isDirectory && it.extension.lowercase(Locale.getDefault()) in IMAGE_EXTENSIONS }
@@ -203,7 +205,8 @@ fun ImageViewerScreen(
     )
 
     LaunchedEffect(actualInitialPath, actualParentPath, sortOption, cloudAccountId) {
-        if (cloudAccountId == null && LocalViewerSession.get() == null) {
+        val hasMatchingSession = LocalViewerSession.get()?.any { it.path == actualInitialPath } == true
+        if (cloudAccountId == null && !hasMatchingSession) {
             val siblings = withContext(Dispatchers.IO) {
                 val targetParent = if (actualParentPath.isNotEmpty()) File(actualParentPath) else File(actualInitialPath).parentFile
                 targetParent?.listFiles { file ->
@@ -676,7 +679,9 @@ fun VideoPlayerScreen(
                     ?.map { ViewerEntry.Cloud(it) }
                 if (!siblings.isNullOrEmpty()) siblings else listOf(ViewerEntry.Local(File(actualInitialPath)))
             } else {
-                val sessionFiles = LocalViewerSession.get()
+                val sessionFiles = LocalViewerSession.get()?.takeIf { files ->
+                    files.any { it.path == actualInitialPath }
+                }
                 if (sessionFiles != null) {
                     val siblings = sessionFiles
                         .filter { !it.isDirectory && it.extension.lowercase(Locale.getDefault()) in VIDEO_EXTENSIONS }
@@ -704,7 +709,8 @@ fun VideoPlayerScreen(
     )
 
     LaunchedEffect(actualInitialPath, actualParentPath, sortOption, cloudAccountId) {
-        if (cloudAccountId == null && LocalViewerSession.get() == null) {
+        val hasMatchingSession = LocalViewerSession.get()?.any { it.path == actualInitialPath } == true
+        if (cloudAccountId == null && !hasMatchingSession) {
             val siblings = withContext(Dispatchers.IO) {
                 val targetParent = if (actualParentPath.isNotEmpty()) File(actualParentPath) else File(actualInitialPath).parentFile
                 targetParent?.listFiles { file ->

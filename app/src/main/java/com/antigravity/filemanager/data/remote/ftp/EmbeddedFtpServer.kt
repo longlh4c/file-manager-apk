@@ -1,6 +1,10 @@
 package com.antigravity.filemanager.data.remote.ftp
 
+import android.content.Context
 import android.os.Environment
+import com.antigravity.filemanager.data.local.cache.FolderCacheManager
+import com.antigravity.filemanager.data.local.observer.MediaChangeSignal
+import dagger.hilt.android.qualifiers.ApplicationContext
 import org.apache.ftpserver.ConnectionConfigFactory
 import org.apache.ftpserver.DataConnectionConfigurationFactory
 import org.apache.ftpserver.FtpServer
@@ -27,7 +31,11 @@ private const val MAX_WORKER_THREADS = 16
  * Owns only the server's own lifecycle — networking (LAN IP, wake/WiFi locks) and the foreground
  * service wrapper live in [FtpServerService]. */
 @Singleton
-class EmbeddedFtpServer @Inject constructor() {
+class EmbeddedFtpServer @Inject constructor(
+    @ApplicationContext private val context: Context,
+    private val folderCacheManager: FolderCacheManager,
+    private val mediaChangeSignal: MediaChangeSignal
+) {
 
     private var server: FtpServer? = null
     var isRunning: Boolean = false
@@ -116,7 +124,10 @@ class EmbeddedFtpServer @Inject constructor() {
                 // `if (isRunning) return true` guard skipped ever creating a new listener. From a
                 // client's side that's indistinguishable from the app just refusing every
                 // connection.
-                ftplets = hashMapOf<String, org.apache.ftpserver.ftplet.Ftplet>("transferLimiter" to TransferConcurrencyFtplet(MAX_CONCURRENT_TRANSFERS))
+                ftplets = linkedMapOf<String, org.apache.ftpserver.ftplet.Ftplet>(
+                    "transferLimiter" to TransferConcurrencyFtplet(MAX_CONCURRENT_TRANSFERS),
+                    "mediaSync" to FtpMediaSyncFtplet(context, folderCacheManager, mediaChangeSignal)
+                )
             }
 
             val createdServer = serverFactory.createServer()

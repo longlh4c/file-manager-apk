@@ -309,6 +309,11 @@ class FolderCacheManager @Inject constructor(
         }
     }
 
+    fun clearDashboardSummary() {
+        dashboardSummaryCache = null
+        ioScope.launch { dashboardCacheFile.delete() }
+    }
+
     /** Call after any operation that could add/remove/rename files under any media category
      * (copy/move/delete/download-to-local, etc). Clears every category rather than trying to
      * guess which bucket(s) were affected — cheap since it's just re-scanning MediaStore next visit. */
@@ -316,6 +321,7 @@ class FolderCacheManager @Inject constructor(
         markMediaCachesUnreconciled()
         val mediaKeys = mediaFoldersCache.keys.toList()
         mediaFoldersCache.clear()
+        clearDashboardSummary()
         val keysToRemove = cacheRemoveByPrefix("docs_") + cacheRemoveByPrefix("catsub_") + mediaKeys
         ioScope.launch {
             keysToRemove.forEach { key ->
@@ -348,6 +354,10 @@ class FolderCacheManager @Inject constructor(
      * its own one-time reconcile against MediaStore the first time it's opened (reconciledOnceKeys).
      */
     suspend fun removeFromMediaFolders(deletedPaths: List<String>) {
+        // Dashboard totals (item counts / sizes per category) are cheap to just drop and let
+        // recompute in the background — no per-bucket bookkeeping needed there.
+        clearDashboardSummary()
+
         data class Affected(val categoryType: CategoryType, val parentDir: String)
         val byFolder = HashMap<Affected, MutableList<String>>()
         for (path in deletedPaths) {
@@ -357,11 +367,6 @@ class FolderCacheManager @Inject constructor(
             byFolder.getOrPut(Affected(categoryType, parentDir)) { mutableListOf() }.add(path)
         }
         if (byFolder.isEmpty()) return
-
-        // Dashboard totals (item counts / sizes per category) are cheap to just drop and let
-        // recompute in the background — no per-bucket bookkeeping needed there.
-        dashboardSummaryCache = null
-        ioScope.launch { dashboardCacheFile.delete() }
 
         // Root bucket grid (Images/Videos/Audio/Documents) — every sort variant currently held
         // for an affected category, since the folder contents/counts don't depend on sort order.

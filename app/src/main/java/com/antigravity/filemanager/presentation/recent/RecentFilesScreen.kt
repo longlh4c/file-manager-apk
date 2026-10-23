@@ -289,7 +289,7 @@ fun RecentFilesScreen(
                                     onClick = {
                                         if (uiState.isSelectionMode) viewModel.toggleSelection(file.path)
                                         else {
-                                            LocalViewerSession.set(files)
+                                            LocalViewerSession.clear()
                                             onOpenFile(file, FileSortOption.BY_NAME_ASC, null)
                                         }
                                     },

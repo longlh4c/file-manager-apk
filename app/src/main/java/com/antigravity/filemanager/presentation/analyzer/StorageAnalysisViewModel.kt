@@ -24,6 +24,7 @@ import com.antigravity.filemanager.domain.usecase.BookmarkUseCase
 import com.antigravity.filemanager.domain.usecase.FileOperationsUseCase
 import com.antigravity.filemanager.domain.usecase.GlobalClipboardManager
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.debounce
 import java.io.File
 
 data class StorageAnalysisUiState(
@@ -62,7 +63,8 @@ class StorageAnalysisViewModel @Inject constructor(
     private val storageAnalysisUseCase: StorageAnalysisUseCase,
     private val fileOperationsUseCase: FileOperationsUseCase,
     private val globalClipboardManager: GlobalClipboardManager,
-    private val bookmarkUseCase: BookmarkUseCase
+    private val bookmarkUseCase: BookmarkUseCase,
+    private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(StorageAnalysisUiState())
@@ -74,6 +76,7 @@ class StorageAnalysisViewModel @Inject constructor(
         _uiState.update { old -> old.copy(isLoading = true) }
         loadData(isInitial = true)
         observeBookmarks()
+        observeMediaChanges()
     }
 
     fun clearToast() {
@@ -93,6 +96,15 @@ class StorageAnalysisViewModel @Inject constructor(
         viewModelScope.launch {
             bookmarkUseCase.observeBookmarks().collectLatest { list ->
                 _uiState.update { old -> old.copy(bookmarks = list) }
+            }
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    private fun observeMediaChanges() {
+        viewModelScope.launch {
+            mediaChangeSignal.changes.debounce(500).collect {
+                loadData(isInitial = false)
             }
         }
     }
