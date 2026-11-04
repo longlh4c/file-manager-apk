@@ -16,6 +16,9 @@ class NativeEngineTest {
         if (!available) {
             val result = NativeEngine.analyzeStorage("/dummy/path", 1024L)
             assert(result == null)
+            assert(NativeEngine.listArchive("/dummy.zip", null) == null)
+            assert(NativeEngine.extract("/dummy.zip", "/out", null) == null)
+            assert(NativeEngine.compress(listOf("/src"), "/out.zip") == null)
             try {
                 NativeEngine.resizeImage("/src", "/dst", 100, 100, 85, "jpg", 1)
             } catch (e: UnsatisfiedLinkError) {

@@ -1,5 +1,6 @@
 pub mod analyzer;
 pub mod image_engine;
+pub mod archive;
 
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
@@ -85,4 +86,130 @@ pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_resize
             -1
         }
     }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_listArchiveEntries<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    archive_path: JString<'local>,
+    password: JString<'local>,
+) -> jstring {
+    let path: String = match env.get_string(&archive_path) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env
+                .new_string("{\"success\":false,\"error_code\":\"INVALID_ARG\",\"error_message\":\"Invalid path\"}")
+                .unwrap();
+            return err.into_raw();
+        }
+    };
+    let pwd: Option<String> = if password.is_null() {
+        None
+    } else {
+        env.get_string(&password).ok().map(|s| s.into())
+    };
+
+    let result = archive::list_archive_entries(&path, pwd.as_deref());
+    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+        format!(
+            "{{\"success\":false,\"error_code\":\"JSON_ERROR\",\"error_message\":\"{}\"}}",
+            e
+        )
+    });
+
+    let output = env
+        .new_string(json)
+        .unwrap_or_else(|_| env.new_string("{}").unwrap());
+    output.into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_extractArchive<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    archive_path: JString<'local>,
+    target_dir: JString<'local>,
+    password: JString<'local>,
+    selected_paths_json: JString<'local>,
+) -> jstring {
+    let path: String = match env.get_string(&archive_path) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env
+                .new_string("{\"success\":false,\"error_code\":\"INVALID_ARG\",\"error_message\":\"Invalid path\"}")
+                .unwrap();
+            return err.into_raw();
+        }
+    };
+    let target: String = match env.get_string(&target_dir) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env
+                .new_string("{\"success\":false,\"error_code\":\"INVALID_ARG\",\"error_message\":\"Invalid target\"}")
+                .unwrap();
+            return err.into_raw();
+        }
+    };
+    let pwd: Option<String> = if password.is_null() {
+        None
+    } else {
+        env.get_string(&password).ok().map(|s| s.into())
+    };
+
+    let selected_paths: Option<Vec<String>> = if selected_paths_json.is_null() {
+        None
+    } else {
+        env.get_string(&selected_paths_json)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s.to_string_lossy()).ok())
+    };
+
+    let result = archive::extract_archive(&path, &target, pwd.as_deref(), selected_paths);
+    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+        format!(
+            "{{\"success\":false,\"error_code\":\"JSON_ERROR\",\"error_message\":\"{}\"}}",
+            e
+        )
+    });
+
+    let output = env
+        .new_string(json)
+        .unwrap_or_else(|_| env.new_string("{}").unwrap());
+    output.into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_compressZip<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    source_paths_json: JString<'local>,
+    target_zip_path: JString<'local>,
+) -> jstring {
+    let target: String = match env.get_string(&target_zip_path) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env
+                .new_string("{\"success\":false,\"error_code\":\"INVALID_ARG\",\"error_message\":\"Invalid target path\"}")
+                .unwrap();
+            return err.into_raw();
+        }
+    };
+    let sources: Vec<String> = match env.get_string(&source_paths_json) {
+        Ok(s) => serde_json::from_str(&s.to_string_lossy()).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+
+    let result = archive::compress_to_zip(sources, &target);
+    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+        format!(
+            "{{\"success\":false,\"error_code\":\"JSON_ERROR\",\"error_message\":\"{}\"}}",
+            e
+        )
+    });
+
+    let output = env
+        .new_string(json)
+        .unwrap_or_else(|_| env.new_string("{}").unwrap());
+    output.into_raw()
 }

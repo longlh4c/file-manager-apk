@@ -1,6 +1,9 @@
 package com.antigravity.filemanager.core
 
 import android.util.Log
+import com.antigravity.filemanager.data.local.storage.ArchiveInvalidPasswordException
+import com.antigravity.filemanager.data.local.storage.ArchivePasswordRequiredException
+import com.antigravity.filemanager.domain.model.ArchiveEntryInfo
 import com.antigravity.filemanager.domain.model.DuplicateFileEntry
 import com.antigravity.filemanager.domain.model.DuplicateGroup
 import com.antigravity.filemanager.domain.model.LargeFileItem
@@ -150,6 +153,108 @@ object NativeEngine {
             )
         } catch (e: Throwable) {
             Log.e(TAG, "Error parsing Rust analyzer response", e)
+            null
+        }
+    }
+
+    @JvmStatic
+    external fun listArchiveEntries(archivePath: String, password: String?): String
+
+    @JvmStatic
+    external fun extractArchive(
+        archivePath: String,
+        targetDir: String,
+        password: String?,
+        selectedPathsJson: String?
+    ): String
+
+    @JvmStatic
+    external fun compressZip(sourcePathsJson: String, targetZipPath: String): String
+
+    fun listArchive(archivePath: String, password: String?): List<ArchiveEntryInfo>? {
+        if (!isLoaded) return null
+        return try {
+            val resJson = JSONObject(listArchiveEntries(archivePath, password))
+            if (!resJson.optBoolean("success", false)) {
+                val code = resJson.optString("error_code")
+                when (code) {
+                    "PASSWORD_REQUIRED" -> throw ArchivePasswordRequiredException(archivePath)
+                    "INVALID_PASSWORD" -> throw ArchiveInvalidPasswordException(archivePath)
+                    else -> return null // Fallback to Kotlin
+                }
+            }
+            val entriesArray = resJson.optJSONArray("entries") ?: return emptyList()
+            val list = ArrayList<ArchiveEntryInfo>(entriesArray.length())
+            for (i in 0 until entriesArray.length()) {
+                val obj = entriesArray.getJSONObject(i)
+                list.add(
+                    ArchiveEntryInfo(
+                        path = obj.optString("path"),
+                        size = obj.optLong("size"),
+                        isDirectory = obj.optBoolean("is_directory"),
+                        lastModified = obj.optLong("last_modified")
+                    )
+                )
+            }
+            list
+        } catch (e: ArchivePasswordRequiredException) {
+            throw e
+        } catch (e: ArchiveInvalidPasswordException) {
+            throw e
+        } catch (t: Throwable) {
+            Log.w(TAG, "Native listArchive fallback: ${t.message}")
+            null
+        }
+    }
+
+    fun extract(
+        archivePath: String,
+        targetDir: String,
+        password: String?,
+        selectedPaths: List<String>? = null
+    ): List<String>? {
+        if (!isLoaded) return null
+        return try {
+            val selectedJson = if (selectedPaths != null) org.json.JSONArray(selectedPaths).toString() else null
+            val resJson = JSONObject(extractArchive(archivePath, targetDir, password, selectedJson))
+            if (!resJson.optBoolean("success", false)) {
+                val code = resJson.optString("error_code")
+                when (code) {
+                    "PASSWORD_REQUIRED" -> throw ArchivePasswordRequiredException(archivePath)
+                    "INVALID_PASSWORD" -> throw ArchiveInvalidPasswordException(archivePath)
+                    "SECURITY_ERROR" -> throw SecurityException(resJson.optString("error_message"))
+                    else -> return null // Fallback to Kotlin
+                }
+            }
+            val pathsArray = resJson.optJSONArray("extracted_paths") ?: return emptyList()
+            val list = ArrayList<String>(pathsArray.length())
+            for (i in 0 until pathsArray.length()) {
+                list.add(pathsArray.getString(i))
+            }
+            list
+        } catch (e: ArchivePasswordRequiredException) {
+            throw e
+        } catch (e: ArchiveInvalidPasswordException) {
+            throw e
+        } catch (e: SecurityException) {
+            throw e
+        } catch (t: Throwable) {
+            Log.w(TAG, "Native extract fallback: ${t.message}")
+            null
+        }
+    }
+
+    fun compress(sourcePaths: List<String>, targetZipPath: String): Long? {
+        if (!isLoaded) return null
+        return try {
+            val sourcesJson = org.json.JSONArray(sourcePaths).toString()
+            val resJson = JSONObject(compressZip(sourcesJson, targetZipPath))
+            if (!resJson.optBoolean("success", false)) {
+                return null // Fallback to Kotlin
+            }
+            resJson.optLong("total_bytes", 0L)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Native compress fallback: ${t.message}")
             null
         }
     }

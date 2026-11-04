@@ -15,6 +15,9 @@ walkdir = "2.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+zip = { version = "2.2", default-features = false, features = ["deflate", "aes-crypto"] }
+sevenz-rust = { version = "0.6", default-features = false }
+chrono = { version = "0.4", default-features = false }
 android_logger = "0.14"
 log = "0.4"
 

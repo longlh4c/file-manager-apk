@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.data.local.storage
 
 import android.content.Context
+import com.antigravity.filemanager.core.NativeEngine
 import com.antigravity.filemanager.domain.model.FileItem
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -465,6 +466,10 @@ class FileOperationsHelper @Inject constructor(
             onProgress?.invoke(fileEntries.first().file.name, 0, totalFiles, 0L, totalBytes)
         }
 
+        if (onProgress == null && NativeEngine.isAvailable) {
+            val res = NativeEngine.compress(sourcePaths, targetFile.absolutePath)
+            if (res != null) return
+        }
         val fos = FileOutputStream(targetFile)
         val zos = net.lingala.zip4j.io.outputstream.ZipOutputStream(fos)
         try {
@@ -751,6 +756,13 @@ class FileOperationsHelper @Inject constructor(
     ): List<com.antigravity.filemanager.domain.model.ArchiveEntryInfo> = withContext(Dispatchers.IO) {
         val archiveFile = File(archiveFilePath)
         if (!archiveFile.isFile) throw IOException("Archive not found")
+        val ext = archiveFile.extension.lowercase(Locale.ROOT)
+        if (NativeEngine.isAvailable && (ext == "zip" || ext == "7z")) {
+            val nativeEntries = NativeEngine.listArchive(archiveFilePath, password)
+            if (nativeEntries != null) {
+                return@withContext nativeEntries
+            }
+        }
         validateArchivePassword(archiveFile, password)
         val entries = when (archiveFile.extension.lowercase(Locale.ROOT)) {
             "7z" -> openSevenZ(archiveFile, password).use { archive ->
@@ -1006,6 +1018,18 @@ class FileOperationsHelper @Inject constructor(
 
             val destDir = File(targetDir)
             if (!destDir.exists()) destDir.mkdirs()
+
+            val ext = archiveFile.extension.lowercase(Locale.ROOT)
+            if (overwriteNames.isEmpty() && skipNames.isEmpty() && onProgress == null && NativeEngine.isAvailable && (ext == "zip" || ext == "7z")) {
+                val nativeExtracted = NativeEngine.extract(archiveFilePath, targetDir, password)
+                if (nativeExtracted != null) {
+                    val count = nativeExtracted.size
+                    try {
+                        android.media.MediaScannerConnection.scanFile(context, nativeExtracted.toTypedArray(), null, null)
+                    } catch (_: Exception) {}
+                    return@withContext Result.success(com.antigravity.filemanager.domain.model.ExtractResult(extractedCount = count, skippedCount = 0))
+                }
+            }
 
             when (archiveFile.extension.lowercase(Locale.ROOT)) {
                 "7z" -> extract7z(archiveFile, destDir, password, overwriteNames, skipNames, onProgress)
