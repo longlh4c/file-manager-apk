@@ -244,7 +244,22 @@ class FileOperationsHelper @Inject constructor(
                         entry.dest.delete()
                     }
                 }
-                entry.source.copyTo(entry.dest, overwrite = true)
+                if (NativeEngine.isAvailable) {
+                    if (deleteSources) {
+                        val moved = NativeEngine.moveFileFast(entry.source.absolutePath, entry.dest.absolutePath, overwrite = true)
+                        if (!moved) {
+                            entry.source.copyTo(entry.dest, overwrite = true)
+                            entry.source.delete()
+                        }
+                    } else {
+                        val copiedBytes = NativeEngine.copyFileFast(entry.source.absolutePath, entry.dest.absolutePath, overwrite = true)
+                        if (copiedBytes < 0) {
+                            entry.source.copyTo(entry.dest, overwrite = true)
+                        }
+                    }
+                } else {
+                    entry.source.copyTo(entry.dest, overwrite = true)
+                    }
                 if (deleteSources) entry.source.delete()
                 copiedPaths.add(entry.dest.absolutePath)
             } catch (e: Exception) {

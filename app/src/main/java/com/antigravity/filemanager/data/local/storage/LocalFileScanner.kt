@@ -1080,6 +1080,32 @@ class LocalFileScanner @Inject constructor(
             File(Environment.getExternalStorageDirectory(), "Telegram")
         )
 
+        if (NativeEngine.isAvailable) {
+            val validDirs = standardDirs.filter { it.exists() && it.isDirectory }.map { it.absolutePath }
+            val nativeDocs = NativeEngine.scanDocumentsFast(validDirs, documentExtensions, maxDepth = 4)
+            if (nativeDocs != null) {
+                for (doc in nativeDocs) {
+                    if (!fileMap.containsKey(doc.path)) {
+                        val ext = doc.path.substringAfterLast('.', "").lowercase(Locale.getDefault())
+                        fileMap[doc.path] = FileItem(
+                            id = doc.path,
+                            name = doc.name,
+                            path = doc.path,
+                            size = doc.size,
+                            lastModified = doc.lastModified,
+                            isDirectory = false,
+                            mimeType = getMimeType(File(doc.path)),
+                            extension = ext,
+                            itemCount = 0,
+                            thumbnailUri = null,
+                            appSourceBadge = detectBadgeFromPath(doc.path),
+                            folderBadgeType = FolderBadgeType.STANDARD,
+                            isHidden = false
+                        )
+                    }
+                }
+            }
+        } else {
         fun scanRecursive(dir: File, depth: Int = 4) {
             if (!dir.exists() || !dir.isDirectory || depth < 0) return
             if (dir.name.startsWith(".")) return
@@ -1115,6 +1141,8 @@ class LocalFileScanner @Inject constructor(
 
         for (d in standardDirs) {
             scanRecursive(d)
+        }
+
         }
 
         sortFileList(fileMap.values.toList(), sortOption)
@@ -1230,6 +1258,21 @@ class LocalFileScanner @Inject constructor(
             File(Environment.getExternalStorageDirectory(), "Telegram")
         )
 
+        if (NativeEngine.isAvailable) {
+            val validDirs = standardDirs.filter { it.exists() && it.isDirectory }.map { it.absolutePath }
+            val nativeDocs = NativeEngine.scanDocumentsFast(validDirs, docExts, maxDepth = 4)
+            if (nativeDocs != null) {
+                for (doc in nativeDocs) {
+                    val slashIdx = doc.path.lastIndexOf('/')
+                    if (slashIdx > 0) {
+                        val parent = doc.path.substring(0, slashIdx)
+                        if (seenPaths.add(doc.path)) {
+                            folderMap.getOrPut(parent) { mutableListOf() }.add(Triple(doc.path, doc.size, doc.lastModified))
+                        }
+                    }
+                }
+            }
+        } else {
         fun scanFolderFast(dir: File, depth: Int = 4) {
             if (!dir.exists() || !dir.isDirectory || depth < 0) return
             if (dir.name.startsWith(".")) return
@@ -1257,6 +1300,7 @@ class LocalFileScanner @Inject constructor(
 
         for (d in standardDirs) {
             scanFolderFast(d, depth = 4)
+        }
         }
 
         folderMap.mapNotNull { (path, rawItems) ->

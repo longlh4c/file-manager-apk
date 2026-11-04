@@ -38,6 +38,34 @@ data class NativeSearchItem(
     val extension: String
 )
 
+data class ChecksumResult(
+    val md5: String? = null,
+    val sha1: String? = null,
+    val sha256: String? = null,
+    val crc32: String? = null,
+    val blake3: String? = null
+)
+
+data class ApkInfo(
+    val packageName: String?,
+    val versionName: String?,
+    val versionCode: Long?
+)
+
+data class NativeDocumentEntry(
+    val path: String,
+    val name: String,
+    val size: Long,
+    val lastModified: Long
+)
+
+const val CHECKSUM_FLAG_MD5 = 1 shl 0
+const val CHECKSUM_FLAG_SHA1 = 1 shl 1
+const val CHECKSUM_FLAG_SHA256 = 1 shl 2
+const val CHECKSUM_FLAG_CRC32 = 1 shl 3
+const val CHECKSUM_FLAG_BLAKE3 = 1 shl 4
+const val CHECKSUM_FLAG_ALL = CHECKSUM_FLAG_MD5 or CHECKSUM_FLAG_SHA1 or CHECKSUM_FLAG_SHA256 or CHECKSUM_FLAG_CRC32 or CHECKSUM_FLAG_BLAKE3
+
 object NativeEngine {
     private const val TAG = "NativeEngine"
     private var isLoaded: Boolean = false
@@ -358,6 +386,87 @@ object NativeEngine {
             list
         } catch (t: Throwable) {
             Log.w(TAG, "Native searchStorage fallback: ${t.message}")
+            null
+        }
+    }
+
+    @JvmStatic
+    external fun copyFileFast(src: String, dst: String, overwrite: Boolean): Long
+
+    @JvmStatic
+    external fun moveFileFast(src: String, dst: String, overwrite: Boolean): Boolean
+
+    @JvmStatic
+    private external fun computeChecksums(path: String, flags: Int): String
+
+    @JvmStatic
+    external fun extractApkIcon(apkPath: String): ByteArray?
+
+    @JvmStatic
+    private external fun getApkInfo(apkPath: String): String
+
+    @JvmStatic
+    private external fun scanDocuments(rootsJson: String, extsJson: String, maxDepth: Int): String
+
+    fun calculateChecksums(path: String, flags: Int = CHECKSUM_FLAG_ALL): ChecksumResult? {
+        if (!isLoaded) return null
+        return try {
+            val json = JSONObject(computeChecksums(path, flags))
+            if (json.has("error")) {
+                Log.w(TAG, "Native calculateChecksums error: ${json.optString("error")}")
+                return null
+            }
+            ChecksumResult(
+                md5 = json.optString("md5").takeIf { it.isNotEmpty() },
+                sha1 = json.optString("sha1").takeIf { it.isNotEmpty() },
+                sha256 = json.optString("sha256").takeIf { it.isNotEmpty() },
+                crc32 = json.optString("crc32").takeIf { it.isNotEmpty() },
+                blake3 = json.optString("blake3").takeIf { it.isNotEmpty() }
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "Native calculateChecksums failed: ${t.message}")
+            null
+        }
+    }
+
+    fun inspectApk(apkPath: String): ApkInfo? {
+        if (!isLoaded) return null
+        return try {
+            val json = JSONObject(getApkInfo(apkPath))
+            if (json.has("error")) return null
+            val pkg = json.optString("package_name").takeIf { it.isNotEmpty() }
+            val ver = json.optString("version_name").takeIf { it.isNotEmpty() }
+            val code = if (json.has("version_code")) json.optLong("version_code") else null
+            if (pkg == null && ver == null && code == null) null
+            else ApkInfo(pkg, ver, code)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Native inspectApk failed: ${t.message}")
+            null
+        }
+    }
+
+    fun scanDocumentsFast(roots: List<String>, extensions: Set<String>, maxDepth: Int = 5): List<NativeDocumentEntry>? {
+        if (!isLoaded) return null
+        return try {
+            val rootsJson = org.json.JSONArray(roots).toString()
+            val extsJson = org.json.JSONArray(extensions).toString()
+            val raw = scanDocuments(rootsJson, extsJson, maxDepth)
+            val arr = org.json.JSONArray(raw)
+            val list = ArrayList<NativeDocumentEntry>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    NativeDocumentEntry(
+                        path = obj.optString("path"),
+                        name = obj.optString("name"),
+                        size = obj.optLong("size"),
+                        lastModified = obj.optLong("last_modified")
+                    )
+                )
+            }
+            list
+        } catch (t: Throwable) {
+            Log.w(TAG, "Native scanDocumentsFast failed: ${t.message}")
             null
         }
     }

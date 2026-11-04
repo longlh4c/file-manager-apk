@@ -2,10 +2,14 @@ pub mod analyzer;
 pub mod image_engine;
 pub mod archive;
 pub mod scanner;
+pub mod transfer;
+pub mod hasher;
+pub mod apk_parser;
+pub mod doc_scanner;
 
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
-use jni::sys::{jboolean, jint, jlong, jstring};
+use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring};
 
 #[no_mangle]
 pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_ping<'local>(
@@ -289,4 +293,155 @@ pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_search
         .new_string(json)
         .unwrap_or_else(|_| env.new_string("{}").unwrap());
     output.into_raw()
+}
+
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_copyFileFast<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    src: JString<'local>,
+    dst: JString<'local>,
+    overwrite: jboolean,
+) -> jlong {
+    let src_str: String = match env.get_string(&src) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+    let dst_str: String = match env.get_string(&dst) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+
+    match transfer::copy_file_fast(&src_str, &dst_str, overwrite != 0) {
+        Ok(bytes) => bytes as jlong,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_moveFileFast<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    src: JString<'local>,
+    dst: JString<'local>,
+    overwrite: jboolean,
+) -> jboolean {
+    let src_str: String = match env.get_string(&src) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    let dst_str: String = match env.get_string(&dst) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+
+    match transfer::move_file_fast(&src_str, &dst_str, overwrite != 0) {
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_computeChecksums<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+    flags: jint,
+) -> jstring {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env.new_string("{\"error\":\"Invalid path\"}").unwrap();
+            return err.into_raw();
+        }
+    };
+
+    match hasher::compute_checksums(&path_str, flags as u32) {
+        Ok(result) => {
+            let json = serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
+            let out = env.new_string(json).unwrap_or_else(|_| env.new_string("{}").unwrap());
+            out.into_raw()
+        }
+        Err(e) => {
+            let err_json = format!("{{\"error\":\"{}\"}}", e);
+            let out = env.new_string(err_json).unwrap_or_else(|_| env.new_string("{}").unwrap());
+            out.into_raw()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_extractApkIcon<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    apk_path: JString<'local>,
+) -> jbyteArray {
+    let path: String = match env.get_string(&apk_path) {
+        Ok(s) => s.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    match apk_parser::extract_apk_icon(&path) {
+        Ok(Some(bytes)) => match env.byte_array_from_slice(&bytes) {
+            Ok(arr) => arr.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_getApkInfo<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    apk_path: JString<'local>,
+) -> jstring {
+    let path: String = match env.get_string(&apk_path) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env.new_string("{\"error\":\"Invalid path\"}").unwrap();
+            return err.into_raw();
+        }
+    };
+
+    match apk_parser::parse_apk_manifest(&path) {
+        Ok(Some(info)) => {
+            let json = serde_json::to_string(&info).unwrap_or_else(|_| "{}".to_string());
+            let out = env.new_string(json).unwrap_or_else(|_| env.new_string("{}").unwrap());
+            out.into_raw()
+        }
+        Ok(None) => {
+            let out = env.new_string("{}").unwrap();
+            out.into_raw()
+        }
+        Err(e) => {
+            let err_json = format!("{{\"error\":\"{}\"}}", e);
+            let out = env.new_string(err_json).unwrap_or_else(|_| env.new_string("{}").unwrap());
+            out.into_raw()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_scanDocuments<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    root_paths_json: JString<'local>,
+    exts_json: JString<'local>,
+    max_depth: jint,
+) -> jstring {
+    let roots: Vec<String> = match env.get_string(&root_paths_json) {
+        Ok(s) => serde_json::from_str(&s.to_string_lossy()).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let exts: std::collections::HashSet<String> = match env.get_string(&exts_json) {
+        Ok(s) => serde_json::from_str(&s.to_string_lossy()).unwrap_or_default(),
+        Err(_) => std::collections::HashSet::new(),
+    };
+
+    let entries = doc_scanner::scan_documents(&roots, &exts, max_depth as usize);
+    let json = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
+    let out = env.new_string(json).unwrap_or_else(|_| env.new_string("[]").unwrap());
+    out.into_raw()
 }

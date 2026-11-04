@@ -1,6 +1,7 @@
 package com.antigravity.filemanager.utils
 
 import android.content.pm.PackageManager
+import com.antigravity.filemanager.core.NativeEngine
 import android.net.Uri
 import coil.ImageLoader
 import coil.decode.DataSource
@@ -24,6 +25,18 @@ class ApkIconFetcher(
     override suspend fun fetch(): FetchResult? = withContext(Dispatchers.IO) {
         if (file.extension.lowercase() != "apk" || !file.exists() || file.length() == 0L) {
             return@withContext null
+        }
+        if (NativeEngine.isAvailable) {
+            try {
+                val iconBytes = NativeEngine.extractApkIcon(file.absolutePath)
+                if (iconBytes != null && iconBytes.isNotEmpty()) {
+                    val bitmap = android.graphics.BitmapFactory.decodeByteArray(iconBytes, 0, iconBytes.size)
+                    if (bitmap != null) {
+                        val drawable = android.graphics.drawable.BitmapDrawable(options.context.resources, bitmap)
+                        return@withContext DrawableResult(drawable = drawable, isSampled = false, dataSource = DataSource.DISK)
+                    }
+                }
+            } catch (ignored: Exception) {}
         }
         try {
             val pm = options.context.packageManager

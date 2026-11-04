@@ -506,6 +506,11 @@ fun PropertiesDialog(
     file: FileItem,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var checksums by remember { mutableStateOf<com.antigravity.filemanager.core.ChecksumResult?>(null) }
+    var isCalculatingChecksums by remember { mutableStateOf(false) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -517,13 +522,74 @@ fun PropertiesDialog(
             )
         },
         text = {
-            Column(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
                 PropertyRow(label = "Name", value = file.name)
                 PropertyRow(label = "Type", value = if (file.isDirectory) "Folder" else file.mimeType.ifEmpty { file.extension.uppercase() })
                 PropertyRow(label = "Path", value = file.path)
                 PropertyRow(label = "Size", value = if (file.isDirectory) "${file.itemCount} items" else file.formattedSize)
                 if (file.formattedDate.isNotEmpty()) {
                     PropertyRow(label = "Modified", value = file.formattedDate)
+                }
+
+                if (!file.isDirectory && com.antigravity.filemanager.core.NativeEngine.isAvailable) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    HorizontalDivider(color = Color(0xFF2E2E2E), thickness = 0.5.dp)
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    if (checksums == null && !isCalculatingChecksums) {
+                        OutlinedButton(
+                            onClick = {
+                                isCalculatingChecksums = true
+                                scope.launch {
+                                    val res = withContext(Dispatchers.IO) {
+                                        com.antigravity.filemanager.core.NativeEngine.calculateChecksums(file.path)
+                                    }
+                                    checksums = res
+                                    isCalculatingChecksums = false
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = TealPrimary)
+                        ) {
+                            Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Compute Checksums (MD5, SHA-256)", fontSize = 12.sp)
+                        }
+                    } else if (isCalculatingChecksums) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = TealPrimary)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Computing hardware checksums...", color = TextSecondary, fontSize = 12.sp)
+                        }
+                    } else if (checksums != null) {
+                        val cs = checksums!!
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                        fun copyHash(label: String, hash: String) {
+                            clipboard?.setPrimaryClip(android.content.ClipData.newPlainText(label, hash))
+                            Toast.makeText(context, "$label copied to clipboard", Toast.LENGTH_SHORT).show()
+                        }
+
+                        Text("Checksums (tap to copy):", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        cs.md5?.let { md5 ->
+                            PropertyRow(label = "MD5", value = md5, onClick = { copyHash("MD5", md5) })
+                        }
+                        cs.sha256?.let { sha256 ->
+                            PropertyRow(label = "SHA-256", value = sha256, onClick = { copyHash("SHA-256", sha256) })
+                        }
+                        cs.crc32?.let { crc32 ->
+                            PropertyRow(label = "CRC32", value = crc32, onClick = { copyHash("CRC32", crc32) })
+                        }
+                    }
                 }
             }
         },
@@ -540,8 +606,13 @@ fun PropertiesDialog(
 }
 
 @Composable
-private fun PropertyRow(label: String, value: String) {
-    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+private fun PropertyRow(label: String, value: String, onClick: (() -> Unit)? = null) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(vertical = 4.dp)
+    ) {
         Text(text = label, color = TextSecondary, fontSize = 12.sp)
         Text(text = value, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Normal)
     }

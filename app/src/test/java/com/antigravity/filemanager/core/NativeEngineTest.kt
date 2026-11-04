@@ -21,6 +21,9 @@ class NativeEngineTest {
             assert(NativeEngine.compress(listOf("/src"), "/out.zip") == null)
             assert(NativeEngine.scanDirectory("/dummy", false, false) == null)
             assert(NativeEngine.searchStorage("/dummy", "test") == null)
+            assert(NativeEngine.calculateChecksums("/dummy") == null)
+            assert(NativeEngine.inspectApk("/dummy.apk") == null)
+            assert(NativeEngine.scanDocumentsFast(listOf("/dummy"), setOf("pdf")) == null)
             try {
                 NativeEngine.resizeImage("/src", "/dst", 100, 100, 85, "jpg", 1)
             } catch (e: UnsatisfiedLinkError) {
