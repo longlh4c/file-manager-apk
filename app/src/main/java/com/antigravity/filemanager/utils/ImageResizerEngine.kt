@@ -1,4 +1,4 @@
-package com.antigravity.filemanager.utils
+﻿package com.antigravity.filemanager.utils
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.media.ExifInterface
 import android.os.Build
+import com.antigravity.filemanager.core.NativeEngine
 import com.antigravity.filemanager.domain.model.ImageDimensions
 import com.antigravity.filemanager.domain.model.ImageResizeMode
 import com.antigravity.filemanager.domain.model.ImageResizeParams
@@ -276,6 +277,76 @@ object ImageResizerEngine {
             params
         )
 
+        val origExt = sourceFile.extension.lowercase(Locale.ROOT)
+        val outExt = when (params.format) {
+            OutputImageFormat.JPEG -> "jpg"
+            OutputImageFormat.PNG -> "png"
+            OutputImageFormat.WEBP -> "webp"
+            OutputImageFormat.ORIGINAL -> when (origExt) {
+                "png" -> "png"
+                "webp" -> "webp"
+                else -> "jpg"
+            }
+        }
+
+        if (!targetDir.exists()) {
+            targetDir.mkdirs()
+        }
+
+        val baseName = sourceFile.nameWithoutExtension
+        val destFile = if (overwrite) {
+            File(targetDir, "$baseName.$outExt")
+        } else {
+            resolveUniqueDestinationFile(targetDir, baseName, outExt)
+        }
+
+        val tempOutput = File(targetDir, ".tmp_resize_${System.currentTimeMillis()}_$baseName.$outExt")
+
+        // Fast Native Rust Resizer (Zero Dalvik heap allocation, prevents OOM on large photos)
+        if (NativeEngine.isAvailable) {
+            try {
+                val nativeResizedBytes = NativeEngine.resizeImage(
+                    sourcePath = sourceFile.absolutePath,
+                    targetPath = tempOutput.absolutePath,
+                    targetWidth = targetWidth,
+                    targetHeight = targetHeight,
+                    quality = params.quality.coerceIn(1, 100),
+                    formatStr = outExt,
+                    orientation = orientation
+                )
+                if (nativeResizedBytes > 0L) {
+                    copyExifAndTimestamp(sourceFile, tempOutput, customTimestamp)
+                    if (overwrite) {
+                        if (destFile.exists()) destFile.delete()
+                        val renamed = tempOutput.renameTo(destFile)
+                        if (!renamed) {
+                            tempOutput.copyTo(destFile, overwrite = true)
+                            tempOutput.delete()
+                        }
+                        if (sourceFile.absolutePath != destFile.absolutePath && sourceFile.exists()) {
+                            sourceFile.delete()
+                        }
+                    } else {
+                        val renamed = tempOutput.renameTo(destFile)
+                        if (!renamed) {
+                            tempOutput.copyTo(destFile, overwrite = true)
+                            tempOutput.delete()
+                        }
+                    }
+                    val finalTimestamp = customTimestamp?.takeIf { it > 0L }
+                        ?: extractOriginalCreationDate(sourceFile)
+                    if (finalTimestamp > 0L) {
+                        destFile.setLastModified(finalTimestamp)
+                    }
+                    return destFile
+                }
+            } catch (t: Throwable) {
+                android.util.Log.w("ImageResizerEngine", "Native resizer failed, falling back to JVM: $t")
+            } finally {
+                if (tempOutput.exists()) tempOutput.delete()
+            }
+        }
+
         val reqDecodeWidth = if (isSwapped) targetHeight else targetWidth
         val reqDecodeHeight = if (isSwapped) targetWidth else targetHeight
         val inSampleSize = calculateInSampleSize(rawWidth, rawHeight, reqDecodeWidth, reqDecodeHeight)
@@ -333,25 +404,24 @@ object ImageResizerEngine {
             scaled
         }
 
-        val origExt = sourceFile.extension.lowercase(Locale.ROOT)
-        val (outExt, compressFormat) = when (params.format) {
-            OutputImageFormat.JPEG -> "jpg" to Bitmap.CompressFormat.JPEG
-            OutputImageFormat.PNG -> "png" to Bitmap.CompressFormat.PNG
-            OutputImageFormat.WEBP -> "webp" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        val compressFormat = when (params.format) {
+            OutputImageFormat.JPEG -> Bitmap.CompressFormat.JPEG
+            OutputImageFormat.PNG -> Bitmap.CompressFormat.PNG
+            OutputImageFormat.WEBP -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 Bitmap.CompressFormat.WEBP_LOSSY
             } else {
                 @Suppress("DEPRECATION")
                 Bitmap.CompressFormat.WEBP
             }
             OutputImageFormat.ORIGINAL -> when (origExt) {
-                "png" -> "png" to Bitmap.CompressFormat.PNG
-                "webp" -> "webp" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                "png" -> Bitmap.CompressFormat.PNG
+                "webp" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     Bitmap.CompressFormat.WEBP_LOSSY
                 } else {
                     @Suppress("DEPRECATION")
                     Bitmap.CompressFormat.WEBP
                 }
-                else -> "jpg" to Bitmap.CompressFormat.JPEG
+                else -> Bitmap.CompressFormat.JPEG
             }
         }
 
@@ -365,19 +435,6 @@ object ImageResizerEngine {
         } else {
             scaledBitmap
         }
-
-        if (!targetDir.exists()) {
-            targetDir.mkdirs()
-        }
-
-        val baseName = sourceFile.nameWithoutExtension
-        val destFile = if (overwrite) {
-            File(targetDir, "$baseName.$outExt")
-        } else {
-            resolveUniqueDestinationFile(targetDir, baseName, outExt)
-        }
-
-        val tempOutput = File(targetDir, ".tmp_resize_${System.currentTimeMillis()}_$baseName.$outExt")
 
         try {
             FileOutputStream(tempOutput).use { fos ->

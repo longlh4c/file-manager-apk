@@ -8,3 +8,6 @@ replay_pid*.log
 temp_*
 .idea/
 *.iml
+
+# Rust
+/rust-core/target

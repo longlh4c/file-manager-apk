@@ -19,6 +19,10 @@
 # Parcelable/Serializable passed through SavedStateHandle or Intent extras do.
 -keep class com.antigravity.filemanager.domain.model.** { *; }
 -keep class com.antigravity.filemanager.data.local.db.** { *; }
+-keep class com.antigravity.filemanager.core.** { *; }
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
 
 # --- Google API client (Drive) ---
 # com.google.api.client.json.GenericJson subclasses are populated via

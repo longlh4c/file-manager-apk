@@ -6,6 +6,7 @@ import android.os.Environment
 import android.os.StatFs
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
+import com.antigravity.filemanager.core.NativeEngine
 import com.antigravity.filemanager.domain.model.*
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -338,6 +339,22 @@ class LocalFileScanner @Inject constructor(
     suspend fun scanStorageAnalysis(): StorageAnalysisData = withContext(Dispatchers.IO) { coroutineScope {
         val volume = getStorageVolume()
         val root = Environment.getExternalStorageDirectory()
+
+        if (NativeEngine.isAvailable) {
+            val nativeResult = NativeEngine.analyzeStorage(root.absolutePath, maxDuplicateHashBytes)
+            if (nativeResult != null) {
+                return@coroutineScope StorageAnalysisData(
+                    volumeInfo = volume,
+                    breakdown = nativeResult.breakdown,
+                    largeFiles = nativeResult.largeFiles,
+                    largeFilesTotalBytes = nativeResult.largeFilesTotalBytes,
+                    recycleBinBytes = 0L,
+                    recycleBinSampleItem = null,
+                    duplicateFileGroups = nativeResult.duplicateGroups,
+                    duplicateFilesBytes = nativeResult.duplicateFilesBytes
+                )
+            }
+        }
 
         // Whole-device recursive walk used to run depth-first on a single thread. Fan it out
         // one coroutine per top-level folder (DCIM, Download, Android, WhatsApp, ... — the
