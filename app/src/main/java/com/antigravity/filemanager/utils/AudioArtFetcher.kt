@@ -1,5 +1,6 @@
 package com.antigravity.filemanager.utils
 
+import com.antigravity.filemanager.core.NativeEngine
 import android.graphics.BitmapFactory
 import android.graphics.drawable.BitmapDrawable
 import android.media.MediaMetadataRetriever
@@ -29,16 +30,18 @@ class AudioArtFetcher(
     override suspend fun fetch(): FetchResult? = withContext(Dispatchers.IO) {
         if (!file.exists() || file.length() == 0L) return@withContext null
 
-        val artBytes = try {
-            val retriever = MediaMetadataRetriever()
+        val artBytes = NativeEngine.getAudioCover(file.absolutePath) ?: run {
             try {
-                retriever.setDataSource(file.absolutePath)
-                retriever.embeddedPicture
-            } finally {
-                try { retriever.release() } catch (e: Exception) {}
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(file.absolutePath)
+                    retriever.embeddedPicture
+                } finally {
+                    try { retriever.release() } catch (e: Exception) {}
+                }
+            } catch (e: Exception) {
+                null
             }
-        } catch (e: Exception) {
-            null
         } ?: return@withContext null
 
         val bitmap = BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size) ?: return@withContext null

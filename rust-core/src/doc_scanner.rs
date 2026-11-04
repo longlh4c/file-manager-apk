@@ -103,3 +103,40 @@ fn scan_dir_recursive(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+
+    #[test]
+    fn test_scan_documents() {
+        let temp_dir = std::env::temp_dir().join("owlfm_doc_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let doc1 = temp_dir.join("report.pdf");
+        {
+            let mut f = File::create(&doc1).unwrap();
+            f.write_all(b"%PDF-1.4 dummy").unwrap();
+        }
+
+        let non_doc = temp_dir.join("photo.jpg");
+        {
+            let mut f = File::create(&non_doc).unwrap();
+            f.write_all(b"not a doc").unwrap();
+        }
+
+        let mut allowed = HashSet::new();
+        allowed.insert("pdf".to_string());
+        allowed.insert("docx".to_string());
+
+        let res = scan_documents(&[temp_dir.to_str().unwrap().to_string()], &allowed, 3);
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].name, "report.pdf");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+}
+

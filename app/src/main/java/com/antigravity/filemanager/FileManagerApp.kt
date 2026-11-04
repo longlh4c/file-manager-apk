@@ -10,6 +10,7 @@ import coil.decode.VideoFrameDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.antigravity.filemanager.presentation.viewers.CloudStreamHeaders
+import com.antigravity.filemanager.utils.FastImageThumbnailFetcher
 import com.antigravity.filemanager.utils.ApkIconFetcher
 import com.antigravity.filemanager.utils.AudioArtFetcher
 import com.antigravity.filemanager.utils.PdfThumbnailFetcher
@@ -23,6 +24,9 @@ class FileManagerApp : Application(), ImageLoaderFactory {
     override fun newImageLoader(): ImageLoader {
         return ImageLoader.Builder(this)
             .components {
+                add(FastImageThumbnailFetcher.FileFactory())
+                add(FastImageThumbnailFetcher.UriFactory())
+                add(FastImageThumbnailFetcher.StringFactory())
                 add(VideoThumbnailFetcher.FileFactory())
                 add(VideoThumbnailFetcher.UriFactory())
                 add(VideoThumbnailFetcher.StringFactory())

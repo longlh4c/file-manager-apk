@@ -12,9 +12,14 @@ pub struct ApkInfo {
 }
 
 pub fn extract_apk_icon(apk_path: &str) -> io::Result<Option<Vec<u8>>> {
-    let file = File::open(Path::new(apk_path))?;
-    let mut zip = ZipArchive::new(file)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let file = match File::open(Path::new(apk_path)) {
+        Ok(f) => f,
+        Err(_) => return Ok(None),
+    };
+    let mut zip = match ZipArchive::new(file) {
+        Ok(z) => z,
+        Err(_) => return Ok(None),
+    };
 
     let mut best_index: Option<usize> = None;
     let mut best_score: i32 = -1;
@@ -83,9 +88,14 @@ pub fn extract_apk_icon(apk_path: &str) -> io::Result<Option<Vec<u8>>> {
 }
 
 pub fn parse_apk_manifest(apk_path: &str) -> io::Result<Option<ApkInfo>> {
-    let file = File::open(Path::new(apk_path))?;
-    let mut zip = ZipArchive::new(file)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let file = match File::open(Path::new(apk_path)) {
+        Ok(f) => f,
+        Err(_) => return Ok(None),
+    };
+    let mut zip = match ZipArchive::new(file) {
+        Ok(z) => z,
+        Err(_) => return Ok(None),
+    };
 
     let mut manifest_entry = match zip.by_name("AndroidManifest.xml") {
         Ok(e) => e,
@@ -260,3 +270,22 @@ fn read_u16_le(cursor: &mut Cursor<&[u8]>) -> Option<u16> {
     cursor.read_exact(&mut buf).ok()?;
     Some(u16::from_le_bytes(buf))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_nonexistent_apk() {
+        assert!(extract_apk_icon("nonexistent.apk").unwrap().is_none());
+        assert!(parse_apk_manifest("nonexistent.apk").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_read_u32_le() {
+        let data = [0x01, 0x02, 0x03, 0x04];
+        let mut cursor = Cursor::new(&data[..]);
+        assert_eq!(read_u32_le(&mut cursor), Some(0x04030201));
+    }
+}
+

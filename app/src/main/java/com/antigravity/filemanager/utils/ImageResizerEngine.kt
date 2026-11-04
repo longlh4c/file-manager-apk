@@ -38,6 +38,21 @@ object ImageResizerEngine {
         val file = File(filePath)
         if (!file.exists() || !isImageFile(file)) return null
 
+        if (NativeEngine.isAvailable) {
+            val nativeMeta = NativeEngine.inspectImage(file.absolutePath)
+            if (nativeMeta != null && nativeMeta.width > 0 && nativeMeta.height > 0) {
+                val isSwapped = nativeMeta.orientation == 5 || nativeMeta.orientation == 6 ||
+                        nativeMeta.orientation == 7 || nativeMeta.orientation == 8
+                val effectiveWidth = if (isSwapped) nativeMeta.height else nativeMeta.width
+                val effectiveHeight = if (isSwapped) nativeMeta.width else nativeMeta.height
+                return ImageDimensions(
+                    width = effectiveWidth,
+                    height = effectiveHeight,
+                    sizeBytes = file.length()
+                )
+            }
+        }
+
         return try {
             val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(file.absolutePath, options)

@@ -284,3 +284,55 @@ pub fn fast_search(
         error: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+
+    #[test]
+    fn test_fast_list_dir_and_search() {
+        let temp_dir = std::env::temp_dir().join("owlfm_scanner_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let sub_dir = temp_dir.join("sub_folder");
+        fs::create_dir_all(&sub_dir).unwrap();
+
+        let file1 = temp_dir.join("photo.jpg");
+        {
+            let mut f = File::create(&file1).unwrap();
+            f.write_all(b"image data").unwrap();
+        }
+
+        let hidden_file = temp_dir.join(".secret");
+        {
+            let mut f = File::create(&hidden_file).unwrap();
+            f.write_all(b"hidden").unwrap();
+        }
+
+        // Test fast_list_dir
+        let list_res = fast_list_dir(temp_dir.to_str().unwrap(), true, true);
+        assert!(list_res.success);
+        let entries = list_res.entries.unwrap();
+        assert_eq!(entries.len(), 3);
+
+        let secret = entries.iter().find(|e| e.name == ".secret").unwrap();
+        assert!(secret.is_hidden);
+
+        let sub = entries.iter().find(|e| e.name == "sub_folder").unwrap();
+        assert!(sub.is_directory);
+
+        // Test fast_search
+        let search_res = fast_search(temp_dir.to_str().unwrap(), "photo", 10, 3, None);
+        assert!(search_res.success);
+        let s_entries = search_res.entries.unwrap();
+        assert_eq!(s_entries.len(), 1);
+        assert_eq!(s_entries[0].name, "photo.jpg");
+        assert_eq!(s_entries[0].extension, "jpg");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+}
+

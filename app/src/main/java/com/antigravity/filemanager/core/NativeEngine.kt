@@ -59,6 +59,33 @@ data class NativeDocumentEntry(
     val lastModified: Long
 )
 
+data class NativeAudioMetadata(
+    val title: String? = null,
+    val artist: String? = null,
+    val album: String? = null,
+    val year: String? = null,
+    val durationMs: Long? = null,
+    val bitrateKbps: Int? = null,
+    val sampleRateHz: Int? = null
+)
+
+data class NativeImageMetadata(
+    val width: Int = 0,
+    val height: Int = 0,
+    val format: String = "",
+    val orientation: Int = 1,
+    val hasEmbeddedThumbnail: Boolean = false,
+    val dateTime: String? = null
+)
+
+data class NativeVideoMetadata(
+    val width: Int = 0,
+    val height: Int = 0,
+    val durationMs: Long = 0L,
+    val qualityBadge: String = "",
+    val hasPoster: Boolean = false
+)
+
 const val CHECKSUM_FLAG_MD5 = 1 shl 0
 const val CHECKSUM_FLAG_SHA1 = 1 shl 1
 const val CHECKSUM_FLAG_SHA256 = 1 shl 2
@@ -467,6 +494,110 @@ object NativeEngine {
             list
         } catch (t: Throwable) {
             Log.w(TAG, "Native scanDocumentsFast failed: ${t.message}")
+            null
+        }
+    }
+@JvmStatic
+    external fun extractEmbeddedThumbnail(imagePath: String): ByteArray?
+
+    @JvmStatic
+    external fun extractVideoPoster(videoPath: String): ByteArray?
+
+    @JvmStatic
+    external fun extractAudioCover(audioPath: String): ByteArray?
+
+    @JvmStatic
+    private external fun getAudioMetadata(audioPath: String): String
+
+    @JvmStatic
+    private external fun getImageMetadata(imagePath: String): String
+
+    @JvmStatic
+    private external fun getVideoMetadata(videoPath: String): String
+
+    fun getEmbeddedThumbnail(imagePath: String): ByteArray? {
+        if (!isLoaded) return null
+        return try {
+            extractEmbeddedThumbnail(imagePath)
+        } catch (t: Throwable) {
+            Log.w(TAG, "extractEmbeddedThumbnail failed: ${t.message}")
+            null
+        }
+    }
+
+    fun getVideoPoster(videoPath: String): ByteArray? {
+        if (!isLoaded) return null
+        return try {
+            extractVideoPoster(videoPath)
+        } catch (t: Throwable) {
+            Log.w(TAG, "extractVideoPoster failed: ${t.message}")
+            null
+        }
+    }
+
+    fun getAudioCover(audioPath: String): ByteArray? {
+        if (!isLoaded) return null
+        return try {
+            extractAudioCover(audioPath)
+        } catch (t: Throwable) {
+            Log.w(TAG, "extractAudioCover failed: ${t.message}")
+            null
+        }
+    }
+
+    fun inspectAudio(audioPath: String): NativeAudioMetadata? {
+        if (!isLoaded) return null
+        return try {
+            val raw = getAudioMetadata(audioPath)
+            val json = JSONObject(raw)
+            NativeAudioMetadata(
+                title = json.optString("title").takeIf { it.isNotEmpty() },
+                artist = json.optString("artist").takeIf { it.isNotEmpty() },
+                album = json.optString("album").takeIf { it.isNotEmpty() },
+                year = json.optString("year").takeIf { it.isNotEmpty() },
+                durationMs = if (json.has("duration_ms") && !json.isNull("duration_ms")) json.optLong("duration_ms") else null,
+                bitrateKbps = if (json.has("bitrate_kbps") && !json.isNull("bitrate_kbps")) json.optInt("bitrate_kbps") else null,
+                sampleRateHz = if (json.has("sample_rate_hz") && !json.isNull("sample_rate_hz")) json.optInt("sample_rate_hz") else null
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "inspectAudio failed: ${t.message}")
+            null
+        }
+    }
+
+    fun inspectImage(imagePath: String): NativeImageMetadata? {
+        if (!isLoaded) return null
+        return try {
+            val raw = getImageMetadata(imagePath)
+            val json = JSONObject(raw)
+            NativeImageMetadata(
+                width = json.optInt("width", 0),
+                height = json.optInt("height", 0),
+                format = json.optString("format", ""),
+                orientation = json.optInt("orientation", 1),
+                hasEmbeddedThumbnail = json.optBoolean("has_embedded_thumbnail", false),
+                dateTime = json.optString("date_time").takeIf { it.isNotEmpty() }
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "inspectImage failed: ${t.message}")
+            null
+        }
+    }
+
+    fun inspectVideo(videoPath: String): NativeVideoMetadata? {
+        if (!isLoaded) return null
+        return try {
+            val raw = getVideoMetadata(videoPath)
+            val json = JSONObject(raw)
+            NativeVideoMetadata(
+                width = json.optInt("width", 0),
+                height = json.optInt("height", 0),
+                durationMs = json.optLong("duration_ms", 0L),
+                qualityBadge = json.optString("quality_badge", ""),
+                hasPoster = json.optBoolean("has_poster", false)
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "inspectVideo failed: ${t.message}")
             null
         }
     }

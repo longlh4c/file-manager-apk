@@ -483,3 +483,47 @@ pub fn compress_to_zip(source_paths: Vec<String>, target_zip_path: &str) -> Arch
 
     ArchiveResult::ok_compressed(total_bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_zip_lifecycle() {
+        let temp_dir = std::env::temp_dir().join("owlfm_archive_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let file_to_zip = temp_dir.join("hello.txt");
+        {
+            let mut f = File::create(&file_to_zip).unwrap();
+            f.write_all(b"hello world from owlfm zip test").unwrap();
+        }
+
+        let zip_path = temp_dir.join("test.zip");
+        let comp_res = compress_to_zip(vec![file_to_zip.to_str().unwrap().to_string()], zip_path.to_str().unwrap());
+        assert!(comp_res.success);
+        assert_eq!(comp_res.total_bytes, Some(31));
+
+        // List archive
+        let list_res = list_archive_entries(zip_path.to_str().unwrap(), None);
+        assert!(list_res.success);
+        let entries = list_res.entries.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "hello.txt");
+        assert_eq!(entries[0].size, 31);
+
+        // Extract archive
+        let out_dir = temp_dir.join("extracted");
+        let ext_res = extract_archive(zip_path.to_str().unwrap(), out_dir.to_str().unwrap(), None, None);
+        assert!(ext_res.success);
+        let extracted_file = out_dir.join("hello.txt");
+        assert!(extracted_file.exists());
+        let content = fs::read_to_string(&extracted_file).unwrap();
+        assert_eq!(content, "hello world from owlfm zip test");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+}
+

@@ -109,3 +109,41 @@ fn set_file_mtime(path: &Path, mtime: SystemTime) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_copy_and_move_file() {
+        let temp_dir = std::env::temp_dir().join("owlfm_transfer_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let src = temp_dir.join("src.txt");
+        let dst = temp_dir.join("dst.txt");
+        let moved = temp_dir.join("moved.txt");
+
+        {
+            let mut f = File::create(&src).unwrap();
+            f.write_all(b"sample file content for transfer test").unwrap();
+        }
+
+        // Test copy
+        let copied_bytes = copy_file_fast(src.to_str().unwrap(), dst.to_str().unwrap(), true).unwrap();
+        assert_eq!(copied_bytes, 37);
+        assert!(dst.exists());
+
+        // Test overwrite = false returns error
+        assert!(copy_file_fast(src.to_str().unwrap(), dst.to_str().unwrap(), false).is_err());
+
+        // Test move
+        move_file_fast(dst.to_str().unwrap(), moved.to_str().unwrap(), true).unwrap();
+        assert!(!dst.exists());
+        assert!(moved.exists());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+}
+

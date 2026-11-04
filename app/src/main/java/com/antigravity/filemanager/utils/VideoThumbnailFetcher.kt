@@ -1,5 +1,6 @@
 package com.antigravity.filemanager.utils
 
+import com.antigravity.filemanager.core.NativeEngine
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
@@ -33,6 +34,15 @@ class VideoThumbnailFetcher(
         }
 
         val bitmap: Bitmap? = run {
+            // 0. Rust fast-path: Instant extraction of embedded video poster (MP4 covr / MKV AttachedPicture)
+            try {
+                val posterBytes = NativeEngine.getVideoPoster(file.absolutePath)
+                if (posterBytes != null && posterBytes.isNotEmpty()) {
+                    val b = android.graphics.BitmapFactory.decodeByteArray(posterBytes, 0, posterBytes.size)
+                    if (b != null) return@run b
+                }
+            } catch (e: Exception) {}
+
             // 1. Android Q+ (API 29+) Hardware-accelerated native ThumbnailUtils.
             // 256x256 instead of the previous 512x512 — this is decoded into grid cards well
             // under 512px on screen, so the extra resolution was wasted decode time. Video frame

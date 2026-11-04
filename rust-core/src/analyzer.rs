@@ -412,3 +412,54 @@ pub fn analyze_storage(root_path: &str, max_duplicate_hash_bytes: u64) -> Analys
         duplicate_wasted_bytes,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_analyze_storage() {
+        let temp_dir = std::env::temp_dir().join("owlfm_analyzer_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let img_path = temp_dir.join("photo.jpg");
+        {
+            let mut f = File::create(&img_path).unwrap();
+            f.write_all(&vec![1u8; 1000]).unwrap();
+        }
+
+        let audio_path = temp_dir.join("music.mp3");
+        {
+            let mut f = File::create(&audio_path).unwrap();
+            f.write_all(&vec![2u8; 2000]).unwrap();
+        }
+
+        let dup1_path = temp_dir.join("dup1.bin");
+        let dup2_path = temp_dir.join("dup2.bin");
+        let dup_content = vec![0xABu8; 500];
+        {
+            let mut f1 = File::create(&dup1_path).unwrap();
+            f1.write_all(&dup_content).unwrap();
+            let mut f2 = File::create(&dup2_path).unwrap();
+            f2.write_all(&dup_content).unwrap();
+        }
+
+        let other_path = temp_dir.join("misc.xyz");
+        {
+            let mut f = File::create(&other_path).unwrap();
+            f.write_all(&vec![3u8; 300]).unwrap();
+        }
+
+        let result = analyze_storage(temp_dir.to_str().unwrap(), 10 * 1024 * 1024);
+        assert_eq!(result.img_bytes, 1000);
+        assert_eq!(result.audio_bytes, 2000);
+        assert_eq!(result.other_bytes, 1300); // 500 + 500 + 300
+        assert_eq!(result.duplicate_groups.len(), 1);
+        assert_eq!(result.duplicate_wasted_bytes, 500);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+}
+

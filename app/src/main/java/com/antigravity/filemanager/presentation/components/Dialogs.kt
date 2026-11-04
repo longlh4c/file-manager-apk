@@ -510,6 +510,24 @@ fun PropertiesDialog(
     val scope = rememberCoroutineScope()
     var checksums by remember { mutableStateOf<com.antigravity.filemanager.core.ChecksumResult?>(null) }
     var isCalculatingChecksums by remember { mutableStateOf(false) }
+    var audioMeta by remember { mutableStateOf<com.antigravity.filemanager.core.NativeAudioMetadata?>(null) }
+    var imageMeta by remember { mutableStateOf<com.antigravity.filemanager.core.NativeImageMetadata?>(null) }
+    var videoMeta by remember { mutableStateOf<com.antigravity.filemanager.core.NativeVideoMetadata?>(null) }
+
+    LaunchedEffect(file.path) {
+        if (!file.isDirectory && com.antigravity.filemanager.core.NativeEngine.isAvailable) {
+            withContext(Dispatchers.IO) {
+                val ext = file.extension.lowercase(java.util.Locale.US)
+                if (ext in setOf("mp3", "flac", "m4a", "aac", "ogg")) {
+                    audioMeta = com.antigravity.filemanager.core.NativeEngine.inspectAudio(file.path)
+                } else if (ext in setOf("jpg", "jpeg", "png", "webp", "gif")) {
+                    imageMeta = com.antigravity.filemanager.core.NativeEngine.inspectImage(file.path)
+                } else if (ext in setOf("mp4", "mkv", "webm", "mov", "avi")) {
+                    videoMeta = com.antigravity.filemanager.core.NativeEngine.inspectVideo(file.path)
+                }
+            }
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -533,6 +551,32 @@ fun PropertiesDialog(
                 PropertyRow(label = "Size", value = if (file.isDirectory) "${file.itemCount} items" else file.formattedSize)
                 if (file.formattedDate.isNotEmpty()) {
                     PropertyRow(label = "Modified", value = file.formattedDate)
+                }
+
+                imageMeta?.let { img ->
+                    if (img.width > 0 && img.height > 0) {
+                        PropertyRow(label = "Dimensions", value = "${img.width} × ${img.height} (${img.format})")
+                    }
+                }
+                videoMeta?.let { vid ->
+                    if (vid.width > 0 && vid.height > 0) {
+                        val badge = if (vid.qualityBadge.isNotEmpty()) " (${vid.qualityBadge})" else ""
+                        PropertyRow(label = "Resolution", value = "${vid.width} × ${vid.height}$badge")
+                    }
+                    if (vid.durationMs > 0) {
+                        val sec = vid.durationMs / 1000
+                        PropertyRow(label = "Duration", value = String.format(java.util.Locale.US, "%d:%02d", sec / 60, sec % 60))
+                    }
+                }
+                audioMeta?.let { aud ->
+                    aud.title?.let { PropertyRow(label = "Title", value = it) }
+                    aud.artist?.let { PropertyRow(label = "Artist", value = it) }
+                    aud.album?.let { PropertyRow(label = "Album", value = it) }
+                    if (aud.durationMs != null && aud.durationMs > 0) {
+                        val sec = aud.durationMs / 1000
+                        PropertyRow(label = "Duration", value = String.format(java.util.Locale.US, "%d:%02d", sec / 60, sec % 60))
+                    }
+                    aud.bitrateKbps?.let { PropertyRow(label = "Bitrate", value = "$it kbps") }
                 }
 
                 if (!file.isDirectory && com.antigravity.filemanager.core.NativeEngine.isAvailable) {

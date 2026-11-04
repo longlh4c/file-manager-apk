@@ -89,3 +89,46 @@ pub fn resize_image_file(
         .map_err(|e| format!("Failed to read metadata of resized file: {}", e))?;
     Ok(meta.len())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::RgbaImage;
+
+    #[test]
+    fn test_resize_image_file() {
+        let temp_dir = std::env::temp_dir().join("owlfm_image_test");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let src_path = temp_dir.join("input.png");
+        let dst_path = temp_dir.join("output.jpg");
+
+        // Create 100x100 dummy RGBA image
+        let img = RgbaImage::from_fn(100, 100, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])
+        });
+        img.save_with_format(&src_path, ImageFormat::Png).unwrap();
+
+        let bytes = resize_image_file(
+            src_path.to_str().unwrap(),
+            dst_path.to_str().unwrap(),
+            50,
+            50,
+            85,
+            "jpeg",
+            1,
+        ).unwrap();
+
+        assert!(bytes > 0);
+        assert!(dst_path.exists());
+
+        // Verify decoded dimensions
+        let decoded = image::ImageReader::open(&dst_path).unwrap().decode().unwrap();
+        assert_eq!(decoded.width(), 50);
+        assert_eq!(decoded.height(), 50);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+}
+

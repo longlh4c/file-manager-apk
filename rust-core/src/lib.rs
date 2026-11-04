@@ -6,6 +6,9 @@ pub mod transfer;
 pub mod hasher;
 pub mod apk_parser;
 pub mod doc_scanner;
+pub mod audio_meta;
+pub mod image_meta;
+pub mod video_meta;
 
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
@@ -444,4 +447,146 @@ pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_scanDo
     let json = serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
     let out = env.new_string(json).unwrap_or_else(|_| env.new_string("[]").unwrap());
     out.into_raw()
+}
+
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_extractEmbeddedThumbnail<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+) -> jbyteArray {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    match image_meta::extract_embedded_thumbnail(&path_str) {
+        Ok(Some(bytes)) => match env.byte_array_from_slice(&bytes) {
+            Ok(arr) => arr.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_extractVideoPoster<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+) -> jbyteArray {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    match video_meta::extract_video_poster(&path_str) {
+        Ok(Some(bytes)) => match env.byte_array_from_slice(&bytes) {
+            Ok(arr) => arr.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_extractAudioCover<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+) -> jbyteArray {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    match audio_meta::extract_audio_cover(&path_str) {
+        Ok(Some(bytes)) => match env.byte_array_from_slice(&bytes) {
+            Ok(arr) => arr.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        _ => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_getAudioMetadata<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+) -> jstring {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env.new_string("{}").unwrap();
+            return err.into_raw();
+        }
+    };
+
+    match audio_meta::parse_audio_tags(&path_str) {
+        Ok(meta) => {
+            let json = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
+            let out = env.new_string(json).unwrap_or_else(|_| env.new_string("{}").unwrap());
+            out.into_raw()
+        }
+        Err(_) => {
+            let out = env.new_string("{}").unwrap();
+            out.into_raw()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_getImageMetadata<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+) -> jstring {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env.new_string("{}").unwrap();
+            return err.into_raw();
+        }
+    };
+
+    match image_meta::get_image_metadata(&path_str) {
+        Ok(meta) => {
+            let json = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
+            let out = env.new_string(json).unwrap_or_else(|_| env.new_string("{}").unwrap());
+            out.into_raw()
+        }
+        Err(_) => {
+            let out = env.new_string("{}").unwrap();
+            out.into_raw()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_getVideoMetadata<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+) -> jstring {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env.new_string("{}").unwrap();
+            return err.into_raw();
+        }
+    };
+
+    match video_meta::parse_video_metadata(&path_str) {
+        Ok(meta) => {
+            let json = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
+            let out = env.new_string(json).unwrap_or_else(|_| env.new_string("{}").unwrap());
+            out.into_raw()
+        }
+        Err(_) => {
+            let out = env.new_string("{}").unwrap();
+            out.into_raw()
+        }
+    }
 }

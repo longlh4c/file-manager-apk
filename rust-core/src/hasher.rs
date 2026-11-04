@@ -68,3 +68,31 @@ pub fn compute_checksums(path_str: &str, flags: u32) -> io::Result<ChecksumResul
         blake3: blake3_opt.map(|h| h.finalize().to_hex().to_string()),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_compute_checksums() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_hasher.txt");
+        {
+            let mut f = File::create(&test_file).unwrap();
+            f.write_all(b"hello world").unwrap();
+        }
+
+        let flags = FLAG_MD5 | FLAG_SHA1 | FLAG_SHA256 | FLAG_CRC32 | FLAG_BLAKE3;
+        let res = compute_checksums(test_file.to_str().unwrap(), flags).unwrap();
+
+        assert_eq!(res.md5.as_deref(), Some("5eb63bbbe01eeed093cb22bb8f5acdc3"));
+        assert_eq!(res.sha1.as_deref(), Some("2aae6c35c94fcfb415dbe95f408b9ce91ee846ed"));
+        assert_eq!(res.sha256.as_deref(), Some("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"));
+        assert_eq!(res.crc32.as_deref(), Some("0d4a1185"));
+        assert_eq!(res.blake3.as_deref(), Some(blake3::hash(b"hello world").to_hex().as_str()));
+
+        let _ = std::fs::remove_file(test_file);
+    }
+}
+
