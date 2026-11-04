@@ -18,6 +18,26 @@ data class NativeAnalysisData(
     val duplicateFilesBytes: Long
 )
 
+data class NativeDirEntry(
+    val name: String,
+    val path: String,
+    val isDirectory: Boolean,
+    val size: Long,
+    val lastModified: Long,
+    val itemCount: Int,
+    val subfolderCount: Int,
+    val isHidden: Boolean
+)
+
+data class NativeSearchItem(
+    val name: String,
+    val path: String,
+    val isDirectory: Boolean,
+    val size: Long,
+    val lastModified: Long,
+    val extension: String
+)
+
 object NativeEngine {
     private const val TAG = "NativeEngine"
     private var isLoaded: Boolean = false
@@ -255,6 +275,89 @@ object NativeEngine {
             resJson.optLong("total_bytes", 0L)
         } catch (t: Throwable) {
             Log.w(TAG, "Native compress fallback: ${t.message}")
+            null
+        }
+    }
+
+    @JvmStatic
+    external fun listDirectory(
+        dirPath: String,
+        calcFolderSizes: Boolean,
+        calcEffectiveDates: Boolean
+    ): String
+
+    @JvmStatic
+    external fun searchFiles(
+        rootPath: String,
+        query: String,
+        maxResults: Int,
+        maxDepth: Int,
+        allowedExtsJson: String?
+    ): String
+
+    fun scanDirectory(
+        dirPath: String,
+        calcFolderSizes: Boolean,
+        calcEffectiveDates: Boolean
+    ): List<NativeDirEntry>? {
+        if (!isLoaded) return null
+        return try {
+            val resJson = JSONObject(listDirectory(dirPath, calcFolderSizes, calcEffectiveDates))
+            if (!resJson.optBoolean("success", false)) return null
+            val entriesArray = resJson.optJSONArray("entries") ?: return emptyList()
+            val list = ArrayList<NativeDirEntry>(entriesArray.length())
+            for (i in 0 until entriesArray.length()) {
+                val item = entriesArray.getJSONObject(i)
+                list.add(
+                    NativeDirEntry(
+                        name = item.optString("name"),
+                        path = item.optString("path"),
+                        isDirectory = item.optBoolean("is_directory"),
+                        size = item.optLong("size"),
+                        lastModified = item.optLong("last_modified"),
+                        itemCount = item.optInt("item_count"),
+                        subfolderCount = item.optInt("subfolder_count"),
+                        isHidden = item.optBoolean("is_hidden")
+                    )
+                )
+            }
+            list
+        } catch (t: Throwable) {
+            Log.w(TAG, "Native scanDirectory fallback: ${t.message}")
+            null
+        }
+    }
+
+    fun searchStorage(
+        rootPath: String,
+        query: String,
+        maxResults: Int = 500,
+        maxDepth: Int = 12,
+        allowedExts: Set<String>? = null
+    ): List<NativeSearchItem>? {
+        if (!isLoaded) return null
+        return try {
+            val extsJson = if (allowedExts != null) org.json.JSONArray(allowedExts).toString() else null
+            val resJson = JSONObject(searchFiles(rootPath, query, maxResults, maxDepth, extsJson))
+            if (!resJson.optBoolean("success", false)) return null
+            val entriesArray = resJson.optJSONArray("entries") ?: return emptyList()
+            val list = ArrayList<NativeSearchItem>(entriesArray.length())
+            for (i in 0 until entriesArray.length()) {
+                val item = entriesArray.getJSONObject(i)
+                list.add(
+                    NativeSearchItem(
+                        name = item.optString("name"),
+                        path = item.optString("path"),
+                        isDirectory = item.optBoolean("is_directory"),
+                        size = item.optLong("size"),
+                        lastModified = item.optLong("last_modified"),
+                        extension = item.optString("extension")
+                    )
+                )
+            }
+            list
+        } catch (t: Throwable) {
+            Log.w(TAG, "Native searchStorage fallback: ${t.message}")
             null
         }
     }

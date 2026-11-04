@@ -1,10 +1,11 @@
 pub mod analyzer;
 pub mod image_engine;
 pub mod archive;
+pub mod scanner;
 
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
-use jni::sys::{jint, jlong, jstring};
+use jni::sys::{jboolean, jint, jlong, jstring};
 
 #[no_mangle]
 pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_ping<'local>(
@@ -206,6 +207,82 @@ pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_compre
             "{{\"success\":false,\"error_code\":\"JSON_ERROR\",\"error_message\":\"{}\"}}",
             e
         )
+    });
+
+    let output = env
+        .new_string(json)
+        .unwrap_or_else(|_| env.new_string("{}").unwrap());
+    output.into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_listDirectory<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    dir_path: JString<'local>,
+    calc_folder_sizes: jboolean,
+    calc_effective_dates: jboolean,
+) -> jstring {
+    let path: String = match env.get_string(&dir_path) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env
+                .new_string("{\"success\":false,\"error\":\"Invalid dir path\"}")
+                .unwrap();
+            return err.into_raw();
+        }
+    };
+
+    let result = scanner::fast_list_dir(&path, calc_folder_sizes != 0, calc_effective_dates != 0);
+    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+        format!("{{\"success\":false,\"error\":\"{}\"}}", e)
+    });
+
+    let output = env
+        .new_string(json)
+        .unwrap_or_else(|_| env.new_string("{}").unwrap());
+    output.into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_searchFiles<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    root_path: JString<'local>,
+    query: JString<'local>,
+    max_results: jint,
+    max_depth: jint,
+    allowed_exts_json: JString<'local>,
+) -> jstring {
+    let path: String = match env.get_string(&root_path) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env
+                .new_string("{\"success\":false,\"error\":\"Invalid root path\"}")
+                .unwrap();
+            return err.into_raw();
+        }
+    };
+    let q: String = match env.get_string(&query) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env
+                .new_string("{\"success\":false,\"error\":\"Invalid query\"}")
+                .unwrap();
+            return err.into_raw();
+        }
+    };
+    let exts: Option<Vec<String>> = if allowed_exts_json.is_null() {
+        None
+    } else {
+        env.get_string(&allowed_exts_json)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s.to_string_lossy()).ok())
+    };
+
+    let result = scanner::fast_search(&path, &q, max_results as usize, max_depth as usize, exts);
+    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+        format!("{{\"success\":false,\"error\":\"{}\"}}", e)
     });
 
     let output = env

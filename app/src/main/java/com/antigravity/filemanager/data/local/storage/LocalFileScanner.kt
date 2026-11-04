@@ -106,6 +106,46 @@ class LocalFileScanner @Inject constructor(
             own + cloneDownloadDirs().flatMap { it.listFiles()?.toList().orEmpty() }
         } else own
         val isDateSort = sortOption == FileSortOption.BY_DATE_DESC || sortOption == FileSortOption.BY_DATE_ASC
+
+        // Fast path: use Rust NativeEngine for direct kernel-level dirent64 scanning
+        if (NativeEngine.isAvailable && (!mergeCloneDownloads || !isPrimaryDownloadDir(dirPath))) {
+            val isSizeSort = sortOption == FileSortOption.BY_SIZE_DESC || sortOption == FileSortOption.BY_SIZE_ASC
+            val nativeEntries = NativeEngine.scanDirectory(dirPath, calcFolderSizes = isSizeSort, calcEffectiveDates = isDateSort)
+            if (nativeEntries != null) {
+                val list = nativeEntries
+                    .filter { showHidden || !it.isHidden }
+                    .map { entry ->
+                        val isDir = entry.isDirectory
+                        val ext = if (!isDir) File(entry.name).extension.lowercase(Locale.getDefault()) else ""
+                        val isVideo = ext in videoExtensions
+                        val isImage = ext in imageExtensions
+                        val isAudio = ext in audioExtensions
+                        val mime = if (!isDir) getMimeType(File(entry.path)) else "resource/folder"
+                        val fileChildCount = entry.itemCount - entry.subfolderCount
+                        val badge = detectBadgeFromPath(entry.path, isVideo = isVideo)
+                        val folderBadge = if (isDir) detectFolderBadge(entry.name) else FolderBadgeType.STANDARD
+
+                        FileItem(
+                            id = entry.path,
+                            name = entry.name,
+                            path = entry.path,
+                            size = entry.size,
+                            lastModified = entry.lastModified,
+                            isDirectory = isDir,
+                            mimeType = mime,
+                            extension = ext,
+                            itemCount = entry.itemCount,
+                            subfolderCount = entry.subfolderCount,
+                            fileChildCount = fileChildCount,
+                            thumbnailUri = if (!isDir && (isVideo || isImage || isAudio || ext == "apk" || ext == "pdf" || mime.startsWith("image/") || mime.startsWith("video/"))) entry.path else null,
+                            appSourceBadge = badge,
+                            folderBadgeType = folderBadge,
+                            isHidden = entry.isHidden
+                        )
+                    }
+                return@withContext sortFileList(list, sortOption)
+            }
+        }
         val isSizeSort = sortOption == FileSortOption.BY_SIZE_DESC || sortOption == FileSortOption.BY_SIZE_ASC
 
         // Sorting by date or size needs a recursive scan of every subfolder (to find its most

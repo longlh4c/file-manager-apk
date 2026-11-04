@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Environment
 import android.provider.MediaStore
+import com.antigravity.filemanager.core.NativeEngine
 import com.antigravity.filemanager.data.local.db.AppDatabase
 import com.antigravity.filemanager.data.local.db.CloudEntity
 import com.antigravity.filemanager.data.local.db.TrashEntity
@@ -324,6 +325,39 @@ class FileRepositoryImpl @Inject constructor(
         }
 
         val root = if (rootPath != null) File(rootPath) else Environment.getExternalStorageDirectory()
+
+        val fastSearchExts: Set<String>? = when (categoryType) {
+            CategoryType.IMAGES -> searchImageExts
+            CategoryType.VIDEOS -> searchVideoExts
+            CategoryType.AUDIO -> searchAudioExts
+            CategoryType.DOCUMENTS -> searchDocExts
+            else -> null
+        }
+
+        // Fast path: use Rust NativeEngine for instant parallel filesystem search
+        if (NativeEngine.isAvailable && root.exists()) {
+            val nativeResults = NativeEngine.searchStorage(
+                rootPath = root.absolutePath,
+                query = query,
+                maxResults = 500,
+                maxDepth = 12,
+                allowedExts = fastSearchExts
+            )
+            if (nativeResults != null) {
+                return@withContext nativeResults.map { item ->
+                    FileItem(
+                        id = item.path,
+                        name = item.name,
+                        path = item.path,
+                        size = item.size,
+                        lastModified = item.lastModified,
+                        isDirectory = item.isDirectory,
+                        extension = item.extension,
+                        thumbnailUri = if (item.isDirectory) null else item.path
+                    )
+                }
+            }
+        }
         val results = mutableListOf<FileItem>()
 
         // categoryType-specific extension filter, applied *during* the walk rather than after —
