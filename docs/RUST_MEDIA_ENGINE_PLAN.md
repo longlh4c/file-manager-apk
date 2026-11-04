@@ -1,48 +1,50 @@
 # Implementation Plan: Hybrid Rust Media Engine (Images, Videos & Music)
 
-This plan details the design and implementation of the **Hybrid Rust Media Engine** for OwlFM+, bringing high-performance native parsing, embedded thumbnail extraction, and indexing to Images, Videos, and Audio files while adhering to Android platform conventions and project rules.
+This plan details the design and implementation of the **Hybrid Rust Media Engine** for OwlFM+, bringing high-performance native parsing, embedded thumbnail/poster extraction, instant metadata indexing, and parallel filesystem scanning to Images, Videos, and Audio files while adhering to Android platform conventions and project rules.
 
 ---
 
 ## 1. Goal Description
 
-On Android, inspecting and rendering media files (extracting Album Art from MP3/FLAC, decoding high-resolution camera image thumbnails, reading image dimensions/EXIF, or fetching video duration/resolution) is traditionally handled via `MediaMetadataRetriever`, `BitmapFactory`, or `ExifInterface`. These Android SDK classes suffer from:
-1. **Grid Scrolling Stutter (Image Decoding Overhead)**: Camera photos are often 12MP to 108MP (5MB – 30MB per file). When scrolling through a photo gallery, Coil repeatedly decodes the entire file stream through Java `BitmapFactory.decodeStream`, consuming heavy CPU and causing frame drops.
+On Android, inspecting and rendering media files (extracting Album Art from MP3/FLAC, decoding high-resolution camera image thumbnails, reading video duration/resolution, extracting embedded video posters, or reading image dimensions/EXIF) is traditionally handled via `MediaMetadataRetriever`, `BitmapFactory`, or `ExifInterface`. These Android SDK classes suffer from:
+1. **Grid Scrolling Stutter (Image & Video Decoding Overhead)**: Camera photos are often 12MP to 108MP (5MB – 30MB per file), and videos are multi-gigabyte streams. When scrolling through a photo gallery or video list, repeatedly decoding full file streams through Java `BitmapFactory.decodeStream` or software `MediaMetadataRetriever` frames consumes heavy CPU, heats up the device, and causes frame drops.
 2. **Severe Latency & IPC Overhead**: `MediaMetadataRetriever` creates an Android IPC Binder transaction to `libstagefright` per file, taking **40ms – 100ms** per file and easily freezing UI lists.
-3. **JVM Heap Pressure & GC Pauses**: `BitmapFactory` allocates JVM heap structures and native bitmaps that cause stutter when scrolling through media folders.
-4. **Flaky & Missing Metadata**: Files downloaded from browsers or messaging apps (Zalo, Telegram, WhatsApp) or lossless formats (FLAC, OPUS, OGG, M4A) frequently lack tags or album covers in `MediaStore`.
+3. **Missing Metadata on Messaging/Downloaded Media**: Files downloaded from browsers, YouTube, TikTok, or messaging apps (Zalo, Telegram, WhatsApp) or lossless audio (FLAC, OPUS, OGG, M4A) frequently lack tags, duration, or album/poster art in Android's `MediaStore`.
 
 ### Solution:
-Build a lightweight, zero-heap **Rust Native Media Engine** that directly parses binary headers in micro-seconds (< 0.5ms per file), extracts embedded EXIF thumbnails and cover art instantly, and provides Rayon-parallel filesystem scanning for missing media.
+Build a lightweight, zero-heap **Rust Native Media Engine** that directly parses binary headers in micro-seconds (< 0.5ms per file), extracts embedded EXIF thumbnails, audio album covers, and video poster art instantly, and provides Rayon-parallel filesystem scanning for missing media.
 
 ```mermaid
 flowchart TD
     subgraph UI & Image Loader Layer [Jetpack Compose & Coil]
         A1[Image Grid Card] -->|Request Thumbnail| B0[FastImageThumbnailFetcher]
-        A2[Audio Grid / List Card] -->|Request Art| B1[AudioArtFetcher]
-        A3[Media Properties Dialog] -->|Request Metadata| B2[NativeEngine.inspectMedia]
-        A4[Image Resizer / Grid] -->|Request Bounds| B3[NativeEngine.getImageDimensions]
+        A2[Video Grid Card] -->|Request Poster / Frame| B1[VideoThumbnailFetcher]
+        A3[Audio Grid Card] -->|Request Album Art| B2[AudioArtFetcher]
+        A4[Media Properties Dialog] -->|Request Metadata| B3[NativeEngine.inspectMedia]
+        A5[Image Resizer / Grid] -->|Request Bounds| B4[NativeEngine.getImageDimensions]
     end
 
     subgraph JNI Bridge Layer [NativeEngine.kt]
         B0 -->|extractEmbeddedThumbnail| C1[NativeEngine JNI]
-        B1 -->|extractAudioCover| C1
-        B2 -->|inspectMedia| C1
-        B3 -->|getImageBounds| C1
+        B1 -->|extractVideoPoster| C1
+        B2 -->|extractAudioCover| C1
+        B3 -->|inspectMedia / inspectVideo| C1
+        B4 -->|getImageBounds| C1
     end
 
     subgraph Rust Core Engine [libowlfm_core.so]
         C1 --> D0[image_meta.rs: Embedded EXIF Thumbnail Extractor]
-        C1 --> D1[audio_meta.rs: ID3v2 / FLAC / M4A Parser]
-        C1 --> D2[image_meta.rs: JPEG / PNG / WebP Header Reader]
-        C1 --> D3[video_meta.rs: MP4 moov / MKV EBML Header Parser]
+        C1 --> D1[video_meta.rs: Embedded Video Poster & moov / EBML Parser]
+        C1 --> D2[audio_meta.rs: ID3v2 / FLAC / M4A Parser]
+        C1 --> D3[image_meta.rs: JPEG / PNG / WebP Header Reader]
         C1 --> D4[scanner.rs: Parallel Media Filesystem Crawler]
     end
 
     D0 -->|Raw JPEG Thumbnail Bytes < 0.1ms| B0
-    D1 -->|Raw JPEG/PNG Cover Bytes| B1
-    D2 -->|Width, Height, Exif Date| B3
-    D3 -->|Duration, Width, Height| B2
+    D1 -->|Raw Poster Bytes & Instant Duration / 4K Badge| B1
+    D2 -->|Raw JPEG/PNG Cover Bytes| B2
+    D3 -->|Width, Height, Exif Date| B4
+    D1 -->|Duration, Width, Height| B3
 ```
 
 ---
@@ -50,16 +52,18 @@ flowchart TD
 ## 2. Architecture & Design Principles
 
 > [!TIP]
-> **Embedded EXIF Thumbnail Acceleration (< 0.1ms per image)**:
-> Over 90% of camera photos (JPEG) already have a pre-rendered 160x120 or 320x240 thumbnail embedded inside the EXIF APP1 IFD1 segment. Rust reads this in **< 0.1ms** without touching or decoding the 12MP–108MP master image. Passing this raw byte buffer directly to Coil enables instantaneous 120 FPS gallery scrolling without JVM GC pauses.
+> **Embedded EXIF Thumbnail Acceleration for Photos (< 0.1ms per image)**:
+> Over 90% of camera photos (JPEG) have a pre-rendered 160x120 or 320x240 thumbnail embedded inside the EXIF APP1 IFD1 segment. Rust reads this in **< 0.1ms** without touching or decoding the 12MP–108MP master image, enabling 120 FPS gallery scrolling without JVM GC pauses.
 
-> [!IMPORTANT]
-> **Hardware vs Software Video Frame Decoding**:
-> Video thumbnail frame extraction (rendering an actual frame at 1s timestamp) will **continue using Android Q+ hardware-accelerated `ThumbnailUtils`** (which leverages the device GPU/DSP hardware decoder). Rust will handle **video header parsing** (resolution, duration, timescale, codecs) and **parallel filesystem discovery** in micro-seconds. Software frame decoding on CPU in Rust is intentionally avoided to preserve battery life and prevent device overheating.
+> [!TIP]
+> **Dual-Stage Video Optimization (Embedded Posters & Instant Badges)**:
+> 1. **Embedded Video Poster Extraction**: Videos downloaded from the web, TikTok, YouTube, or movies often contain an embedded cover/poster inside the MP4 `covr` atom or MKV `AttachedPicture` element. Rust extracts this in **< 0.1ms**, bypassing video stream decoders entirely.
+> 2. **Instant Duration & Resolution Badges**: Rust reads the MP4 `mvhd`/`tkhd` or MKV EBML header in micro-seconds, allowing duration (`03:45`) and quality badges (`4K`, `1080p`) to appear immediately when the card renders.
+> 3. **Hardware Frame Decoding for Camera Videos**: For local camera recordings without an embedded poster, Android Q+ hardware-accelerated `ThumbnailUtils` decodes 1 frame via the device GPU/DSP and stores it in the persistent Coil Disk Cache so it is never re-decoded on subsequent scrolls.
 
 > [!NOTE]
 > **Preservation of English UI**:
-> All newly exposed properties, dialog labels, toasts, and metadata badges in Compose UI will be strictly in English (e.g. `Bitrate`, `Sample Rate`, `Duration`, `Dimensions`, `Artist`, `Album`).
+> All newly exposed properties, dialog labels, toasts, and metadata badges in Compose UI will be strictly in English (e.g. `Bitrate`, `Sample Rate`, `Duration`, `Dimensions`, `Artist`, `Album`, `Resolution`).
 
 ---
 
@@ -102,17 +106,23 @@ Dual-mode image accelerator:
 
 ---
 
-### Component 3: Rust Video Header Engine (`rust-core/src/video_meta.rs`)
-Fast user-space MP4 / MKV header parser:
-- **MP4 / MOV**: Parse `moov` atom:
-  - `mvhd` atom: extracts timescale and duration.
-  - `trak` -> `mdia` -> `minf` -> `stbl` / `tkhd`: extracts video track width & height.
-- **MKV / WebM**: Parse EBML Header:
-  - Element `0x1549A966` (Info): `Duration`.
-  - Element `0x1654AE6B` (Tracks) -> Video: `PixelWidth`, `PixelHeight`.
+### Component 3: Rust Video Engine (`rust-core/src/video_meta.rs`)
+Fast user-space MP4 / MKV header parser & poster extractor:
+1. **Embedded Poster Extractor (`extract_video_poster`)**:
+   - **MP4 / MOV**: Scans `moov` -> `udta` -> `meta` -> `ilst` -> `covr` atom. Extracts raw JPEG/PNG poster bytes in < 0.1ms.
+   - **MKV / WebM**: Scans EBML Elements for `AttachedPicture` (`0x61A7`) tag.
+2. **Instant Video Metadata Parser (`parse_video_metadata`)**:
+   - **MP4 / MOV**: Parse `moov` atom:
+     - `mvhd` atom: extracts timescale and duration.
+     - `trak` -> `mdia` -> `minf` -> `stbl` / `tkhd`: extracts video track width & height.
+   - **MKV / WebM**: Parse EBML Header:
+     - Element `0x1549A966` (Info): `Duration`.
+     - Element `0x1654AE6B` (Tracks) -> Video: `PixelWidth`, `PixelHeight`.
+   - Computes badge label: `4K` (width >= 3840), `1080p` (width >= 1920), `720p` (width >= 1280), or `SD`.
 
 #### [NEW] `rust-core/src/video_meta.rs`
-- `parse_video_metadata(path: &str) -> io::Result<VideoMetadata>` (duration_ms, width, height, format)
+- `extract_video_poster(path: &str) -> io::Result<Option<Vec<u8>>>`
+- `parse_video_metadata(path: &str) -> io::Result<VideoMetadata>` (duration_ms, width, height, quality_badge)
 
 ---
 
@@ -120,6 +130,7 @@ Fast user-space MP4 / MKV header parser:
 #### [MODIFY] `rust-core/src/lib.rs`
 - Expose JNI methods:
   - `Java_com_antigravity_filemanager_core_NativeEngine_extractEmbeddedThumbnail` -> `jbyteArray`
+  - `Java_com_antigravity_filemanager_core_NativeEngine_extractVideoPoster` -> `jbyteArray`
   - `Java_com_antigravity_filemanager_core_NativeEngine_extractAudioCover` -> `jbyteArray`
   - `Java_com_antigravity_filemanager_core_NativeEngine_getAudioMetadata` -> `jstring`
   - `Java_com_antigravity_filemanager_core_NativeEngine_getImageMetadata` -> `jstring`
@@ -129,6 +140,7 @@ Fast user-space MP4 / MKV header parser:
 - Add data classes: `AudioMetadata`, `ImageMetadata`, `VideoMetadata`.
 - Add external JNI declarations:
   - `extractEmbeddedThumbnail(imagePath: String): ByteArray?`
+  - `extractVideoPoster(videoPath: String): ByteArray?`
   - `extractAudioCover(audioPath: String): ByteArray?`
   - `inspectAudio(audioPath: String): AudioMetadata?`
   - `inspectImage(imagePath: String): ImageMetadata?`
@@ -145,6 +157,10 @@ Fast user-space MP4 / MKV header parser:
   - If embedded thumbnail bytes exist: decodes into `BitmapDrawable` in < 0.1ms and returns `DrawableResult`.
   - If absent: returns `null`, seamlessly allowing Coil's standard full decoder to proceed.
 
+#### [MODIFY] `app/src/main/java/com/antigravity/filemanager/utils/VideoThumbnailFetcher.kt`
+- Fast Path 1: Check `NativeEngine.extractVideoPoster(file.absolutePath)`. If an embedded poster exists (movies, downloaded videos), decode and return immediately (< 0.1ms) without spinning up Android hardware decoders.
+- Fast Path 2: For local camera recordings without an embedded poster, continue using Android Q+ hardware-accelerated `ThumbnailUtils.createVideoThumbnail(file, Size(256, 256))` and cache to Coil disk cache.
+
 #### [MODIFY] `app/src/main/java/com/antigravity/filemanager/FileManagerApp.kt`
 - Register `FastImageThumbnailFetcher.FileFactory()`, `UriFactory()`, `StringFactory()` at the top of the Coil component chain.
 
@@ -158,7 +174,7 @@ Fast user-space MP4 / MKV header parser:
 #### [MODIFY] `app/src/main/java/com/antigravity/filemanager/presentation/components/Dialogs.kt`
 - Enhance `PropertiesDialog`:
   - When inspecting an **Audio file**: Display `Artist`, `Album`, `Duration`, `Bitrate`, `Sample Rate`.
-  - When inspecting a **Video file**: Display `Resolution` (e.g. 1920x1080), `Duration`.
+  - When inspecting a **Video file**: Display `Resolution` (e.g. 1920x1080), `Duration`, `Quality` (4K/1080p).
   - When inspecting an **Image file**: Display `Dimensions` (e.g. 4032x3024) and EXIF Date.
 
 #### [MODIFY] `app/src/main/java/com/antigravity/filemanager/data/local/storage/LocalFileScanner.kt`
@@ -173,7 +189,7 @@ Fast user-space MP4 / MKV header parser:
    ```powershell
    ./gradlew testDebugUnitTest
    ```
-   Add assertions in `NativeEngineTest.kt` verifying that `extractEmbeddedThumbnail`, `extractAudioCover`, `getAudioMetadata`, `getImageMetadata`, and `getVideoMetadata` handle missing native library safely on host JVM.
+   Add assertions in `NativeEngineTest.kt` verifying that `extractEmbeddedThumbnail`, `extractVideoPoster`, `extractAudioCover`, `getAudioMetadata`, `getImageMetadata`, and `getVideoMetadata` handle missing native library safely on host JVM.
 2. **Rust Cargo Check**:
    ```powershell
    cargo check --manifest-path rust-core/Cargo.toml
