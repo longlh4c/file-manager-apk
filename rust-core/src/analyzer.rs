@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -64,24 +64,41 @@ pub struct AnalysisResult {
     pub duplicate_wasted_bytes: u64,
 }
 
+#[derive(Default)]
+struct ThreadScanAcc {
+    img_bytes: u64,
+    audio_bytes: u64,
+    video_bytes: u64,
+    doc_bytes: u64,
+    archive_bytes: u64,
+    other_bytes: u64,
+    large_files: Vec<LargeFileEntry>,
+    size_buckets: HashMap<u64, Vec<PathBuf>>,
+}
+
 const PARTIAL_CHUNK_SIZE: u64 = 4096;
 
+#[inline]
 fn is_image(ext: &str) -> bool {
     matches!(ext, "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "heic" | "heif" | "svg")
 }
 
+#[inline]
 fn is_audio(ext: &str) -> bool {
     matches!(ext, "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "opus" | "wma")
 }
 
+#[inline]
 fn is_video(ext: &str) -> bool {
     matches!(ext, "mp4" | "mkv" | "webm" | "avi" | "mov" | "3gp" | "flv")
 }
 
+#[inline]
 fn is_document(ext: &str) -> bool {
     matches!(ext, "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt")
 }
 
+#[inline]
 fn is_archive(ext: &str) -> bool {
     matches!(ext, "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz")
 }
@@ -120,89 +137,192 @@ fn compute_full_hash(path: &Path) -> Option<String> {
     Some(hasher.finalize().to_hex().to_string())
 }
 
+#[inline]
+fn process_file_entry(
+    path: &Path,
+    len: u64,
+    last_modified: u64,
+    file_name: &str,
+    root: &Path,
+    max_duplicate_hash_bytes: u64,
+    acc: &mut ThreadScanAcc,
+) {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if is_image(&ext) {
+        acc.img_bytes += len;
+    } else if is_audio(&ext) {
+        acc.audio_bytes += len;
+    } else if is_video(&ext) {
+        acc.video_bytes += len;
+    } else if is_document(&ext) {
+        acc.doc_bytes += len;
+    } else if is_archive(&ext) {
+        acc.archive_bytes += len;
+    } else {
+        acc.other_bytes += len;
+    }
+
+    // Large file threshold: >= 10 MB
+    if len >= 10 * 1024 * 1024 {
+        let parent = path.parent().unwrap_or(root);
+        let rel_dir = match parent.strip_prefix(root) {
+            Ok(p) if p.as_os_str().is_empty() => "/".to_string(),
+            Ok(p) => format!("/{}", p.to_string_lossy()),
+            Err(_) => "/".to_string(),
+        };
+
+        acc.large_files.push(LargeFileEntry {
+            path: path.to_string_lossy().to_string(),
+            name: file_name.to_string(),
+            relative_dir: rel_dir,
+            size_bytes: len,
+            extension: ext,
+            last_modified,
+        });
+    }
+
+    if len > 0 && len <= max_duplicate_hash_bytes {
+        acc.size_buckets.entry(len).or_default().push(path.to_path_buf());
+    }
+}
+
 pub fn analyze_storage(root_path: &str, max_duplicate_hash_bytes: u64) -> AnalysisResult {
     let root = Path::new(root_path);
-    let mut img_bytes = 0u64;
-    let mut audio_bytes = 0u64;
-    let mut video_bytes = 0u64;
-    let mut doc_bytes = 0u64;
-    let mut archive_bytes = 0u64;
-    let mut other_bytes = 0u64;
 
-    let mut large_files = Vec::new();
-    let mut size_buckets: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    // Read top-level items in storage root
+    let mut top_dirs = Vec::new();
+    let mut root_acc = ThreadScanAcc::default();
 
-    for entry in WalkDir::new(root)
-        .min_depth(1)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            !name.starts_with('.')
-        })
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() {
-            let path = entry.path();
-            let metadata = match entry.metadata() {
-                Ok(m) => m,
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry_res in entries {
+            let entry = match entry_res {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let file_name = entry.file_name();
+            let name_str = file_name.to_string_lossy();
+
+            if name_str.starts_with('.') {
+                continue;
+            }
+
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
                 Err(_) => continue,
             };
 
-            let len = metadata.len();
-            let ext = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-
-            if is_image(&ext) {
-                img_bytes += len;
-            } else if is_audio(&ext) {
-                audio_bytes += len;
-            } else if is_video(&ext) {
-                video_bytes += len;
-            } else if is_document(&ext) {
-                doc_bytes += len;
-            } else if is_archive(&ext) {
-                archive_bytes += len;
-            } else {
-                other_bytes += len;
-            }
-
-            if len >= 10 * 1024 * 1024 {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let parent = path.parent().unwrap_or(root);
-                let rel_dir = match parent.strip_prefix(root) {
-                    Ok(p) if p.as_os_str().is_empty() => "/".to_string(),
-                    Ok(p) => format!("/{}", p.to_string_lossy()),
-                    Err(_) => "/".to_string(),
-                };
-                let last_modified = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-
-                large_files.push(LargeFileEntry {
-                    path: path.to_string_lossy().to_string(),
-                    name,
-                    relative_dir: rel_dir,
-                    size_bytes: len,
-                    extension: ext,
-                    last_modified,
-                });
-            }
-
-            if len > 0 && len <= max_duplicate_hash_bytes {
-                size_buckets.entry(len).or_default().push(path.to_path_buf());
+            let path = entry.path();
+            if file_type.is_dir() {
+                top_dirs.push(path);
+            } else if file_type.is_file() {
+                if let Ok(meta) = entry.metadata() {
+                    let len = meta.len();
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    process_file_entry(
+                        &path,
+                        len,
+                        mtime,
+                        &name_str,
+                        root,
+                        max_duplicate_hash_bytes,
+                        &mut root_acc,
+                    );
+                }
             }
         }
     }
 
-    large_files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    // Fan out top-level directories concurrently across all CPU cores with Rayon
+    let branch_accs: Vec<ThreadScanAcc> = top_dirs
+        .into_par_iter()
+        .map(|dir_path| {
+            let mut acc = ThreadScanAcc::default();
 
-    let candidate_sizes: Vec<(u64, Vec<PathBuf>)> = size_buckets
+            for entry in WalkDir::new(&dir_path)
+                .min_depth(1)
+                .into_iter()
+                .filter_entry(|e| {
+                    let name = e.file_name().to_string_lossy();
+                    if name.starts_with('.') {
+                        return false;
+                    }
+                    if e.file_type().is_dir() {
+                        // Skip Android/data and Android/obb which are restricted on Android 11+
+                        // and contain hundreds of thousands of app cache files
+                        if name == "data" || name == "obb" {
+                            if let Some(parent) = e.path().parent() {
+                                if parent.file_name().map(|n| n == "Android").unwrap_or(false) {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                    true
+                })
+                .filter_map(|e| e.ok())
+            {
+                if entry.file_type().is_file() {
+                    let path = entry.path();
+                    let metadata = match entry.metadata() {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    let len = metadata.len();
+                    let mtime = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let file_name = entry.file_name().to_string_lossy();
+
+                    process_file_entry(
+                        path,
+                        len,
+                        mtime,
+                        &file_name,
+                        root,
+                        max_duplicate_hash_bytes,
+                        &mut acc,
+                    );
+                }
+            }
+
+            acc
+        })
+        .collect();
+
+    // Merge results from all parallel branches into root_acc
+    for branch in branch_accs {
+        root_acc.img_bytes += branch.img_bytes;
+        root_acc.audio_bytes += branch.audio_bytes;
+        root_acc.video_bytes += branch.video_bytes;
+        root_acc.doc_bytes += branch.doc_bytes;
+        root_acc.archive_bytes += branch.archive_bytes;
+        root_acc.other_bytes += branch.other_bytes;
+        root_acc.large_files.extend(branch.large_files);
+
+        for (size, files) in branch.size_buckets {
+            root_acc.size_buckets.entry(size).or_default().extend(files);
+        }
+    }
+
+    // Sort large files descending by size
+    root_acc.large_files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+
+    // Parallel multi-tiered duplicate detection
+    let candidate_sizes: Vec<(u64, Vec<PathBuf>)> = root_acc
+        .size_buckets
         .into_iter()
         .filter(|(_, files)| files.len() >= 2)
         .collect();
@@ -281,13 +401,13 @@ pub fn analyze_storage(root_path: &str, max_duplicate_hash_bytes: u64) -> Analys
     let duplicate_wasted_bytes: u64 = final_groups.iter().map(|g| g.wasted_bytes).sum();
 
     AnalysisResult {
-        img_bytes,
-        audio_bytes,
-        video_bytes,
-        doc_bytes,
-        archive_bytes,
-        other_bytes,
-        large_files,
+        img_bytes: root_acc.img_bytes,
+        audio_bytes: root_acc.audio_bytes,
+        video_bytes: root_acc.video_bytes,
+        doc_bytes: root_acc.doc_bytes,
+        archive_bytes: root_acc.archive_bytes,
+        other_bytes: root_acc.other_bytes,
+        large_files: root_acc.large_files,
         duplicate_groups: final_groups,
         duplicate_wasted_bytes,
     }
