@@ -690,6 +690,12 @@ object NativeEngine {
     @JvmStatic
     private external fun loadCloudTreeFromFile(accountId: String, filePath: String): Int
 
+    @JvmStatic
+    private external fun decryptMegaThumbnail(encrypted: ByteArray, nodeKey: ByteArray): ByteArray?
+
+    @JvmStatic
+    private external fun downscaleThumbnailBytes(rawBytes: ByteArray, maxW: Int, maxH: Int, quality: Int): ByteArray?
+
     fun calculateBlockMd5sFast(filePath: String, blockSize: Int = 4 * 1024 * 1024): List<String>? {
         if (!isLoaded) return null
         return try {
@@ -903,6 +909,26 @@ object NativeEngine {
         } catch (t: Throwable) {
             Log.w(TAG, "loadCloudTreeFromFileFast failed: ${t.message}")
             -1
+        }
+    }
+
+    fun decryptMegaThumbnailFast(encrypted: ByteArray, nodeKey: ByteArray): ByteArray? {
+        if (!isLoaded) return null
+        return try {
+            decryptMegaThumbnail(encrypted, nodeKey)
+        } catch (t: Throwable) {
+            Log.w(TAG, "decryptMegaThumbnailFast failed: ${t.message}")
+            null
+        }
+    }
+
+    fun downscaleThumbnailBytesFast(rawBytes: ByteArray, maxW: Int = 240, maxH: Int = 240, quality: Int = 85): ByteArray? {
+        if (!isLoaded) return null
+        return try {
+            downscaleThumbnailBytes(rawBytes, maxW, maxH, quality)
+        } catch (t: Throwable) {
+            Log.w(TAG, "downscaleThumbnailBytesFast failed: ${t.message}")
+            null
         }
     }
 }

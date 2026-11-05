@@ -2912,6 +2912,12 @@ class MegaApiClient @Inject constructor(
 
 
 
+            if (com.antigravity.filemanager.core.NativeEngine.isAvailable) {
+                val nativeDecrypted = com.antigravity.filemanager.core.NativeEngine.decryptMegaThumbnailFast(encrypted, nodeKeyBytes)
+                if (nativeDecrypted != null && nativeDecrypted.isNotEmpty()) {
+                    return@withContext Result.success(nativeDecrypted)
+                }
+            }
             Result.success(aesCbcDecrypt(encrypted, nodeKeyBytes, ByteArray(16)))
 
         } catch (e: Exception) {

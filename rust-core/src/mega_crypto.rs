@@ -325,9 +325,35 @@ pub fn batch_decrypt_mega_nodes(
         .collect()
 }
 
+pub fn decrypt_mega_thumbnail(encrypted_data: &[u8], node_key: &[u8]) -> Result<Vec<u8>, String> {
+    if node_key.len() < 16 {
+        return Err("Node key must be at least 16 bytes".to_string());
+    }
+    if encrypted_data.len() % 16 != 0 || encrypted_data.is_empty() {
+        return Err("Encrypted data length must be non-empty and multiple of 16".to_string());
+    }
+
+    let iv = [0u8; 16];
+    let mut decryptor = Aes128CbcDec::new_from_slices(&node_key[..16], &iv)
+        .map_err(|e| format!("Invalid key/iv: {}", e))?;
+
+    let mut buf = encrypted_data.to_vec();
+    for chunk in buf.chunks_exact_mut(16) {
+        let block = GenericArray::from_mut_slice(chunk);
+        decryptor.decrypt_block_mut(block);
+    }
+
+    if let Some(pos) = buf.windows(2).rposition(|w| w == [0xFF, 0xD9]) {
+        buf.truncate(pos + 2);
+    }
+
+    Ok(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cipher::BlockEncryptMut;
 
     #[test]
     fn test_mega_chunked_mac() {
@@ -355,5 +381,23 @@ mod tests {
         // Decrypt
         mega_ctr_decrypt_slice(&mut data, &key, &nonce, 0);
         assert_eq!(data, original);
+    }
+
+    #[test]
+    fn test_decrypt_mega_thumbnail() {
+        let key = [42u8; 16];
+        let iv = [0u8; 16];
+        let mut jpeg = vec![0xFF, 0xD8, 0x01, 0x02, 0x03, 0xFF, 0xD9];
+        while jpeg.len() % 16 != 0 {
+            jpeg.push(0);
+        }
+        let mut enc = jpeg.clone();
+        let mut encryptor = cbc::Encryptor::<aes::Aes128>::new_from_slices(&key, &iv).unwrap();
+        for chunk in enc.chunks_exact_mut(16) {
+            let block = cipher::generic_array::GenericArray::from_mut_slice(chunk);
+            encryptor.encrypt_block_mut(block);
+        }
+        let decrypted = decrypt_mega_thumbnail(&enc, &key).unwrap();
+        assert_eq!(decrypted, vec![0xFF, 0xD8, 0x01, 0x02, 0x03, 0xFF, 0xD9]);
     }
 }

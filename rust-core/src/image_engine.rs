@@ -90,6 +90,54 @@ pub fn resize_image_file(
     Ok(meta.len())
 }
 
+pub fn downscale_thumbnail_bytes(
+    raw_bytes: &[u8],
+    max_w: u32,
+    max_h: u32,
+    quality: u8,
+) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(raw_bytes)
+        .map_err(|e| format!("Failed to decode image from memory: {}", e))?;
+
+    let w = img.width();
+    let h = img.height();
+
+    let resized = if w > max_w || h > max_h {
+        img.resize(max_w.max(1), max_h.max(1), FilterType::Triangle)
+    } else {
+        img
+    };
+
+    let rgb_img = if resized.color().has_alpha() {
+        let rgba = resized.to_rgba8();
+        let mut rgb = RgbImage::new(rgba.width(), rgba.height());
+        for (x, y, pixel) in rgba.enumerate_pixels() {
+            let a = pixel[3] as u32;
+            let inv_a = 255 - a;
+            let r = ((pixel[0] as u32 * a + 255 * inv_a) / 255) as u8;
+            let g = ((pixel[1] as u32 * a + 255 * inv_a) / 255) as u8;
+            let b = ((pixel[2] as u32 * a + 255 * inv_a) / 255) as u8;
+            rgb.put_pixel(x, y, Rgb([r, g, b]));
+        }
+        rgb
+    } else {
+        resized.to_rgb8()
+    };
+
+    let mut out_bytes = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out_bytes, quality.clamp(1, 100));
+    encoder
+        .encode(
+            rgb_img.as_raw(),
+            rgb_img.width(),
+            rgb_img.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| format!("Failed to encode JPEG: {}", e))?;
+
+    Ok(out_bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +177,20 @@ mod tests {
         assert_eq!(decoded.height(), 50);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_downscale_thumbnail_bytes() {
+        let img = image::RgbImage::from_fn(400, 300, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+        });
+        let mut raw = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut raw), image::ImageFormat::Jpeg).unwrap();
+
+        let downscaled = downscale_thumbnail_bytes(&raw, 200, 200, 85).unwrap();
+        let decoded = image::load_from_memory(&downscaled).unwrap();
+        assert!(decoded.width() <= 200);
+        assert!(decoded.height() <= 200);
     }
 }
 

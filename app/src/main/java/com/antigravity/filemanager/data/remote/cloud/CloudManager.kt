@@ -342,7 +342,7 @@ class CloudManager @Inject constructor(
             CloudProvider.MEGA -> megaApi.downloadThumbnail(megaAccount(account), nodeId)
             CloudProvider.GOOGLE_DRIVE -> googleDriveApi.downloadThumbnail(account, nodeId)
             CloudProvider.TERABOX -> teraBoxApi.downloadThumbnail(account, nodeId)
-            CloudProvider.DROPBOX -> Result.failure(Exception("Thumbnail endpoint not supported for ${account.provider}"))
+            CloudProvider.DROPBOX -> dropboxApi.downloadThumbnail(account, nodeId)
         }
     }
 

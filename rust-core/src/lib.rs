@@ -974,3 +974,56 @@ pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_loadCl
         Err(_) => -1,
     }
 }
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_decryptMegaThumbnail<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    encrypted: JByteArray<'local>,
+    node_key: JByteArray<'local>,
+) -> jbyteArray {
+    let enc_bytes = match env.convert_byte_array(&encrypted) {
+        Ok(b) => b,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let key_bytes = match env.convert_byte_array(&node_key) {
+        Ok(k) if k.len() >= 16 => k,
+        _ => return std::ptr::null_mut(),
+    };
+
+    match mega_crypto::decrypt_mega_thumbnail(&enc_bytes, &key_bytes) {
+        Ok(decrypted) => {
+            match env.byte_array_from_slice(&decrypted) {
+                Ok(arr) => arr.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            }
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_downscaleThumbnailBytes<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    raw_bytes: JByteArray<'local>,
+    max_w: jint,
+    max_h: jint,
+    quality: jint,
+) -> jbyteArray {
+    let bytes = match env.convert_byte_array(&raw_bytes) {
+        Ok(b) => b,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    let q = if quality <= 0 { 85 } else { quality as u8 };
+    match image_engine::downscale_thumbnail_bytes(&bytes, max_w as u32, max_h as u32, q) {
+        Ok(downscaled) => {
+            match env.byte_array_from_slice(&downscaled) {
+                Ok(arr) => arr.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            }
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
