@@ -28,20 +28,13 @@ import kotlinx.coroutines.flow.debounce
 import java.io.File
 
 data class StorageAnalysisUiState(
-    val isLoading: Boolean = true,
+    val isLoading: Boolean = false,
     val data: StorageAnalysisData = StorageAnalysisData(
-        volumeInfo = StorageVolumeInfo(256L * 1024 * 1024 * 1024, 241L * 1024 * 1024 * 1024, 14_870_000_000L),
-        breakdown = StorageCategoryBreakdown(
-            imagesBytes = 42L * 1024 * 1024 * 1024,
-            audioBytes = 11L * 1024 * 1024 * 1024,
-            videosBytes = 48L * 1024 * 1024 * 1024,
-            documentsBytes = 79L * 1024 * 1024,
-            archivesBytes = 1_200_000L,
-            othersBytes = 35L * 1024 * 1024 * 1024
-        ),
+        volumeInfo = StorageVolumeInfo(0L, 0L, 0L),
+        breakdown = StorageCategoryBreakdown(0L, 0L, 0L, 0L, 0L, 0L),
         largeFiles = emptyList(),
-        largeFilesTotalBytes = 89_120_000_000L,
-        recycleBinBytes = 20_960_000L
+        largeFilesTotalBytes = 0L,
+        recycleBinBytes = 0L
     ),
     val bookmarks: List<Bookmark> = emptyList(),
     // Bumped on every mutation (rename/compress/extract/delete), independent of whether that
@@ -67,14 +60,25 @@ class StorageAnalysisViewModel @Inject constructor(
     private val mediaChangeSignal: com.antigravity.filemanager.data.local.observer.MediaChangeSignal
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(StorageAnalysisUiState())
-    val uiState: StateFlow<StorageAnalysisUiState> = _uiState.asStateFlow()
+    private val _uiState: MutableStateFlow<StorageAnalysisUiState>
+    val uiState: StateFlow<StorageAnalysisUiState>
 
     private var activeTransferJob: kotlinx.coroutines.Job? = null
 
     init {
-        _uiState.update { old -> old.copy(isLoading = true) }
-        loadData(isInitial = true)
+        val cached = storageAnalysisUseCase.getCachedAnalysisData()
+        val initialData = cached ?: StorageAnalysisData(
+            volumeInfo = storageAnalysisUseCase.getInstantStorageVolume()
+        )
+        _uiState = MutableStateFlow(
+            StorageAnalysisUiState(
+                isLoading = (cached == null),
+                data = initialData
+            )
+        )
+        uiState = _uiState.asStateFlow()
+
+        loadData(isInitial = (cached == null), forceRefresh = (cached == null))
         observeBookmarks()
         observeMediaChanges()
     }
@@ -109,16 +113,16 @@ class StorageAnalysisViewModel @Inject constructor(
         }
     }
 
-    fun loadData(isInitial: Boolean = false) {
-        viewModelScope.launch { loadDataInternal(isInitial) }
+    fun loadData(isInitial: Boolean = false, forceRefresh: Boolean = false) {
+        viewModelScope.launch { loadDataInternal(isInitial, forceRefresh) }
     }
 
     /** Suspending body of [loadData], so mutation handlers can await a full rescan before continuing. */
-    private suspend fun loadDataInternal(isInitial: Boolean = false) {
+    private suspend fun loadDataInternal(isInitial: Boolean = false, forceRefresh: Boolean = false) {
         if (isInitial) {
             _uiState.update { old -> old.copy(isLoading = true) }
         }
-        val result = storageAnalysisUseCase.getAnalysisData()
+        val result = storageAnalysisUseCase.getAnalysisData(forceRefresh)
         _uiState.update { old -> old.copy(
             isLoading = false,
             data = result
@@ -126,7 +130,7 @@ class StorageAnalysisViewModel @Inject constructor(
     }
 
     fun refresh() {
-        loadData(isInitial = false)
+        loadData(isInitial = false, forceRefresh = true)
     }
 
     fun copySelected(paths: List<String>) {

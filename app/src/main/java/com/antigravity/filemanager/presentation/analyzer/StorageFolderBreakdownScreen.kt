@@ -29,6 +29,9 @@ import com.antigravity.filemanager.presentation.theme.*
 import com.antigravity.filemanager.utils.FileOpener
 import java.io.File
 import java.util.Locale
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -74,26 +77,55 @@ fun StorageFolderBreakdownScreen(
         isScanning = true
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
+                if (com.antigravity.filemanager.core.NativeEngine.isAvailable) {
+                    val fastBreakdown = com.antigravity.filemanager.core.NativeEngine.scanFolderBreakdownFast(currentPath)
+                    if (fastBreakdown != null) {
+                        folderItems = fastBreakdown.map { item ->
+                            FileItem(
+                                id = item.path,
+                                name = item.name,
+                                path = item.path,
+                                size = item.size,
+                                isDirectory = item.isDirectory,
+                                itemCount = item.itemCount,
+                                extension = if (item.isDirectory) "" else File(item.name).extension.lowercase(Locale.getDefault()),
+                                folderBadgeType = getFolderBadgeForName(item.name)
+                            )
+                        }
+                        isScanning = false
+                        return@withContext
+                    }
+                }
+
+                // Fallback if NativeEngine is not available: concurrent coroutines with Android pruning
                 val dir = File(currentPath)
                 val children = dir.listFiles() ?: emptyArray()
-                val list = children.map { f ->
-                    // Fetch each directory's children once and reuse it for both the size
-                    // computation and the item count, instead of calling listFiles() twice.
-                    val childList = if (f.isDirectory) f.listFiles() else null
-                    // Full depth: a 2-level cap reported deep trees (DCIM/Camera, Android/media...)
-                    // at a fraction of their real size on a screen sorted by size.
-                    val size = com.antigravity.filemanager.data.local.storage.directorySize(f)
-                    val itemCount = childList?.size ?: 0
-                    FileItem(
-                        id = f.absolutePath,
-                        name = f.name,
-                        path = f.absolutePath,
-                        size = size,
-                        isDirectory = f.isDirectory,
-                        itemCount = itemCount,
-                        extension = if (f.isDirectory) "" else f.extension.lowercase(Locale.getDefault()),
-                        folderBadgeType = getFolderBadgeForName(f.name)
-                    )
+                val list = coroutineScope {
+                    children.map { f ->
+                        async {
+                            val childList = if (f.isDirectory) f.listFiles() else null
+                            val size = if (f.isDirectory) {
+                                if (f.name == "Android" || f.name.startsWith(".")) {
+                                    f.listFiles()?.filter { it.isFile }?.sumOf { it.length() } ?: 0L
+                                } else {
+                                    com.antigravity.filemanager.data.local.storage.directorySize(f)
+                                }
+                            } else {
+                                f.length()
+                            }
+                            val itemCount = childList?.size ?: 0
+                            FileItem(
+                                id = f.absolutePath,
+                                name = f.name,
+                                path = f.absolutePath,
+                                size = size,
+                                isDirectory = f.isDirectory,
+                                itemCount = itemCount,
+                                extension = if (f.isDirectory) "" else f.extension.lowercase(Locale.getDefault()),
+                                folderBadgeType = getFolderBadgeForName(f.name)
+                            )
+                        }
+                    }.awaitAll()
                 }
                 folderItems = list.sortedByDescending { it.size }
             } catch (e: Exception) {

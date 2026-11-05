@@ -30,6 +30,7 @@ class NativeEngineTest {
             assertNull(NativeEngine.getEmbeddedThumbnail("/dummy.jpg"))
             assertNull(NativeEngine.getVideoPoster("/dummy.mp4"))
             assertNull(NativeEngine.getAudioCover("/dummy.mp3"))
+            assertNull(NativeEngine.scanFolderBreakdownFast("/dummy"))
 
             try {
                 NativeEngine.resizeImage("/src", "/dst", 100, 100, 85, "jpg", 1)

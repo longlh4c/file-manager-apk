@@ -222,34 +222,44 @@ class StorageAnalysisRepositoryImpl @Inject constructor(
 
     private val mutex = Mutex()
     private var inFlight: kotlinx.coroutines.Deferred<StorageAnalysisData>? = null
+    @Volatile private var cachedAnalysisData: StorageAnalysisData? = null
+    @Volatile private var lastScanTime: Long = 0L
 
-    // Single-flight: if a screen asks for both the full breakdown and the large-files list
-    // around the same time, the second caller joins the first's in-progress scan instead of
-    // starting its own full-device walk. Unlike a time-based cache, this never returns a stale
-    // result once the scan has finished — the next call always triggers a fresh one.
-    private suspend fun scanWithCache(): StorageAnalysisData = coroutineScope {
+    companion object {
+        private const val CACHE_TTL_MS = 10 * 60 * 1000L // 10 minutes TTL
+    }
+
+    override fun getCachedAnalysisData(): StorageAnalysisData? = cachedAnalysisData
+
+    override fun getInstantStorageVolume(): StorageVolumeInfo = scanner.getStorageVolume()
+
+    override fun invalidateCache() {
+        cachedAnalysisData = null
+        lastScanTime = 0L
+    }
+
+    private suspend fun scanWithCache(forceRefresh: Boolean): StorageAnalysisData = coroutineScope {
+        if (!forceRefresh) {
+            val cached = cachedAnalysisData
+            if (cached != null && (System.currentTimeMillis() - lastScanTime < CACHE_TTL_MS)) {
+                return@coroutineScope cached
+            }
+        }
+
         val joined = mutex.withLock { inFlight }
         if (joined != null) return@coroutineScope joined.await()
 
         val deferred = async {
-            // scanner.scanStorageAnalysis() always hardcoded recycleBinBytes to 0 — it has no
-            // knowledge of the app's own recycle bin (a Room-backed table of moved-not-deleted
-            // files under .filemanager_trash, tracked separately from the raw filesystem walk).
-            // Fetch the real total from there instead so this card reflects what Recycle Bin
-            // actually shows.
             val trashDeferred = async { recycleBinRepository.getTrashTotalSize() }
             val sampleDeferred = async { recycleBinRepository.getTrashItems().firstOrNull() }
             val analysis = scanner.scanStorageAnalysis()
             val sample = sampleDeferred.await()
-            analysis.copy(
+            val finalData = analysis.copy(
                 recycleBinBytes = trashDeferred.await(),
                 recycleBinSampleItem = sample?.let {
                     FileItem(
                         id = it.trashPath,
                         name = it.fileName,
-                        // originalPath (not trashPath) so the UI can show where the item came
-                        // from — the physical file itself now lives under .filemanager_trash,
-                        // which isn't meaningful to show the user.
                         path = it.originalPath,
                         size = it.fileSize,
                         lastModified = it.deletedTimestamp,
@@ -258,6 +268,9 @@ class StorageAnalysisRepositoryImpl @Inject constructor(
                     )
                 }
             )
+            cachedAnalysisData = finalData
+            lastScanTime = System.currentTimeMillis()
+            finalData
         }
         mutex.withLock { inFlight = deferred }
         try {
@@ -267,9 +280,9 @@ class StorageAnalysisRepositoryImpl @Inject constructor(
         }
     }
 
-    override suspend fun getStorageAnalysisData(): StorageAnalysisData = scanWithCache()
+    override suspend fun getStorageAnalysisData(forceRefresh: Boolean): StorageAnalysisData = scanWithCache(forceRefresh)
 
-    override suspend fun getAllLargeFiles(): List<LargeFileItem> = scanWithCache().largeFiles
+    override suspend fun getAllLargeFiles(): List<LargeFileItem> = scanWithCache(forceRefresh = false).largeFiles
 }
 
 @Singleton
@@ -770,7 +783,6 @@ class RecycleBinRepositoryImpl @Inject constructor(
     }
 
     override suspend fun getTrashTotalSize(): Long = withContext(Dispatchers.IO) {
-        healZeroTrashFolders(database)
         database.trashDao().getTotalTrashSize() ?: 0L
     }
 }

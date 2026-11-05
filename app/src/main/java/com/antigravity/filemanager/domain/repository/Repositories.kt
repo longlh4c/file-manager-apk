@@ -11,8 +11,11 @@ interface IStorageRepository {
 }
 
 interface IStorageAnalysisRepository {
-    suspend fun getStorageAnalysisData(): StorageAnalysisData
+    suspend fun getStorageAnalysisData(forceRefresh: Boolean = false): StorageAnalysisData
     suspend fun getAllLargeFiles(): List<LargeFileItem>
+    fun getCachedAnalysisData(): StorageAnalysisData?
+    fun getInstantStorageVolume(): StorageVolumeInfo
+    fun invalidateCache()
 }
 
 interface IFileRepository {

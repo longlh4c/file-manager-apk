@@ -22,8 +22,12 @@ class GetDashboardDataUseCase @Inject constructor(
 class StorageAnalysisUseCase @Inject constructor(
     private val analysisRepository: IStorageAnalysisRepository
 ) {
-    suspend fun getAnalysisData(): StorageAnalysisData = analysisRepository.getStorageAnalysisData()
+    suspend fun getAnalysisData(forceRefresh: Boolean = false): StorageAnalysisData =
+        analysisRepository.getStorageAnalysisData(forceRefresh)
     suspend fun getLargeFiles(): List<LargeFileItem> = analysisRepository.getAllLargeFiles()
+    fun getCachedAnalysisData(): StorageAnalysisData? = analysisRepository.getCachedAnalysisData()
+    fun getInstantStorageVolume(): StorageVolumeInfo = analysisRepository.getInstantStorageVolume()
+    fun invalidateCache() = analysisRepository.invalidateCache()
 }
 
 class GetCategorizedMediaUseCase @Inject constructor(

@@ -52,6 +52,14 @@ data class ApkInfo(
     val versionCode: Long?
 )
 
+data class NativeFolderBreakdownItem(
+    val name: String,
+    val path: String,
+    val isDirectory: Boolean,
+    val size: Long,
+    val itemCount: Int
+)
+
 data class NativeDocumentEntry(
     val path: String,
     val name: String,
@@ -598,6 +606,33 @@ object NativeEngine {
             )
         } catch (t: Throwable) {
             Log.w(TAG, "inspectVideo failed: ${t.message}")
+            null
+        }
+    }
+@JvmStatic
+    private external fun scanFolderBreakdown(dirPath: String): String
+
+    fun scanFolderBreakdownFast(dirPath: String): List<NativeFolderBreakdownItem>? {
+        if (!isLoaded) return null
+        return try {
+            val raw = scanFolderBreakdown(dirPath)
+            val arr = org.json.JSONArray(raw)
+            val list = ArrayList<NativeFolderBreakdownItem>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    NativeFolderBreakdownItem(
+                        name = obj.optString("name"),
+                        path = obj.optString("path"),
+                        isDirectory = obj.optBoolean("is_directory"),
+                        size = obj.optLong("size"),
+                        itemCount = obj.optInt("item_count")
+                    )
+                )
+            }
+            list
+        } catch (t: Throwable) {
+            Log.w(TAG, "Native scanFolderBreakdownFast failed: ${t.message}")
             null
         }
     }

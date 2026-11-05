@@ -205,12 +205,12 @@ data class UsbOtgVolumeInfo(
 }
 
 data class StorageCategoryBreakdown(
-    val imagesBytes: Long,
-    val audioBytes: Long,
-    val videosBytes: Long,
-    val documentsBytes: Long,
-    val archivesBytes: Long,
-    val othersBytes: Long
+    val imagesBytes: Long = 0L,
+    val audioBytes: Long = 0L,
+    val videosBytes: Long = 0L,
+    val documentsBytes: Long = 0L,
+    val archivesBytes: Long = 0L,
+    val othersBytes: Long = 0L
 )
 
 data class LargeFileItem(
@@ -270,11 +270,11 @@ data class DuplicateGroup(
 )
 
 data class StorageAnalysisData(
-    val volumeInfo: StorageVolumeInfo,
-    val breakdown: StorageCategoryBreakdown,
-    val largeFiles: List<LargeFileItem>,
-    val largeFilesTotalBytes: Long,
-    val recycleBinBytes: Long,
+    val volumeInfo: StorageVolumeInfo = StorageVolumeInfo(0L, 0L, 0L),
+    val breakdown: StorageCategoryBreakdown = StorageCategoryBreakdown(),
+    val largeFiles: List<LargeFileItem> = emptyList(),
+    val largeFilesTotalBytes: Long = 0L,
+    val recycleBinBytes: Long = 0L,
     val recycleBinSampleItem: FileItem? = null,
     val duplicateFileGroups: List<DuplicateGroup> = emptyList(),
     val duplicateFilesBytes: Long = 0L

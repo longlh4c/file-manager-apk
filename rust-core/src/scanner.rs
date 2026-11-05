@@ -1,8 +1,18 @@
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, DirEntry};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FolderBreakdownItem {
+    pub name: String,
+    pub path: String,
+    pub is_directory: bool,
+    pub size: u64,
+    pub item_count: u32,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NativeDirEntry {
@@ -285,11 +295,133 @@ pub fn fast_search(
     }
 }
 
+pub fn fast_folder_breakdown(dir_path: &str) -> Vec<FolderBreakdownItem> {
+    let dir = Path::new(dir_path);
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut direct_items = Vec::new();
+    for entry_res in entries {
+        if let Ok(entry) = entry_res {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+            let direct_len = if !is_dir {
+                entry.metadata().map(|m| m.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            direct_items.push((name, path, is_dir, direct_len));
+        }
+    }
+
+    let mut results: Vec<FolderBreakdownItem> = direct_items
+        .into_par_iter()
+        .map(|(name, path, is_dir, direct_len)| {
+            if is_dir {
+                let item_count = fs::read_dir(&path)
+                    .map(|entries| entries.filter_map(|e| e.ok()).count() as u32)
+                    .unwrap_or(0);
+
+                let mut total_size = 0u64;
+                for entry in WalkDir::new(&path)
+                    .into_iter()
+                    .filter_entry(|e| {
+                        let n = e.file_name().to_string_lossy();
+                        if e.file_type().is_dir() && (n == "data" || n == "obb") {
+                            if let Some(parent) = e.path().parent() {
+                                if parent.file_name().map(|pn| pn == "Android").unwrap_or(false) {
+                                    return false;
+                                }
+                            }
+                        }
+                        true
+                    })
+                    .filter_map(|e| e.ok())
+                {
+                    if entry.file_type().is_file() {
+                        if let Ok(m) = entry.metadata() {
+                            total_size += m.len();
+                        }
+                    }
+                }
+
+                FolderBreakdownItem {
+                    name,
+                    path: path.to_string_lossy().to_string(),
+                    is_directory: true,
+                    size: total_size,
+                    item_count,
+                }
+            } else {
+                FolderBreakdownItem {
+                    name,
+                    path: path.to_string_lossy().to_string(),
+                    is_directory: false,
+                    size: direct_len,
+                    item_count: 0,
+                }
+            }
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.size.cmp(&a.size));
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
+
+    #[test]
+    fn test_fast_folder_breakdown() {
+        let temp_dir = std::env::temp_dir().join("owlfm_breakdown_test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let sub1 = temp_dir.join("folder_small");
+        fs::create_dir_all(&sub1).unwrap();
+        {
+            let mut f = File::create(sub1.join("file1.bin")).unwrap();
+            f.write_all(&vec![1u8; 100]).unwrap();
+        }
+
+        let sub2 = temp_dir.join("folder_big");
+        fs::create_dir_all(&sub2).unwrap();
+        {
+            let mut f = File::create(sub2.join("file2.bin")).unwrap();
+            f.write_all(&vec![2u8; 500]).unwrap();
+        }
+
+        let root_file = temp_dir.join("root.txt");
+        {
+            let mut f = File::create(&root_file).unwrap();
+            f.write_all(&vec![3u8; 50]).unwrap();
+        }
+
+        let breakdown = fast_folder_breakdown(temp_dir.to_str().unwrap());
+        assert_eq!(breakdown.len(), 3);
+        // Sorted descending by size: folder_big (500) -> folder_small (100) -> root.txt (50)
+        assert_eq!(breakdown[0].name, "folder_big");
+        assert_eq!(breakdown[0].size, 500);
+        assert_eq!(breakdown[0].item_count, 1);
+
+        assert_eq!(breakdown[1].name, "folder_small");
+        assert_eq!(breakdown[1].size, 100);
+
+        assert_eq!(breakdown[2].name, "root.txt");
+        assert_eq!(breakdown[2].size, 50);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 
     #[test]
     fn test_fast_list_dir_and_search() {

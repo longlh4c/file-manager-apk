@@ -590,3 +590,23 @@ pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_getVid
         }
     }
 }
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_scanFolderBreakdown<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    dir_path: JString<'local>,
+) -> jstring {
+    let path_str: String = match env.get_string(&dir_path) {
+        Ok(s) => s.into(),
+        Err(_) => {
+            let err = env.new_string("[]").unwrap();
+            return err.into_raw();
+        }
+    };
+
+    let items = scanner::fast_folder_breakdown(&path_str);
+    let json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
+    let out = env.new_string(json).unwrap_or_else(|_| env.new_string("[]").unwrap());
+    out.into_raw()
+}
