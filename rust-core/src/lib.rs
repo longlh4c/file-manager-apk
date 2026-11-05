@@ -10,6 +10,8 @@ pub mod audio_meta;
 pub mod image_meta;
 pub mod video_meta;
 pub mod mega_crypto;
+pub mod cache_codec;
+pub mod cloud_tree;
 
 use jni::JNIEnv;
 use jni::objects::{JClass, JString, JByteArray};
@@ -747,5 +749,228 @@ pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_decryp
         1
     } else {
         0
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_saveFolderCacheNative<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    file_path: JString<'local>,
+    timestamp: jlong,
+    items_json: JString<'local>,
+) -> jboolean {
+    let path: String = match env.get_string(&file_path) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    let json_str: String = match env.get_string(&items_json) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+
+    let items: Vec<cache_codec::CacheFolderEntry> = match serde_json::from_str(&json_str) {
+        Ok(it) => it,
+        Err(_) => return 0,
+    };
+
+    match cache_codec::save_cache_to_file(&path, timestamp as i64, items) {
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_loadFolderCacheNative<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    file_path: JString<'local>,
+) -> jstring {
+    let path: String = match env.get_string(&file_path) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("").unwrap().into_raw(),
+    };
+
+    match cache_codec::load_cache_from_file(&path) {
+        Ok(payload) => {
+            let out_json = serde_json::to_string(&payload).unwrap_or_default();
+            env.new_string(out_json).unwrap_or_else(|_| env.new_string("").unwrap()).into_raw()
+        }
+        Err(_) => env.new_string("").unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_storeMegaCloudTree<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    account_id: JString<'local>,
+    nodes_json: JString<'local>,
+    master_key: JByteArray<'local>,
+) -> jstring {
+    let acc_id: String = match env.get_string(&account_id) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("").unwrap().into_raw(),
+    };
+    let json_str: String = match env.get_string(&nodes_json) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("").unwrap().into_raw(),
+    };
+    let mk_vec = match env.convert_byte_array(&master_key) {
+        Ok(v) if v.len() >= 16 => v,
+        _ => return env.new_string("").unwrap().into_raw(),
+    };
+
+    let raw_nodes: Vec<mega_crypto::RawMegaNodeInput> = match serde_json::from_str(&json_str) {
+        Ok(n) => n,
+        Err(_) => return env.new_string("").unwrap().into_raw(),
+    };
+
+    let decrypted = mega_crypto::batch_decrypt_mega_nodes(&raw_nodes, &mk_vec);
+    let mut root_handle = String::new();
+    let cloud_nodes: Vec<cloud_tree::CloudNode> = decrypted.into_iter().map(|n| {
+        if n.node_type == 2 {
+            root_handle = n.handle.clone();
+        }
+        cloud_tree::CloudNode {
+            id: n.handle,
+            parent_id: n.parent_handle,
+            name: n.name,
+            is_dir: n.node_type == 1 || n.node_type == 2,
+            size: n.size,
+            last_modified: n.timestamp,
+            extra: format!("{}:{}:{}", n.node_type, n.key_str, n.file_attr_str),
+        }
+    }).collect();
+
+    let count = cloud_nodes.len();
+    cloud_tree::store_tree(&acc_id, cloud_nodes, &root_handle);
+
+    let summary = serde_json::json!({
+        "count": count,
+        "root_handle": root_handle
+    });
+    env.new_string(summary.to_string()).unwrap_or_else(|_| env.new_string("").unwrap()).into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_getCloudTreeChildren<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    account_id: JString<'local>,
+    parent_id: JString<'local>,
+    sort_option: jint,
+) -> jstring {
+    let acc_id: String = match env.get_string(&account_id) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("[]").unwrap().into_raw(),
+    };
+    let parent: String = match env.get_string(&parent_id) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("[]").unwrap().into_raw(),
+    };
+
+    let children = cloud_tree::get_children(&acc_id, &parent, sort_option as i32);
+    let json_str = serde_json::to_string(&children).unwrap_or_else(|_| "[]".to_string());
+    env.new_string(json_str).unwrap_or_else(|_| env.new_string("[]").unwrap()).into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_getCloudTreeChildCounts<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    account_id: JString<'local>,
+    parent_id: JString<'local>,
+) -> jlong {
+    let acc_id: String = match env.get_string(&account_id) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    let parent: String = match env.get_string(&parent_id) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+
+    let (_total, sub, files) = cloud_tree::get_child_counts(&acc_id, &parent);
+    ((sub as i64) << 32) | (files as i64 & 0xFFFFFFFF)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_searchCloudTreeNative<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    account_id: JString<'local>,
+    query: JString<'local>,
+    max_results: jint,
+) -> jstring {
+    let acc_id: String = match env.get_string(&account_id) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("[]").unwrap().into_raw(),
+    };
+    let q: String = match env.get_string(&query) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("[]").unwrap().into_raw(),
+    };
+
+    let matches = cloud_tree::search_tree(&acc_id, &q, max_results.max(1) as usize);
+    let json_str = serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string());
+    env.new_string(json_str).unwrap_or_else(|_| env.new_string("[]").unwrap()).into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_invalidateCloudTree<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    account_id: JString<'local>,
+) -> jboolean {
+    let acc_id: String = match env.get_string(&account_id) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    cloud_tree::invalidate_tree(&acc_id);
+    1
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_saveCloudTreeToFile<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    account_id: JString<'local>,
+    file_path: JString<'local>,
+) -> jboolean {
+    let acc_id: String = match env.get_string(&account_id) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    let path: String = match env.get_string(&file_path) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+
+    match cloud_tree::save_tree_to_file(&acc_id, &path) {
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_loadCloudTreeFromFile<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    account_id: JString<'local>,
+    file_path: JString<'local>,
+) -> jint {
+    let acc_id: String = match env.get_string(&account_id) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+    let path: String = match env.get_string(&file_path) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+
+    match cloud_tree::load_tree_from_file(&acc_id, &path) {
+        Ok(count) => count as jint,
+        Err(_) => -1,
     }
 }

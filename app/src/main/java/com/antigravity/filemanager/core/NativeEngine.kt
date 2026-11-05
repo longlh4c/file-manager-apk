@@ -663,6 +663,33 @@ object NativeEngine {
     @JvmStatic
     private external fun decryptMegaCtrSlice(data: ByteArray, aesKey: ByteArray, nonce: ByteArray, startOffset: Long): Boolean
 
+    @JvmStatic
+    private external fun saveFolderCacheNative(filePath: String, timestamp: Long, itemsJson: String): Boolean
+
+    @JvmStatic
+    private external fun loadFolderCacheNative(filePath: String): String
+
+    @JvmStatic
+    private external fun storeMegaCloudTree(accountId: String, nodesJson: String, masterKey: ByteArray): String
+
+    @JvmStatic
+    private external fun getCloudTreeChildren(accountId: String, parentId: String, sortOption: Int): String
+
+    @JvmStatic
+    private external fun getCloudTreeChildCounts(accountId: String, parentId: String): Long
+
+    @JvmStatic
+    private external fun searchCloudTreeNative(accountId: String, query: String, maxResults: Int): String
+
+    @JvmStatic
+    private external fun invalidateCloudTree(accountId: String): Boolean
+
+    @JvmStatic
+    private external fun saveCloudTreeToFile(accountId: String, filePath: String): Boolean
+
+    @JvmStatic
+    private external fun loadCloudTreeFromFile(accountId: String, filePath: String): Int
+
     fun calculateBlockMd5sFast(filePath: String, blockSize: Int = 4 * 1024 * 1024): List<String>? {
         if (!isLoaded) return null
         return try {
@@ -735,6 +762,147 @@ object NativeEngine {
         } catch (t: Throwable) {
             Log.w(TAG, "decryptMegaCtrSliceFast failed: ${t.message}")
             false
+        }
+    }
+
+    data class NativeCloudTreeNode(
+        val id: String,
+        val parentId: String,
+        val name: String,
+        val isDir: Boolean,
+        val size: Long,
+        val lastModified: Long,
+        val extra: String
+    )
+
+    fun saveFolderCacheFast(filePath: String, timestamp: Long, itemsJson: String): Boolean {
+        if (!isLoaded) return false
+        return try {
+            saveFolderCacheNative(filePath, timestamp, itemsJson)
+        } catch (t: Throwable) {
+            Log.w(TAG, "saveFolderCacheFast failed: ${t.message}")
+            false
+        }
+    }
+
+    fun loadFolderCacheFast(filePath: String): String? {
+        if (!isLoaded) return null
+        return try {
+            val res = loadFolderCacheNative(filePath)
+            if (res.isNotBlank()) res else null
+        } catch (t: Throwable) {
+            Log.w(TAG, "loadFolderCacheFast failed: ${t.message}")
+            null
+        }
+    }
+
+    fun storeMegaCloudTreeFast(accountId: String, nodesJson: String, masterKey: ByteArray): Pair<Int, String>? {
+        if (!isLoaded) return null
+        return try {
+            val raw = storeMegaCloudTree(accountId, nodesJson, masterKey)
+            if (raw.isBlank()) return null
+            val obj = org.json.JSONObject(raw)
+            Pair(obj.optInt("count", 0), obj.optString("root_handle", ""))
+        } catch (t: Throwable) {
+            Log.w(TAG, "storeMegaCloudTreeFast failed: ${t.message}")
+            null
+        }
+    }
+
+    fun getCloudTreeChildrenFast(accountId: String, parentId: String, sortOption: Int): List<NativeCloudTreeNode>? {
+        if (!isLoaded) return null
+        return try {
+            val raw = getCloudTreeChildren(accountId, parentId, sortOption)
+            val arr = org.json.JSONArray(raw)
+            val list = ArrayList<NativeCloudTreeNode>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    NativeCloudTreeNode(
+                        id = obj.optString("id"),
+                        parentId = obj.optString("parent_id"),
+                        name = obj.optString("name"),
+                        isDir = obj.optBoolean("is_dir"),
+                        size = obj.optLong("size"),
+                        lastModified = obj.optLong("last_modified"),
+                        extra = obj.optString("extra")
+                    )
+                )
+            }
+            list
+        } catch (t: Throwable) {
+            Log.w(TAG, "getCloudTreeChildrenFast failed: ${t.message}")
+            null
+        }
+    }
+
+    fun getCloudTreeChildCountsFast(accountId: String, parentId: String): Triple<Int, Int, Int>? {
+        if (!isLoaded) return null
+        return try {
+            val packed = getCloudTreeChildCounts(accountId, parentId)
+            val subfolders = (packed shr 32).toInt()
+            val files = (packed and 0xFFFFFFFFL).toInt()
+            Triple(subfolders + files, subfolders, files)
+        } catch (t: Throwable) {
+            Log.w(TAG, "getCloudTreeChildCountsFast failed: ${t.message}")
+            null
+        }
+    }
+
+    fun searchCloudTreeFast(accountId: String, query: String, maxResults: Int = 100): List<NativeCloudTreeNode>? {
+        if (!isLoaded) return null
+        return try {
+            val raw = searchCloudTreeNative(accountId, query, maxResults)
+            val arr = org.json.JSONArray(raw)
+            val list = ArrayList<NativeCloudTreeNode>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    NativeCloudTreeNode(
+                        id = obj.optString("id"),
+                        parentId = obj.optString("parent_id"),
+                        name = obj.optString("name"),
+                        isDir = obj.optBoolean("is_dir"),
+                        size = obj.optLong("size"),
+                        lastModified = obj.optLong("last_modified"),
+                        extra = obj.optString("extra")
+                    )
+                )
+            }
+            list
+        } catch (t: Throwable) {
+            Log.w(TAG, "searchCloudTreeFast failed: ${t.message}")
+            null
+        }
+    }
+
+    fun invalidateCloudTreeFast(accountId: String): Boolean {
+        if (!isLoaded) return false
+        return try {
+            invalidateCloudTree(accountId)
+        } catch (t: Throwable) {
+            Log.w(TAG, "invalidateCloudTreeFast failed: ${t.message}")
+            false
+        }
+    }
+
+    fun saveCloudTreeToFileFast(accountId: String, filePath: String): Boolean {
+        if (!isLoaded) return false
+        return try {
+            saveCloudTreeToFile(accountId, filePath)
+        } catch (t: Throwable) {
+            Log.w(TAG, "saveCloudTreeToFileFast failed: ${t.message}")
+            false
+        }
+    }
+
+    fun loadCloudTreeFromFileFast(accountId: String, filePath: String): Int {
+        if (!isLoaded) return -1
+        return try {
+            loadCloudTreeFromFile(accountId, filePath)
+        } catch (t: Throwable) {
+            Log.w(TAG, "loadCloudTreeFromFileFast failed: ${t.message}")
+            -1
         }
     }
 }
