@@ -56,8 +56,12 @@ class DualPaneDropViewModel @Inject constructor(
     private fun parse(location: String): Destination {
         if (!location.startsWith("cloud:")) return Destination(null, location)
         val rest = location.removePrefix("cloud:")
-        val split = rest.indexOf(":/")
-        return Destination(rest.substring(0, split), rest.substring(split + 1))
+        val split = rest.indexOf(':')
+        return if (split != -1) {
+            Destination(rest.substring(0, split), rest.substring(split + 1))
+        } else {
+            Destination(rest, "")
+        }
     }
 
     fun dropInto(location: String, dropped: GlobalClipboardState) {

@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.border
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.unit.sp
@@ -1138,42 +1139,67 @@ private fun DualPaneDragOverlay(
     val payload = state.payload
     if (payload != null) {
         val target = state.hoveredTarget
+        val isTrash = target?.kind == com.antigravity.filemanager.presentation.components.DropZoneKind.TRASH
+        val isMove = target?.let { com.antigravity.filemanager.presentation.components.isMoveByDefault(payload, it) } ?: false
+
+        val (actionTag, actionBg, actionFg) = when {
+            target == null -> Triple(null, Color(0xFF424242), Color.White)
+            isTrash -> Triple("TRASH", Color(0xFFEF5350), Color.White)
+            isMove -> Triple("MOVE", Color(0xFFFFA726), Color.Black)
+            else -> Triple("COPY", TealPrimary, Color.Black)
+        }
+
         if (target != null) {
             val topLeft = target.bounds.topLeft - rootOffset
             Box(
                 modifier = Modifier
                     .offset { androidx.compose.ui.unit.IntOffset(topLeft.x.toInt(), topLeft.y.toInt()) }
                     .size(with(density) { target.bounds.width.toDp() }, with(density) { target.bounds.height.toDp() })
-                    .border(2.dp, TealPrimary, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+                    .border(2.5.dp, actionBg, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
             )
         }
         val at = state.pointer - rootOffset
         val count = payload.paths.size
-        // Says what letting go will do, since a folder drop no longer asks.
-        val action = target?.let {
-            when {
-                it.kind == com.antigravity.filemanager.presentation.components.DropZoneKind.TRASH -> "Trash"
-                com.antigravity.filemanager.presentation.components.isMoveByDefault(payload, it) -> "Move"
-                else -> "Copy"
-            }
-        }
+
         // Beside the finger, flipped to its left when the right side has no room: over the right
         // pane the chip ran off the edge of the screen and its action was cut off.
         var chipWidth by remember { mutableStateOf(0) }
         val windowWidth = with(density) { androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp.toPx() }
         val chipX = if (at.x + 24 + chipWidth > windowWidth) at.x - 24 - chipWidth else at.x + 24
-        Text(
-            text = (if (count == 1) java.io.File(payload.paths.first()).name else "$count items") +
-                (target?.let { "  →  $action to ${it.name}" } ?: ""),
-            color = Color.Black,
-            fontSize = 13.sp,
-            maxLines = 1,
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
-                .offset { androidx.compose.ui.unit.IntOffset(chipX.toInt().coerceAtLeast(0), at.y.toInt() - 72) }
+                .offset { androidx.compose.ui.unit.IntOffset(chipX.toInt().coerceAtLeast(0), (at.y.toInt() - 76).coerceAtLeast(0)) }
                 .onGloballyPositioned { chipWidth = it.size.width }
-                .background(if (target != null) TealPrimary else Color(0xFFB0B0B0), androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
-                .padding(horizontal = 12.dp, vertical = 6.dp)
-        )
+                .shadow(8.dp, androidx.compose.foundation.shape.RoundedCornerShape(20.dp))
+                .background(Color(0xFF1E1E1E), androidx.compose.foundation.shape.RoundedCornerShape(20.dp))
+                .border(1.5.dp, if (target != null) actionBg else Color(0xFF555555), androidx.compose.foundation.shape.RoundedCornerShape(20.dp))
+                .padding(start = if (actionTag != null) 6.dp else 12.dp, end = 12.dp, top = 6.dp, bottom = 6.dp)
+        ) {
+            if (actionTag != null) {
+                androidx.compose.material3.Surface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                    color = actionBg,
+                    modifier = Modifier.padding(end = 8.dp)
+                ) {
+                    Text(
+                        text = actionTag,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                        fontSize = 11.sp,
+                        color = actionFg,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                }
+            }
+            Text(
+                text = (if (count == 1) java.io.File(payload.paths.first()).name else "$count items") +
+                    (target?.let { " → ${it.name}" } ?: ""),
+                color = Color.White,
+                fontSize = 13.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                maxLines = 1
+            )
+        }
     }
 
     state.pendingDrop?.let { drop ->
