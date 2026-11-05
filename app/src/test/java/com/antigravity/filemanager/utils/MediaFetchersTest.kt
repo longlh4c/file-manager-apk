@@ -1,5 +1,7 @@
 package com.antigravity.filemanager.utils
 
+import coil.size.Dimension
+import coil.size.Size
 import com.antigravity.filemanager.core.NativeAudioMetadata
 import com.antigravity.filemanager.core.NativeImageMetadata
 import com.antigravity.filemanager.core.NativeVideoMetadata
@@ -24,6 +26,30 @@ class MediaFetchersTest {
         assertFalse("png" in fastImageExtensions)
         assertFalse("mp4" in fastImageExtensions)
         assertFalse("mp3" in fastImageExtensions)
+    }
+
+    @Test
+    fun testFastImageThumbnailFetcherRequestDiscrimination() {
+        // Thumbnail requests (e.g. 240x240, 480x480) should be accepted
+        val smallThumbnailSize = Size(Dimension.Pixels(240), Dimension.Pixels(240))
+        assertTrue(FastImageThumbnailFetcher.isThumbnailRequest(smallThumbnailSize, isFullViewer = false))
+
+        val maxAllowedThumbnailSize = Size(Dimension.Pixels(512), Dimension.Pixels(512))
+        assertTrue(FastImageThumbnailFetcher.isThumbnailRequest(maxAllowedThumbnailSize, isFullViewer = false))
+
+        // Full viewer request (isFullViewer = true) must be rejected so full decoder is used
+        assertFalse(FastImageThumbnailFetcher.isThumbnailRequest(smallThumbnailSize, isFullViewer = true))
+
+        // Size.ORIGINAL must be rejected so full decoder is used
+        assertFalse(FastImageThumbnailFetcher.isThumbnailRequest(Size.ORIGINAL, isFullViewer = false))
+
+        // Full-screen screen dimensions (e.g. 1080x2400) must be rejected
+        val fullScreenSize = Size(Dimension.Pixels(1080), Dimension.Pixels(2400))
+        assertFalse(FastImageThumbnailFetcher.isThumbnailRequest(fullScreenSize, isFullViewer = false))
+
+        // Unbounded / undefined dimensions must be rejected
+        val undefinedSize = Size(Dimension.Undefined, Dimension.Undefined)
+        assertFalse(FastImageThumbnailFetcher.isThumbnailRequest(undefinedSize, isFullViewer = false))
     }
 
     @Test

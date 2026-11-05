@@ -47,6 +47,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FileSortOption
 import com.antigravity.filemanager.presentation.theme.*
@@ -545,6 +546,17 @@ private fun ZoomableImagePage(
         is ResolvedImageMedia.LocalFile -> media.file.absolutePath
         is ResolvedImageMedia.StreamUri -> media.url
     }
+    val context = LocalContext.current
+    val imageRequest = remember(imageModel) {
+        ImageRequest.Builder(context)
+            .data(imageModel)
+            .size(coil.size.Size.ORIGINAL)
+            .setParameter("is_full_viewer", true, memoryCacheKey = "full_viewer")
+            .memoryCacheKey("${imageModel}_full")
+            .diskCacheKey("${imageModel}_full")
+            .crossfade(true)
+            .build()
+    }
 
     Box(
         modifier = Modifier
@@ -591,7 +603,7 @@ private fun ZoomableImagePage(
         contentAlignment = Alignment.Center
     ) {
         AsyncImage(
-            model = imageModel,
+            model = imageRequest,
             contentDescription = displayName,
             contentScale = ContentScale.Fit,
             onState = { state ->
