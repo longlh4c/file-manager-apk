@@ -449,6 +449,28 @@ class MegaApiClient @Inject constructor(
             // Master key for decrypting file/folder names
             val masterKeyBytes = masterKey(account)
 
+            // Rust fast-path: batch decrypt nodes in parallel with Rayon
+            if (masterKeyBytes != null && com.antigravity.filemanager.core.NativeEngine.isAvailable) {
+                val fastNodes = com.antigravity.filemanager.core.NativeEngine.batchDecryptMegaNodesFast(nodes.toString(), masterKeyBytes)
+                if (fastNodes != null && fastNodes.isNotEmpty()) {
+                    var root = ""
+                    val list = fastNodes.map { fn ->
+                        if (fn.type == 2) root = fn.handle
+                        MegaNode(
+                            handle = fn.handle,
+                            parentHandle = fn.parentHandle,
+                            type = fn.type,
+                            size = fn.size,
+                            timestamp = fn.timestamp,
+                            name = fn.name,
+                            keyStr = fn.keyStr,
+                            fileAttrStr = fn.fileAttrStr
+                        )
+                    }
+                    return Result.success(list to root)
+                }
+            }
+
             for (i in 0 until nodes.length()) {
                 val nodeObj = nodes.getJSONObject(i)
                 val handle = nodeObj.optString("h")
@@ -1612,12 +1634,13 @@ class MegaApiClient @Inject constructor(
         job: kotlinx.coroutines.Job?,
         onProgress: ((Long) -> Unit)?
     ): Pair<ByteArray, ByteArray> {
-        var macResult: ByteArray? = null
+        val precalculatedMac = com.antigravity.filemanager.core.NativeEngine.computeMegaChunkedMacFast(file.absolutePath, aesKey, nonce)
+        var macResult: ByteArray? = precalculatedMac
         val requestBody = object : RequestBody() {
             override fun contentType() = "application/octet-stream".toMediaTypeOrNull()
             override fun contentLength() = file.length()
             override fun writeTo(sink: BufferedSink) {
-                val mac = MegaChunkedMac(aesKey, nonce)
+                val mac = if (precalculatedMac == null) MegaChunkedMac(aesKey, nonce) else null
                 val iv = ByteArray(16).also { nonce.copyInto(it, 0) }
                 val cipher = Cipher.getInstance("AES/CTR/NoPadding").apply {
                     init(Cipher.ENCRYPT_MODE, SecretKeySpec(aesKey, "AES"), IvParameterSpec(iv))
@@ -1632,14 +1655,16 @@ class MegaApiClient @Inject constructor(
                         val read = readFully(input, buffer)
                         if (read <= 0) break
                         val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
-                        mac.update(chunk)
+                        mac?.update(chunk)
                         sink.write(cipher.update(chunk, 0, read))
                         written += read
                         onProgress?.invoke(written)
                     }
                 }
                 cipher.doFinal().takeIf { it.isNotEmpty() }?.let { sink.write(it) }
-                macResult = mac.condense()
+                if (precalculatedMac == null) {
+                    macResult = mac?.condense()
+                }
             }
         }
         val request = Request.Builder().url("$baseUrl/0").post(requestBody).build()
@@ -2138,6 +2163,13 @@ class MegaDecryptingDataSource(
             return null
         }
         val cipherBytes = response.body?.bytes() ?: return null
+
+        if (com.antigravity.filemanager.core.NativeEngine.isAvailable) {
+            val decrypted = cipherBytes.clone()
+            if (com.antigravity.filemanager.core.NativeEngine.decryptMegaCtrSliceFast(decrypted, aesKey, nonce, alignedStart)) {
+                return decrypted
+            }
+        }
 
         val counterBlock = alignedStart / 16
         val iv = ByteArray(16)

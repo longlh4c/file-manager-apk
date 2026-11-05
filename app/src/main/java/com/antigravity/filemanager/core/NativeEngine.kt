@@ -52,6 +52,17 @@ data class ApkInfo(
     val versionCode: Long?
 )
 
+data class NativeMegaNode(
+    val handle: String,
+    val parentHandle: String,
+    val type: Int,
+    val size: Long,
+    val timestamp: Long,
+    val name: String,
+    val keyStr: String,
+    val fileAttrStr: String
+)
+
 data class NativeFolderBreakdownItem(
     val name: String,
     val path: String,
@@ -634,6 +645,96 @@ object NativeEngine {
         } catch (t: Throwable) {
             Log.w(TAG, "Native scanFolderBreakdownFast failed: ${t.message}")
             null
+        }
+    }
+
+    @JvmStatic
+    private external fun calculateBlockMd5s(path: String, blockSize: Int): String
+
+    @JvmStatic
+    private external fun calculateDropboxContentHash(path: String): String
+
+    @JvmStatic
+    private external fun computeMegaChunkedMac(path: String, aesKey: ByteArray, nonce: ByteArray): ByteArray?
+
+    @JvmStatic
+    private external fun batchDecryptMegaNodes(nodesJson: String, masterKey: ByteArray): String
+
+    @JvmStatic
+    private external fun decryptMegaCtrSlice(data: ByteArray, aesKey: ByteArray, nonce: ByteArray, startOffset: Long): Boolean
+
+    fun calculateBlockMd5sFast(filePath: String, blockSize: Int = 4 * 1024 * 1024): List<String>? {
+        if (!isLoaded) return null
+        return try {
+            val raw = calculateBlockMd5s(filePath, blockSize)
+            val arr = org.json.JSONArray(raw)
+            val list = ArrayList<String>(arr.length())
+            for (i in 0 until arr.length()) {
+                list.add(arr.getString(i))
+            }
+            list
+        } catch (t: Throwable) {
+            Log.w(TAG, "calculateBlockMd5sFast failed: ${t.message}")
+            null
+        }
+    }
+
+    fun calculateDropboxContentHashFast(filePath: String): String? {
+        if (!isLoaded) return null
+        return try {
+            val hash = calculateDropboxContentHash(filePath)
+            if (hash.isBlank()) null else hash
+        } catch (t: Throwable) {
+            Log.w(TAG, "calculateDropboxContentHashFast failed: ${t.message}")
+            null
+        }
+    }
+
+    fun computeMegaChunkedMacFast(filePath: String, aesKey: ByteArray, nonce: ByteArray): ByteArray? {
+        if (!isLoaded) return null
+        return try {
+            computeMegaChunkedMac(filePath, aesKey, nonce)
+        } catch (t: Throwable) {
+            Log.w(TAG, "computeMegaChunkedMacFast failed: ${t.message}")
+            null
+        }
+    }
+
+    fun batchDecryptMegaNodesFast(nodesJson: String, masterKey: ByteArray): List<NativeMegaNode>? {
+        if (!isLoaded) return null
+        return try {
+            val raw = batchDecryptMegaNodes(nodesJson, masterKey)
+            val arr = org.json.JSONArray(raw)
+            val list = ArrayList<NativeMegaNode>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    NativeMegaNode(
+                        handle = obj.optString("handle"),
+                        parentHandle = obj.optString("parent_handle"),
+                        type = obj.optInt("node_type"),
+                        size = obj.optLong("size"),
+                        timestamp = obj.optLong("timestamp"),
+                        name = obj.optString("name"),
+                        keyStr = obj.optString("key_str"),
+                        fileAttrStr = obj.optString("file_attr_str")
+                    )
+                )
+            }
+            list
+        } catch (t: Throwable) {
+            Log.w(TAG, "batchDecryptMegaNodesFast failed: ${t.message}")
+            null
+        }
+    }
+
+    fun decryptMegaCtrSliceFast(data: ByteArray, aesKey: ByteArray, nonce: ByteArray, startOffset: Long): Boolean {
+        if (!isLoaded) return false
+        return try {
+            decryptMegaCtrSlice(data, aesKey, nonce, startOffset)
+        } catch (t: Throwable) {
+            Log.w(TAG, "decryptMegaCtrSliceFast failed: ${t.message}")
+            false
         }
     }
 }

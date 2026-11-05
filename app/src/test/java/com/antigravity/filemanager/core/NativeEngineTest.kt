@@ -31,6 +31,11 @@ class NativeEngineTest {
             assertNull(NativeEngine.getVideoPoster("/dummy.mp4"))
             assertNull(NativeEngine.getAudioCover("/dummy.mp3"))
             assertNull(NativeEngine.scanFolderBreakdownFast("/dummy"))
+            assertNull(NativeEngine.calculateBlockMd5sFast("/dummy"))
+            assertNull(NativeEngine.calculateDropboxContentHashFast("/dummy"))
+            assertNull(NativeEngine.computeMegaChunkedMacFast("/dummy", ByteArray(16), ByteArray(8)))
+            assertNull(NativeEngine.batchDecryptMegaNodesFast("[]", ByteArray(16)))
+            org.junit.Assert.assertFalse(NativeEngine.decryptMegaCtrSliceFast(ByteArray(16), ByteArray(16), ByteArray(8), 0L))
 
             try {
                 NativeEngine.resizeImage("/src", "/dst", 100, 100, 85, "jpg", 1)

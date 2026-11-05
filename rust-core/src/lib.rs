@@ -9,9 +9,10 @@ pub mod doc_scanner;
 pub mod audio_meta;
 pub mod image_meta;
 pub mod video_meta;
+pub mod mega_crypto;
 
 use jni::JNIEnv;
-use jni::objects::{JClass, JString};
+use jni::objects::{JClass, JString, JByteArray};
 use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring};
 
 #[no_mangle]
@@ -609,4 +610,142 @@ pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_scanFo
     let json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
     let out = env.new_string(json).unwrap_or_else(|_| env.new_string("[]").unwrap());
     out.into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_calculateBlockMd5s<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+    block_size: jint,
+) -> jstring {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("[]").unwrap().into_raw(),
+    };
+    let bsize = if block_size > 0 { block_size as usize } else { 4 * 1024 * 1024 };
+    match hasher::compute_block_md5s(&path_str, bsize) {
+        Ok(list) => {
+            let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
+            env.new_string(json).unwrap_or_else(|_| env.new_string("[]").unwrap()).into_raw()
+        }
+        Err(_) => env.new_string("[]").unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_calculateDropboxContentHash<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+) -> jstring {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("").unwrap().into_raw(),
+    };
+    match hasher::compute_dropbox_content_hash(&path_str) {
+        Ok(hash) => env.new_string(hash).unwrap_or_else(|_| env.new_string("").unwrap()).into_raw(),
+        Err(_) => env.new_string("").unwrap().into_raw(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_computeMegaChunkedMac<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    path: JString<'local>,
+    aes_key: JByteArray<'local>,
+    nonce: JByteArray<'local>,
+) -> jbyteArray {
+    let path_str: String = match env.get_string(&path) {
+        Ok(s) => s.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let key_vec = match env.convert_byte_array(&aes_key) {
+        Ok(v) if v.len() >= 16 => v,
+        _ => return std::ptr::null_mut(),
+    };
+    let nonce_vec = match env.convert_byte_array(&nonce) {
+        Ok(v) if v.len() >= 8 => v,
+        _ => return std::ptr::null_mut(),
+    };
+
+    let mut file = match std::fs::File::open(&path_str) {
+        Ok(f) => f,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    let mut mac = mega_crypto::MegaChunkedMac::new(&key_vec, &nonce_vec);
+    let mut buffer = [0u8; 64 * 1024];
+    use std::io::Read;
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => mac.update(&buffer[..n]),
+            Err(_) => return std::ptr::null_mut(),
+        }
+    }
+    let out = mac.condense();
+    match env.byte_array_from_slice(&out) {
+        Ok(arr) => arr.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_batchDecryptMegaNodes<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    nodes_json: JString<'local>,
+    master_key: JByteArray<'local>,
+) -> jstring {
+    let json_str: String = match env.get_string(&nodes_json) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("[]").unwrap().into_raw(),
+    };
+    let mk_vec = match env.convert_byte_array(&master_key) {
+        Ok(v) if v.len() >= 16 => v,
+        _ => return env.new_string("[]").unwrap().into_raw(),
+    };
+
+    let nodes: Vec<mega_crypto::RawMegaNodeInput> = match serde_json::from_str(&json_str) {
+        Ok(n) => n,
+        Err(_) => return env.new_string("[]").unwrap().into_raw(),
+    };
+
+    let decrypted = mega_crypto::batch_decrypt_mega_nodes(&nodes, &mk_vec);
+    let out_json = serde_json::to_string(&decrypted).unwrap_or_else(|_| "[]".to_string());
+    env.new_string(out_json).unwrap_or_else(|_| env.new_string("[]").unwrap()).into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_decryptMegaCtrSlice<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    data: JByteArray<'local>,
+    aes_key: JByteArray<'local>,
+    nonce: JByteArray<'local>,
+    start_offset: jlong,
+) -> jboolean {
+    let key_vec = match env.convert_byte_array(&aes_key) {
+        Ok(v) if v.len() >= 16 => v,
+        _ => return 0,
+    };
+    let nonce_vec = match env.convert_byte_array(&nonce) {
+        Ok(v) if v.len() >= 8 => v,
+        _ => return 0,
+    };
+
+    let mut data_vec = match env.convert_byte_array(&data) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+
+    mega_crypto::mega_ctr_decrypt_slice(&mut data_vec, &key_vec, &nonce_vec, start_offset as u64);
+    let i8_slice: Vec<i8> = data_vec.into_iter().map(|b| b as i8).collect();
+    if env.set_byte_array_region(&data, 0, &i8_slice).is_ok() {
+        1
+    } else {
+        0
+    }
 }

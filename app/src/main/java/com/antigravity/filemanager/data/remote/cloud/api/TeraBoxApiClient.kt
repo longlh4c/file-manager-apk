@@ -1056,6 +1056,11 @@ class TeraBoxApiClient @Inject constructor(
     }
 
     private fun calculateBlockMd5s(file: File): List<String> {
+        val fastMd5s = com.antigravity.filemanager.core.NativeEngine.calculateBlockMd5sFast(file.absolutePath, UPLOAD_BLOCK_SIZE)
+        if (fastMd5s != null && fastMd5s.isNotEmpty()) {
+            return fastMd5s
+        }
+
         val result = mutableListOf<String>()
         file.inputStream().use { input ->
             val buffer = ByteArray(64 * 1024)
