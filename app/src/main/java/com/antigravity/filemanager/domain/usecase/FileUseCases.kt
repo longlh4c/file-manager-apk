@@ -510,7 +510,10 @@ class CloudStorageUseCase @Inject constructor(
         // Tracks whether every file under a given top-level source transferred
         // successfully, so a move only deletes that source once nothing was lost.
         // Concurrent: the parallel transfers below write to it.
-        val topLevelSucceeded = java.util.concurrent.ConcurrentHashMap(sources.associateWith { true })
+        // Initialized to FALSE so any failure, cancellation, or partial transfer never deletes the source!
+        val topLevelSucceeded = java.util.concurrent.ConcurrentHashMap(sources.associateWith { false })
+        val filesPerTopSource = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+        val succeededPerTopSource = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
 
         // Same-shape "(1)" suffixing as FileUseCases.uniqueCloudName, used below to
         // give a top-level "Keep Both" folder its own new name at the destination
@@ -565,6 +568,7 @@ class CloudStorageUseCase @Inject constructor(
                 }
             } else {
                 flat.add(FlatEntry(remotePath, targetDir, topSource))
+                filesPerTopSource.getOrPut(topSource) { java.util.concurrent.atomic.AtomicInteger(0) }.incrementAndGet()
             }
         }
         // Names already present at the destination, used to give each top-level
@@ -584,6 +588,12 @@ class CloudStorageUseCase @Inject constructor(
             flatten(remotePath, isDirectoryByPath[remotePath] == true, targetPath, remotePath, effectiveName)
         }
 
+        // Mark empty folders as succeeded if they have no files to transfer
+        sources.forEach { s ->
+            if (isDirectoryByPath[s] == true && (filesPerTopSource[s]?.get() ?: 0) == 0 && topLevelSucceeded[s] != false) {
+                topLevelSucceeded[s] = true
+            }
+        }
         val totalCount = flat.size
         transferredCount = totalCount
         val downloadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
@@ -646,6 +656,12 @@ class CloudStorageUseCase @Inject constructor(
                                 failuresCounter.incrementAndGet()
                                 lastErrorRef.set(upResult.exceptionOrNull()?.message)
                                 topLevelSucceeded[entry.topSource] = false
+                            } else {
+                                val done = succeededPerTopSource.getOrPut(entry.topSource) { java.util.concurrent.atomic.AtomicInteger(0) }.incrementAndGet()
+                                val expected = filesPerTopSource[entry.topSource]?.get() ?: 0
+                                if (done >= expected && topLevelSucceeded[entry.topSource] != false) {
+                                    topLevelSucceeded[entry.topSource] = true
+                                }
                             }
                         } else {
                             entryDir.deleteRecursively()

@@ -176,6 +176,7 @@ class DualPaneDropViewModel @Inject constructor(
         val paths = items.paths
         val isMove = items.isCut
         val verb = if (isMove) "Moved" else "Copied"
+        val movedSources = mutableListOf<String>()
         try {
             val summary: String = if (targetAccount == null && source == null) {
                 // Local -> local
@@ -241,7 +242,7 @@ class DualPaneDropViewModel @Inject constructor(
                     val name = File(path).name
                     if (name in skip || path in overwritten) continue
                     _uiState.update { it.copy(progress = CloudTransferProgress.forItemCount(name, index + 1, paths.size, isUpload = true, operationLabel = "Moving")) }
-                    if (cloudUseCase.moveWithinAccount(account, path, dest.path).isSuccess) moved += path else failures++
+                    if (cloudUseCase.moveWithinAccount(account, path, dest.path).isSuccess) { moved += path; movedSources += path } else failures++
                 }
                 notifyCloudRemoved(account, moved)
                 folderCacheManager.invalidateCloud(account, dest.path)
@@ -257,7 +258,12 @@ class DualPaneDropViewModel @Inject constructor(
             }
             _uiState.update { it.copy(progress = null, message = summary) }
         } catch (e: CancellationException) {
-            _uiState.update { it.copy(progress = null, message = "Transfer cancelled") }
+            if (targetAccount != null && movedSources.isNotEmpty()) {
+                notifyCloudRemoved(targetAccount, movedSources)
+                folderCacheManager.invalidateCloud(targetAccount, dest.path)
+            }
+            val cancelMsg = if (movedSources.isNotEmpty()) "Transfer cancelled (${movedSources.size} item(s) moved before cancellation)" else "Transfer cancelled"
+            _uiState.update { it.copy(progress = null, message = cancelMsg) }
             throw e
         } catch (e: Exception) {
             _uiState.update { it.copy(progress = null, message = "Couldn't finish: ${e.message}") }

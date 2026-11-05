@@ -77,7 +77,11 @@ fun cloudLocation(accountId: String, path: String): String = "cloud:$accountId:$
 /** The drive a drag-and-drop location is on: one cloud account, or one local storage volume
  * (main storage, a USB drive, an SD card). */
 private fun driveOf(location: String): String {
-    if (location.startsWith("cloud:")) return location.substringBefore(":/")
+    if (location.startsWith("cloud:")) {
+        val rest = location.removePrefix("cloud:")
+        val accountId = rest.substringBefore(':')
+        return "cloud:$accountId"
+    }
     val path = location.replace("/sdcard", "/storage/emulated/0").trimEnd('/')
     val parts = path.split('/').filter { it.isNotEmpty() }
     return when {

@@ -137,4 +137,20 @@ class DualPaneDragStateTest {
         assertFalse(finished)
     }
 
+
+    @Test
+    fun cloudRootLocationCorrectlyMatchesSubfoldersOnSameAccount() {
+        val s = DualPaneDragState().apply {
+            register(zone(ActivePanel.RIGHT, cloudLocation("dropbox1", "/Photos"), Rect(500f, 0f, 1000f, 500f)))
+        }
+        val payloadRoot = DualPaneDragPayload(
+            ActivePanel.LEFT,
+            GlobalClipboardState(paths = listOf("/doc.pdf"), sourceCloudAccountId = "dropbox1"),
+            cloudLocation("dropbox1", "")
+        ) {}
+        s.start(payloadRoot, Offset(10f, 10f))
+        s.move(Offset(700f, 200f))
+        val target = s.hoveredTarget!!
+        assertTrue(isMoveByDefault(payloadRoot, target))
+    }
 }
