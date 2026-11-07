@@ -49,6 +49,48 @@ impl CloudTreeIndex {
         }
     }
 
+    pub fn remove_node(&mut self, id: &str) -> bool {
+        if let Some(idx) = self.id_to_index.remove(id) {
+            let parent_id = self.nodes[idx].parent_id.clone();
+            if let Some(children) = self.parent_to_children.get_mut(&parent_id) {
+                children.retain(|&c_idx| c_idx != idx);
+            }
+            self.parent_to_children.remove(id);
+            self.nodes[idx].id.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn add_or_update_node(&mut self, node: CloudNode) {
+        if let Some(&idx) = self.id_to_index.get(&node.id) {
+            let old_parent = self.nodes[idx].parent_id.clone();
+            if old_parent != node.parent_id {
+                if let Some(children) = self.parent_to_children.get_mut(&old_parent) {
+                    children.retain(|&c_idx| c_idx != idx);
+                }
+                if !node.parent_id.is_empty() {
+                    self.parent_to_children
+                        .entry(node.parent_id.clone())
+                        .or_default()
+                        .push(idx);
+                }
+            }
+            self.nodes[idx] = node;
+        } else {
+            let new_idx = self.nodes.len();
+            self.id_to_index.insert(node.id.clone(), new_idx);
+            if !node.parent_id.is_empty() {
+                self.parent_to_children
+                    .entry(node.parent_id.clone())
+                    .or_default()
+                    .push(new_idx);
+            }
+            self.nodes.push(node);
+        }
+    }
+
     pub fn get_children(&self, parent_id: &str, sort_option: i32) -> Vec<CloudNode> {
         let child_indices = match self.parent_to_children.get(parent_id) {
             Some(indices) => indices,
@@ -57,7 +99,10 @@ impl CloudTreeIndex {
 
         let mut result: Vec<CloudNode> = child_indices
             .iter()
-            .filter_map(|&idx| self.nodes.get(idx).cloned())
+            .filter_map(|&idx| {
+                let n = self.nodes.get(idx)?;
+                if n.id.is_empty() { None } else { Some(n.clone()) }
+            })
             .collect();
 
         // Sort items: directories first, then by selected option
@@ -84,6 +129,9 @@ impl CloudTreeIndex {
             let mut files = 0i32;
             for &idx in indices {
                 if let Some(node) = self.nodes.get(idx) {
+                    if node.id.is_empty() {
+                        continue;
+                    }
                     if node.is_dir {
                         subfolders += 1;
                     } else {
@@ -101,7 +149,7 @@ impl CloudTreeIndex {
         let q = query.to_lowercase();
         self.nodes
             .par_iter()
-            .filter(|n| n.name.to_lowercase().contains(&q))
+            .filter(|n| !n.id.is_empty() && n.name.to_lowercase().contains(&q))
             .take_any(max_results)
             .cloned()
             .collect()
@@ -200,6 +248,27 @@ pub fn invalidate_tree(account_id: &str) {
     with_trees_write(|map| {
         map.remove(account_id);
     });
+}
+
+pub fn remove_node_from_tree(account_id: &str, node_id: &str) -> bool {
+    with_trees_write(|map| {
+        if let Some(tree) = map.get_mut(account_id) {
+            tree.remove_node(node_id)
+        } else {
+            false
+        }
+    })
+}
+
+pub fn add_or_update_node_in_tree(account_id: &str, node: CloudNode) -> bool {
+    with_trees_write(|map| {
+        if let Some(tree) = map.get_mut(account_id) {
+            tree.add_or_update_node(node);
+            true
+        } else {
+            false
+        }
+    })
 }
 
 #[cfg(test)]

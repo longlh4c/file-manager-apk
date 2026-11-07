@@ -202,7 +202,8 @@ class MegaApiClient @Inject constructor(
 
     private fun patchNodeCacheAfterFolderCreate(accountId: String, handle: String, parentHandle: String, name: String, encodedKey: String) {
 
-        val cached = nodeTreeCache[accountId] ?: return
+        val cached = nodeTreeCache[accountId]
+        val now = System.currentTimeMillis()
 
         val newNode = MegaNode(
 
@@ -214,7 +215,7 @@ class MegaApiClient @Inject constructor(
 
             size = 0L,
 
-            timestamp = System.currentTimeMillis(), // fetched nodes carry milliseconds too
+            timestamp = now,
 
             name = name,
 
@@ -222,10 +223,34 @@ class MegaApiClient @Inject constructor(
 
         )
 
-        val updated = cached.allNodes.filterNot { it.handle == handle } + newNode
+        if (cached != null) {
+            val updated = cached.allNodes.filterNot { it.handle == handle } + newNode
+            nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, cached.timestamp)
+        }
+        if (com.antigravity.filemanager.core.NativeEngine.isAvailable) {
+            com.antigravity.filemanager.core.NativeEngine.addOrUpdateCloudTreeNode(
+                accountId = accountId,
+                id = handle,
+                parentId = parentHandle,
+                name = name,
+                isDir = true,
+                size = 0L,
+                lastModified = now,
+                extra = "1:$encodedKey:"
+            )
+        }
 
-        nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, cached.timestamp)
+    }
 
+    fun patchNodeCacheAfterDelete(accountId: String, nodeHandle: String) {
+        val cached = nodeTreeCache[accountId]
+        if (cached != null) {
+            val updated = cached.allNodes.filterNot { it.handle == nodeHandle }
+            nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, cached.timestamp)
+        }
+        if (com.antigravity.filemanager.core.NativeEngine.isAvailable) {
+            com.antigravity.filemanager.core.NativeEngine.removeCloudTreeNode(accountId, nodeHandle)
+        }
     }
 
 
@@ -264,7 +289,7 @@ class MegaApiClient @Inject constructor(
 
     ) {
 
-        val cached = nodeTreeCache[accountId] ?: return
+        val cached = nodeTreeCache[accountId]
 
         val newNode = MegaNode(
 
@@ -276,7 +301,7 @@ class MegaApiClient @Inject constructor(
 
             size = size,
 
-            timestamp = timestamp, // fetched nodes carry milliseconds too
+            timestamp = timestamp,
 
             name = name,
 
@@ -286,9 +311,22 @@ class MegaApiClient @Inject constructor(
 
         )
 
-        val updated = cached.allNodes.filterNot { it.handle == handle } + newNode
-
-        nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, cached.timestamp)
+        if (cached != null) {
+            val updated = cached.allNodes.filterNot { it.handle == handle } + newNode
+            nodeTreeCache[accountId] = NodeTreeCache(updated, cached.rootHandle, cached.timestamp)
+        }
+        if (com.antigravity.filemanager.core.NativeEngine.isAvailable) {
+            com.antigravity.filemanager.core.NativeEngine.addOrUpdateCloudTreeNode(
+                accountId = accountId,
+                id = handle,
+                parentId = parentHandle,
+                name = name,
+                isDir = false,
+                size = size,
+                lastModified = timestamp,
+                extra = "0:$encodedKey:$fileAttrStr"
+            )
+        }
 
     }
 
@@ -1002,21 +1040,19 @@ class MegaApiClient @Inject constructor(
 
 
 
-            // Rust fast-path: batch decrypt nodes in parallel with Rayon and index into CloudTree
+            // Rust fast-path: single-pass batch decrypt nodes in parallel with Rayon and index into CloudTree
 
             if (masterKeyBytes != null && com.antigravity.filemanager.core.NativeEngine.isAvailable) {
 
-                val treeInfo = com.antigravity.filemanager.core.NativeEngine.storeMegaCloudTreeFast(account.id, nodes.toString(), masterKeyBytes)
+                val nodesStr = nodes.toString()
 
-                val fastNodes = com.antigravity.filemanager.core.NativeEngine.batchDecryptMegaNodesFast(nodes.toString(), masterKeyBytes)
+                val combined = com.antigravity.filemanager.core.NativeEngine.storeAndDecryptMegaTreeFast(account.id, nodesStr, masterKeyBytes)
 
-                if (fastNodes != null && fastNodes.isNotEmpty()) {
+                if (combined != null && combined.second.isNotEmpty()) {
 
-                    var root = treeInfo?.second ?: ""
+                    val root = combined.first
 
-                    val list = fastNodes.map { fn ->
-
-                        if (fn.type == 2) root = fn.handle
+                    val list = combined.second.map { fn ->
 
                         MegaNode(
 
@@ -2180,7 +2216,7 @@ class MegaApiClient @Inject constructor(
 
             }
 
-            invalidateNodeTreeCache(account.id)
+            patchNodeCacheAfterDelete(account.id, nodeHandle)
 
             Result.success(Unit)
 
@@ -2240,7 +2276,7 @@ class MegaApiClient @Inject constructor(
 
             }
 
-            invalidateNodeTreeCache(account.id)
+            patchNodeCacheAfterDelete(account.id, nodeHandle)
 
             Result.success(Unit)
 
@@ -2438,7 +2474,7 @@ class MegaApiClient @Inject constructor(
 
             }
 
-            invalidateNodeTreeCache(account.id)
+            patchNodeCacheAfterDelete(account.id, nodeHandle)
 
             Result.success(Unit)
 
@@ -3535,6 +3571,16 @@ class MegaApiClient @Inject constructor(
         val imageExtensions = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
 
         if (file.extension.lowercase(Locale.getDefault()) !in imageExtensions) return null
+
+        // Fast native EXIF thumbnail extraction
+        if (com.antigravity.filemanager.core.NativeEngine.isAvailable) {
+            val embedded = com.antigravity.filemanager.core.NativeEngine.getEmbeddedThumbnail(file.absolutePath)
+            if (embedded != null && embedded.isNotEmpty()) {
+                val scaled = com.antigravity.filemanager.core.NativeEngine.downscaleThumbnailBytesFast(embedded, 120, 120, 80)
+                if (scaled != null && scaled.isNotEmpty()) return scaled
+                return embedded
+            }
+        }
 
 
 

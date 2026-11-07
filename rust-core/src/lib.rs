@@ -801,6 +801,134 @@ pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_loadFo
 }
 
 #[no_mangle]
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_storeAndDecryptMegaCloudTree<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    account_id: JString<'local>,
+    nodes_json: JString<'local>,
+    master_key: JByteArray<'local>,
+) -> jstring {
+    let acc_id: String = match env.get_string(&account_id) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("").unwrap().into_raw(),
+    };
+    let json_str: String = match env.get_string(&nodes_json) {
+        Ok(s) => s.into(),
+        Err(_) => return env.new_string("").unwrap().into_raw(),
+    };
+    let mk_vec = match env.convert_byte_array(&master_key) {
+        Ok(v) if v.len() >= 16 => v,
+        _ => return env.new_string("").unwrap().into_raw(),
+    };
+
+    let raw_nodes: Vec<mega_crypto::RawMegaNodeInput> = match serde_json::from_str(&json_str) {
+        Ok(n) => n,
+        Err(_) => return env.new_string("").unwrap().into_raw(),
+    };
+
+    let decrypted = mega_crypto::batch_decrypt_mega_nodes(&raw_nodes, &mk_vec);
+    let mut root_handle = String::new();
+    let cloud_nodes: Vec<cloud_tree::CloudNode> = decrypted.iter().map(|n| {
+        if n.node_type == 2 {
+            root_handle = n.handle.clone();
+        }
+        cloud_tree::CloudNode {
+            id: n.handle.clone(),
+            parent_id: n.parent_handle.clone(),
+            name: n.name.clone(),
+            is_dir: n.node_type == 1 || n.node_type == 2,
+            size: n.size,
+            last_modified: n.timestamp,
+            extra: format!("{}:{}:{}", n.node_type, n.key_str, n.file_attr_str),
+        }
+    }).collect();
+
+    cloud_tree::store_tree(&acc_id, cloud_nodes, &root_handle);
+
+    let result = serde_json::json!({
+        "root_handle": root_handle,
+        "nodes": decrypted
+    });
+
+    let out_json = result.to_string();
+    env.new_string(out_json).unwrap_or_else(|_| env.new_string("").unwrap()).into_raw()
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_removeCloudTreeNodeFast<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    account_id: JString<'local>,
+    node_id: JString<'local>,
+) -> jboolean {
+    let acc_id: String = match env.get_string(&account_id) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    let id: String = match env.get_string(&node_id) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    if cloud_tree::remove_node_from_tree(&acc_id, &id) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_addCloudTreeNodeFast<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    account_id: JString<'local>,
+    id: JString<'local>,
+    parent_id: JString<'local>,
+    name: JString<'local>,
+    is_dir: jboolean,
+    size: jlong,
+    last_modified: jlong,
+    extra: JString<'local>,
+) -> jboolean {
+    let acc_id: String = match env.get_string(&account_id) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    let n_id: String = match env.get_string(&id) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    let n_parent: String = match env.get_string(&parent_id) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    let n_name: String = match env.get_string(&name) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    let n_extra: String = match env.get_string(&extra) {
+        Ok(s) => s.into(),
+        Err(_) => "".to_string(),
+    };
+
+    let node = cloud_tree::CloudNode {
+        id: n_id,
+        parent_id: n_parent,
+        name: n_name,
+        is_dir: is_dir != 0,
+        size: size as i64,
+        last_modified: last_modified as i64,
+        extra: n_extra,
+    };
+
+    if cloud_tree::add_or_update_node_in_tree(&acc_id, node) {
+        1
+    } else {
+        0
+    }
+}
+
 pub extern "system" fn Java_com_antigravity_filemanager_core_NativeEngine_storeMegaCloudTree<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,

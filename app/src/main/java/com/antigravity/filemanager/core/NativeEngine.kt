@@ -670,6 +670,18 @@ object NativeEngine {
     private external fun loadFolderCacheNative(filePath: String): String
 
     @JvmStatic
+    private external fun storeAndDecryptMegaCloudTree(accountId: String, nodesJson: String, masterKey: ByteArray): String
+    private external fun removeCloudTreeNodeFast(accountId: String, nodeId: String): Boolean
+    private external fun addCloudTreeNodeFast(
+        accountId: String,
+        id: String,
+        parentId: String,
+        name: String,
+        isDir: Boolean,
+        size: Long,
+        lastModified: Long,
+        extra: String
+    ): Boolean
     private external fun storeMegaCloudTree(accountId: String, nodesJson: String, masterKey: ByteArray): String
 
     @JvmStatic
@@ -799,6 +811,66 @@ object NativeEngine {
         } catch (t: Throwable) {
             Log.w(TAG, "loadFolderCacheFast failed: ${t.message}")
             null
+        }
+    }
+
+    fun storeAndDecryptMegaTreeFast(accountId: String, nodesJson: String, masterKey: ByteArray): Pair<String, List<NativeMegaNode>>? {
+        if (!isLoaded) return null
+        return try {
+            val raw = storeAndDecryptMegaCloudTree(accountId, nodesJson, masterKey)
+            if (raw.isBlank()) return null
+            val obj = org.json.JSONObject(raw)
+            val rootHandle = obj.optString("root_handle", "")
+            val arr = obj.optJSONArray("nodes") ?: org.json.JSONArray()
+            val list = ArrayList<NativeMegaNode>(arr.length())
+            for (i in 0 until arr.length()) {
+                val nodeObj = arr.getJSONObject(i)
+                list.add(
+                    NativeMegaNode(
+                        handle = nodeObj.optString("handle"),
+                        parentHandle = nodeObj.optString("parent_handle"),
+                        type = nodeObj.optInt("node_type"),
+                        size = nodeObj.optLong("size"),
+                        timestamp = nodeObj.optLong("timestamp"),
+                        name = nodeObj.optString("name"),
+                        keyStr = nodeObj.optString("key_str"),
+                        fileAttrStr = nodeObj.optString("file_attr_str")
+                    )
+                )
+            }
+            Pair(rootHandle, list)
+        } catch (t: Throwable) {
+            Log.w(TAG, "storeAndDecryptMegaTreeFast failed: ${t.message}")
+            null
+        }
+    }
+
+    fun removeCloudTreeNode(accountId: String, nodeId: String): Boolean {
+        if (!isLoaded) return false
+        return try {
+            removeCloudTreeNodeFast(accountId, nodeId)
+        } catch (t: Throwable) {
+            Log.w(TAG, "removeCloudTreeNode failed: ${t.message}")
+            false
+        }
+    }
+
+    fun addOrUpdateCloudTreeNode(
+        accountId: String,
+        id: String,
+        parentId: String,
+        name: String,
+        isDir: Boolean,
+        size: Long,
+        lastModified: Long,
+        extra: String = ""
+    ): Boolean {
+        if (!isLoaded) return false
+        return try {
+            addCloudTreeNodeFast(accountId, id, parentId, name, isDir, size, lastModified, extra)
+        } catch (t: Throwable) {
+            Log.w(TAG, "addOrUpdateCloudTreeNode failed: ${t.message}")
+            false
         }
     }
 

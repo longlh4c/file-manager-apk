@@ -840,9 +840,19 @@ class CloudStorageUseCase @Inject constructor(
             // selection count regardless of how many were actually skipped here, so picking
             // "Skip" on every conflict still reported "Transferred N file(s) successfully" for
             // zero real uploads. Track what actually went out and hand that back instead.
-            var uploadedCount = 0
             val provider = cloudRepository.getConnectedAccounts().find { it.id == accountId }?.provider
-            flatFiles.forEachIndexed { index, (file, targetDir, overwrite) ->
+
+            data class PreparedUpload(
+                val originalFile: File,
+                val uploadSource: File,
+                val tempDir: File?,
+                val targetDir: String,
+                val replaceAfterUpload: com.antigravity.filemanager.domain.model.FileItem?,
+                val renameAfterUpload: Boolean
+            )
+
+            val preparedList = mutableListOf<PreparedUpload>()
+            for ((file, targetDir, overwrite) in flatFiles) {
                 val existingNames = existingNamesFor(targetDir)
                 val conflictItem = existingItemsByDir[targetDir]?.find {
                     it.name == file.name ||
@@ -851,26 +861,17 @@ class CloudStorageUseCase @Inject constructor(
                 }
                 var uploadSource = file
                 var tempDir: File? = null
-                // Overwrite used to delete the existing remote item first, so an upload that then
-                // failed (lost connection, full quota) left neither copy in place. The old item is
-                // now removed only once the new one is up, in whatever way the provider allows.
                 var replaceAfterUpload: com.antigravity.filemanager.domain.model.FileItem? = null
                 var renameAfterUpload = false
                 if (conflictItem != null) {
                     if (overwrite) {
                         when {
-                            // A file replacing a folder: nothing can be swapped in one step.
                             conflictItem.isDirectory -> cloudRepository.deleteCloudFile(accountId, conflictItem.path, moveToTrash = false)
                                 .getOrElse { throw java.io.IOException("Couldn't replace \"${conflictItem.name}\": ${it.message}", it) }
-                            // Uploads use WriteMode.OVERWRITE: the new file replaces the old in one step.
                             provider == CloudProvider.DROPBOX -> Unit
-                            // Same-named siblings are allowed: upload next to it, then remove the
-                            // old one by its id/path.
                             provider == CloudProvider.GOOGLE_DRIVE || provider == CloudProvider.MEGA -> {
                                 replaceAfterUpload = conflictItem
                             }
-                            // Otherwise upload under a temporary name, then remove the old item and
-                            // give the new one its real name.
                             else -> {
                                 val dir = File(System.getProperty("java.io.tmpdir"), "upload_${System.nanoTime()}").apply { mkdirs() }
                                 tempDir = dir
@@ -880,10 +881,6 @@ class CloudStorageUseCase @Inject constructor(
                             }
                         }
                     } else {
-                        // "Keep both": the providers name the upload after the local file, so it
-                        // needs a renamed copy — made in app cache, never next to the user's own
-                        // file (where a same-named local file made copyTo() throw, and a crash
-                        // mid-upload left the copy behind in their folder).
                         val uniqueName = uniqueCloudName(existingNames, file.name)
                         val dir = File(System.getProperty("java.io.tmpdir"), "upload_${System.nanoTime()}").apply { mkdirs() }
                         tempDir = dir
@@ -893,37 +890,58 @@ class CloudStorageUseCase @Inject constructor(
                 } else {
                     existingNames.add(file.name)
                 }
+                preparedList.add(PreparedUpload(file, uploadSource, tempDir, targetDir, replaceAfterUpload, renameAfterUpload))
+            }
 
-                val fileSize = uploadSource.length()
-                onFileProgress?.invoke(uploadSource.name, index + 1, totalFiles, 0L, fileSize)
-                val uploadResult = try {
-                    cloudRepository.uploadCloudFile(accountId, uploadSource.absolutePath, targetDir) { sent, total ->
-                        val effTotal = if (total > 0) total else fileSize
-                        onFileProgress?.invoke(uploadSource.name, index + 1, totalFiles, sent, effTotal)
-                    }
-                } finally {
-                    tempDir?.deleteRecursively()
-                }
-                if (uploadResult.isFailure) {
-                    // Every remaining file would fail for the same reason (same account/target),
-                    // so stop here instead of silently reporting success for a partial batch.
-                    throw uploadResult.exceptionOrNull() ?: Exception("Upload failed for ${uploadSource.name}")
-                }
-                replaceAfterUpload?.let { old ->
-                    val target = if (renameAfterUpload) old.path else old.id.ifEmpty { old.path }
-                    cloudRepository.deleteCloudFile(accountId, target, moveToTrash = false).getOrElse {
-                        throw java.io.IOException("Uploaded \"${uploadSource.name}\" but couldn't remove the old \"${old.name}\": ${it.message}", it)
-                    }
-                    if (renameAfterUpload) {
-                        val tempPath = if (targetDir == "/" || targetDir.isBlank()) "/${uploadSource.name}" else "${targetDir.trimEnd('/')}/${uploadSource.name}"
-                        cloudRepository.renameCloudFile(accountId, tempPath, file.name).getOrElse {
-                            throw java.io.IOException("Uploaded as \"${uploadSource.name}\" but couldn't rename it to \"${file.name}\": ${it.message}", it)
+            val uploadedCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val completedCounter = java.util.concurrent.atomic.AtomicInteger(0)
+            val firstFailure = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+            val semaphore = kotlinx.coroutines.sync.Semaphore(3)
+            val uploadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
+
+            kotlinx.coroutines.coroutineScope {
+                preparedList.forEach { prep ->
+                    launch {
+                        semaphore.withPermit {
+                            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                            if (firstFailure.get() != null) return@withPermit
+
+                            val fileSize = prep.uploadSource.length()
+                            val currentIdx = completedCounter.incrementAndGet()
+                            onFileProgress?.invoke(prep.uploadSource.name, currentIdx, totalFiles, 0L, fileSize)
+                            val uploadResult = try {
+                                cloudRepository.uploadCloudFile(accountId, prep.uploadSource.absolutePath, prep.targetDir) { sent, total ->
+                                    val effTotal = if (total > 0) total else fileSize
+                                    if (uploadThrottler.shouldEmit(sent, effTotal)) {
+                                        onFileProgress?.invoke(prep.uploadSource.name, currentIdx, totalFiles, sent, effTotal)
+                                    }
+                                }
+                            } finally {
+                                prep.tempDir?.deleteRecursively()
+                            }
+                            if (uploadResult.isFailure) {
+                                val ex = uploadResult.exceptionOrNull() ?: Exception("Upload failed for ${prep.uploadSource.name}")
+                                firstFailure.compareAndSet(null, ex)
+                                throw ex
+                            }
+                            prep.replaceAfterUpload?.let { old ->
+                                val target = if (prep.renameAfterUpload) old.path else old.id.ifEmpty { old.path }
+                                cloudRepository.deleteCloudFile(accountId, target, moveToTrash = false).getOrElse {
+                                    throw java.io.IOException("Uploaded \"${prep.uploadSource.name}\" but couldn't remove the old \"${old.name}\": ${it.message}", it)
+                                }
+                                if (prep.renameAfterUpload) {
+                                    val tempPath = if (prep.targetDir == "/" || prep.targetDir.isBlank()) "/${prep.uploadSource.name}" else "${prep.targetDir.trimEnd('/')}/${prep.uploadSource.name}"
+                                    cloudRepository.renameCloudFile(accountId, tempPath, prep.originalFile.name).getOrElse {
+                                        throw java.io.IOException("Uploaded as \"${prep.uploadSource.name}\" but couldn't rename it to \"${prep.originalFile.name}\": ${it.message}", it)
+                                    }
+                                }
+                            }
+                            uploadedCount.incrementAndGet()
                         }
                     }
                 }
-                uploadedCount++
             }
-            Result.success(uploadedCount)
+            Result.success(uploadedCount.get())
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Result.failure(e)
