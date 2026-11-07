@@ -894,32 +894,58 @@ class CloudStorageUseCase @Inject constructor(
             }
 
             val uploadedCount = java.util.concurrent.atomic.AtomicInteger(0)
-            val completedCounter = java.util.concurrent.atomic.AtomicInteger(0)
+            val completedFilesCount = java.util.concurrent.atomic.AtomicInteger(0)
             val firstFailure = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
             val semaphore = kotlinx.coroutines.sync.Semaphore(3)
             val uploadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
 
+            val totalBatchBytes = preparedList.sumOf { it.uploadSource.length() }
+            val completedBytes = java.util.concurrent.atomic.AtomicLong(0L)
+            val activeBytesMap = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+
+            fun emitBatchProgress(fileName: String, force: Boolean = false) {
+                if (onFileProgress == null) return
+                val (transferred, displayIdx, shouldEmit) = synchronized(activeBytesMap) {
+                    val inFlight = activeBytesMap.values.sum()
+                    val total = (completedBytes.get() + inFlight).coerceIn(0L, totalBatchBytes)
+                    val idx = if (totalFiles <= 0) 0 else (completedFilesCount.get() + 1).coerceIn(1, totalFiles)
+                    val emit = force || uploadThrottler.shouldEmit(total, totalBatchBytes)
+                    Triple(total, idx, emit)
+                }
+                if (shouldEmit) {
+                    onFileProgress.invoke(fileName, displayIdx, totalFiles, transferred, totalBatchBytes)
+                }
+            }
+
             kotlinx.coroutines.coroutineScope {
-                preparedList.forEach { prep ->
+                preparedList.forEachIndexed { itemIndex, prep ->
                     launch {
                         semaphore.withPermit {
                             kotlinx.coroutines.currentCoroutineContext().ensureActive()
                             if (firstFailure.get() != null) return@withPermit
 
                             val fileSize = prep.uploadSource.length()
-                            val currentIdx = completedCounter.incrementAndGet()
-                            onFileProgress?.invoke(prep.uploadSource.name, currentIdx, totalFiles, 0L, fileSize)
+                            val uploadId = itemIndex
+                            synchronized(activeBytesMap) {
+                                activeBytesMap[uploadId] = 0L
+                            }
+                            emitBatchProgress(prep.uploadSource.name, force = true)
+
                             val uploadResult = try {
-                                cloudRepository.uploadCloudFile(accountId, prep.uploadSource.absolutePath, prep.targetDir) { sent, total ->
-                                    val effTotal = if (total > 0) total else fileSize
-                                    if (uploadThrottler.shouldEmit(sent, effTotal)) {
-                                        onFileProgress?.invoke(prep.uploadSource.name, currentIdx, totalFiles, sent, effTotal)
+                                cloudRepository.uploadCloudFile(accountId, prep.uploadSource.absolutePath, prep.targetDir) { sent, _ ->
+                                    val effSent = if (sent > 0) sent.coerceAtMost(fileSize) else 0L
+                                    synchronized(activeBytesMap) {
+                                        activeBytesMap[uploadId] = effSent
                                     }
+                                    emitBatchProgress(prep.uploadSource.name, force = false)
                                 }
                             } finally {
                                 prep.tempDir?.deleteRecursively()
                             }
                             if (uploadResult.isFailure) {
+                                synchronized(activeBytesMap) {
+                                    activeBytesMap.remove(uploadId)
+                                }
                                 val ex = uploadResult.exceptionOrNull() ?: Exception("Upload failed for ${prep.uploadSource.name}")
                                 firstFailure.compareAndSet(null, ex)
                                 throw ex
@@ -936,7 +962,13 @@ class CloudStorageUseCase @Inject constructor(
                                     }
                                 }
                             }
+                            synchronized(activeBytesMap) {
+                                activeBytesMap.remove(uploadId)
+                                completedBytes.addAndGet(fileSize)
+                            }
+                            completedFilesCount.incrementAndGet()
                             uploadedCount.incrementAndGet()
+                            emitBatchProgress(prep.uploadSource.name, force = true)
                         }
                     }
                 }

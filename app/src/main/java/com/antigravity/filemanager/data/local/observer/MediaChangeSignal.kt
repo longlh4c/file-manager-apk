@@ -38,11 +38,13 @@ class MediaChangeSignal @Inject constructor(
         }
         // notifyForDescendants=true: a change to any row under this URI (any media type, any
         // folder) notifies here, not just exact-URI matches.
-        context.contentResolver.registerContentObserver(
+        try {
+            context.contentResolver?.registerContentObserver(
             MediaStore.Files.getContentUri("external"),
             true,
             observer
         )
+        } catch (_: Throwable) {}
     }
 
     fun notifyChanged() {
