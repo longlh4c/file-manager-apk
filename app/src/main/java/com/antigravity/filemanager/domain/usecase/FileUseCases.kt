@@ -474,7 +474,6 @@ class CloudStorageUseCase @Inject constructor(
         }
         var failures = 0
         var lastErrorMessage: String? = null
-        var transferredCount = 0
         fun setTransferProgress(
             currentFileName: String,
             currentIndex: Int,
@@ -595,7 +594,6 @@ class CloudStorageUseCase @Inject constructor(
             }
         }
         val totalCount = flat.size
-        transferredCount = totalCount
         val downloadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
         val uploadThrottler = com.antigravity.filemanager.utils.ProgressThrottler()
         // Each file's round trip (download then upload) is dominated by per-request
@@ -620,7 +618,9 @@ class CloudStorageUseCase @Inject constructor(
                         val entryDir = File(tempDir, index.toString()).apply { mkdirs() }
                         val dlResult = downloadFile(sourceCloudAccountId, remotePath, entryDir.absolutePath) { bytesRead, totalBytes ->
                             if (downloadThrottler.shouldEmit(bytesRead, totalBytes)) {
-                                setTransferProgress(currentFileName = File(remotePath).name, currentIndex = completedCounter.get() + 1, totalFiles = totalCount, isUpload = false, bytesTransferred = bytesRead, totalBytes = totalBytes)
+                                val effBytes = if (totalCount > 1) 0L else bytesRead
+                                val effTotal = if (totalCount > 1) 0L else totalBytes
+                                setTransferProgress(currentFileName = File(remotePath).name, currentIndex = completedCounter.get() + 1, totalFiles = totalCount, isUpload = false, bytesTransferred = effBytes, totalBytes = effTotal)
                             }
                         }
                         val localFile = dlResult.getOrNull()
@@ -648,7 +648,9 @@ class CloudStorageUseCase @Inject constructor(
                                 skipNames = emptySet()
                             ) { currentFile, _, _, bytesSent, totalBytes ->
                               if (uploadThrottler.shouldEmit(bytesSent, totalBytes)) {
-                                setTransferProgress(currentFileName = currentFile, currentIndex = completedCounter.get() + 1, totalFiles = totalCount, isUpload = true, bytesTransferred = bytesSent, totalBytes = totalBytes)
+                                val effBytes = if (totalCount > 1) 0L else bytesSent
+                                val effTotal = if (totalCount > 1) 0L else totalBytes
+                                setTransferProgress(currentFileName = currentFile, currentIndex = completedCounter.get() + 1, totalFiles = totalCount, isUpload = true, bytesTransferred = effBytes, totalBytes = effTotal)
                               }
                             }
                             entryDir.deleteRecursively()
@@ -676,7 +678,7 @@ class CloudStorageUseCase @Inject constructor(
         }
         failures += failuresCounter.get()
         // Only what actually arrived: this used to stay at the total even when files failed.
-        transferredCount = totalCount - failuresCounter.get()
+        val transferredCount = totalCount - failuresCounter.get()
         lastErrorRef.get()?.let { lastErrorMessage = it }
         if (isMove) {
             // Delete each top-level source (file or folder) as one unit once its whole
@@ -818,8 +820,7 @@ class CloudStorageUseCase @Inject constructor(
                 val entry = File(path)
                 if (entry.name in skipNames) continue
                 val overwrite = entry.name in overwriteNames ||
-                    overwriteNames.any { it.equals(entry.name, ignoreCase = true) } ||
-                    overwriteNames.any { it.substringBeforeLast(".").equals(entry.nameWithoutExtension, ignoreCase = true) }
+                    overwriteNames.any { it.equals(entry.name, ignoreCase = true) }
                 if (entry.isDirectory) {
                     // "Keep both" for a folder uploads it as "Name (1)", like a local copy does;
                     // it used to be merged into the existing folder, with "(1)" copies of any
@@ -856,8 +857,7 @@ class CloudStorageUseCase @Inject constructor(
                 val existingNames = existingNamesFor(targetDir)
                 val conflictItem = existingItemsByDir[targetDir]?.find {
                     it.name == file.name ||
-                    it.name.equals(file.name, ignoreCase = true) ||
-                    (overwrite && it.name.substringBeforeLast(".").equals(file.nameWithoutExtension, ignoreCase = true))
+                    it.name.equals(file.name, ignoreCase = true)
                 }
                 var uploadSource = file
                 var tempDir: File? = null
@@ -1212,6 +1212,8 @@ class CloudStorageUseCase @Inject constructor(
         }
 
         val totalCount = filesToDownload.size
+        val totalBatchBytes = filesToDownload.sumOf { if (it.expectedSize > 0) it.expectedSize else 0L }
+        var completedBytes = 0L
 
         // 2. Download all files
         filesToDownload.forEachIndexed { index, item ->
@@ -1219,14 +1221,16 @@ class CloudStorageUseCase @Inject constructor(
             val name = item.localFile.name
             val expectedSize = item.expectedSize
 
+            val initialTransferred = if (totalBatchBytes > 0) completedBytes else 0L
+            val batchTotal = if (totalBatchBytes > 0) totalBatchBytes else expectedSize
             onProgress(
                 com.antigravity.filemanager.domain.model.CloudTransferProgress(
                     currentFileName = name,
                     currentIndex = index + 1,
                     totalFiles = totalCount,
-                    bytesTransferred = 0L,
-                    totalBytes = expectedSize,
-                    isIndeterminate = expectedSize <= 0,
+                    bytesTransferred = initialTransferred,
+                    totalBytes = batchTotal,
+                    isIndeterminate = batchTotal <= 0,
                     isUpload = false
                 )
             )
@@ -1234,14 +1238,20 @@ class CloudStorageUseCase @Inject constructor(
             val tempDir = File(context.cacheDir, "cloud_paste_temp_${System.nanoTime()}").apply { mkdirs() }
             try {
                 val result = downloadFile(accountId, item.remotePath, tempDir.absolutePath) { bytesRead, totalBytes ->
-                    val effTotal = if (totalBytes > 0) totalBytes else expectedSize
-                    if (progressThrottler.shouldEmit(bytesRead, effTotal)) {
+                    val fileTotal = if (totalBytes > 0) totalBytes else expectedSize
+                    val curTransferred = if (totalBatchBytes > 0) {
+                        (completedBytes + bytesRead.coerceAtMost(fileTotal)).coerceAtMost(totalBatchBytes)
+                    } else {
+                        bytesRead
+                    }
+                    val effTotal = if (totalBatchBytes > 0) totalBatchBytes else fileTotal
+                    if (progressThrottler.shouldEmit(curTransferred, effTotal)) {
                         onProgress(
                             com.antigravity.filemanager.domain.model.CloudTransferProgress(
                                 currentFileName = name,
                                 currentIndex = index + 1,
                                 totalFiles = totalCount,
-                                bytesTransferred = bytesRead,
+                                bytesTransferred = curTransferred,
                                 totalBytes = effTotal,
                                 isIndeterminate = effTotal <= 0,
                                 isUpload = false
@@ -1250,6 +1260,9 @@ class CloudStorageUseCase @Inject constructor(
                     }
                 }
                 if (result.isSuccess) {
+                    if (totalBatchBytes > 0) {
+                        completedBytes += expectedSize
+                    }
                     val downloaded = result.getOrNull()
                     if (downloaded != null && downloaded.exists() && downloaded.isFile) {
                         // A Google Docs/Sheets/Slides file is exported as .docx/.xlsx/.pptx/.pdf;
