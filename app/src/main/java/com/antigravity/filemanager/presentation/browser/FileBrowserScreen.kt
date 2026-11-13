@@ -3,6 +3,14 @@ package com.antigravity.filemanager.presentation.browser
 import android.content.Context
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -42,7 +50,7 @@ import com.antigravity.filemanager.presentation.viewers.LocalViewerSession
 import com.antigravity.filemanager.utils.FileOpener
 import java.io.File
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun FileBrowserScreen(
     onNavigateBack: () -> Unit,
@@ -395,7 +403,11 @@ fun FileBrowserScreen(
             }
         },
         bottomBar = {
-            if (uiState.isSelectionMode) {
+            AnimatedVisibility(
+                visible = uiState.isSelectionMode,
+                enter = slideInVertically(initialOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut()
+            ) {
                 // Bottom Action Bar with perfectly formatted action items (Zero text clipping)
                 Surface(
                     color = DarkCard,
@@ -571,7 +583,12 @@ fun FileBrowserScreen(
                         }
                     }
                 }
-            } else if (uiState.clipboardPaths.isNotEmpty() && uiState.downloadProgress == null) {
+            }
+            AnimatedVisibility(
+                visible = !uiState.isSelectionMode && uiState.clipboardPaths.isNotEmpty() && uiState.downloadProgress == null,
+                enter = slideInVertically(initialOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut()
+            ) {
                 // See the matching comment in CloudExplorerScreen — clipboard only clears at the
                 // very end of paste(), so this stayed visible alongside the progress bar for the
                 // whole transfer without this check.
@@ -692,7 +709,7 @@ fun FileBrowserScreen(
                         items(filteredFiles, key = { it.path }) { file ->
                             FileGridCard(
                                 file = file,
-                                modifier = dragSource(file),
+                                modifier = Modifier.animateItemPlacement().then(dragSource(file)),
                                 isSelectionMode = uiState.isSelectionMode,
                                 isSelected = uiState.selectedPaths.contains(file.path),
                                 onClick = {
@@ -719,7 +736,7 @@ fun FileBrowserScreen(
                         items(filteredFiles, key = { it.path }) { file ->
                             FileDetailedListItem(
                                 file = file,
-                                modifier = dragSource(file),
+                                modifier = Modifier.animateItemPlacement().then(dragSource(file)),
                                 isSelectionMode = uiState.isSelectionMode,
                                 isSelected = uiState.selectedPaths.contains(file.path),
                                 onClick = {
@@ -749,7 +766,7 @@ fun FileBrowserScreen(
                         items(filteredFiles, key = { it.path }) { file ->
                             FileListItem(
                                 file = file,
-                                modifier = dragSource(file),
+                                modifier = Modifier.animateItemPlacement().then(dragSource(file)),
                                 isSelectionMode = uiState.isSelectionMode,
                                 isSelected = uiState.selectedPaths.contains(file.path),
                                 onClick = {

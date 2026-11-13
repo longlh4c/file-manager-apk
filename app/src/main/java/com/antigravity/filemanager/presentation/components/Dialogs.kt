@@ -9,6 +9,9 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -2513,8 +2516,13 @@ fun CloudDownloadProgressDialog(
                         trackColor = Color(0xFF2C2C2C)
                     )
                 } else {
+                    val animatedProgressFraction by animateFloatAsState(
+                        targetValue = progress.progressFraction,
+                        animationSpec = tween(durationMillis = 200, easing = LinearOutSlowInEasing),
+                        label = "dialogProgressFraction"
+                    )
                     LinearProgressIndicator(
-                        progress = { progress.progressFraction },
+                        progress = { animatedProgressFraction },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(6.dp)

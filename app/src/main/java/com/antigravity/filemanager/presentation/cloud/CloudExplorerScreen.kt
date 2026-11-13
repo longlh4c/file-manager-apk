@@ -2,6 +2,14 @@ package com.antigravity.filemanager.presentation.cloud
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -46,7 +54,7 @@ private val CLOUD_VIDEO_EXTENSIONS = setOf("mp4", "mkv", "avi", "mov", "webm", "
 private val CLOUD_IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "svg", "raw", "dng")
 private val CLOUD_STREAMABLE_EXTENSIONS = CLOUD_VIDEO_EXTENSIONS + CLOUD_IMAGE_EXTENSIONS
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun CloudExplorerScreen(
     accountId: String,
@@ -366,7 +374,11 @@ fun CloudExplorerScreen(
             }
         },
         bottomBar = {
-            if (uiState.isSelectionMode) {
+            AnimatedVisibility(
+                visible = uiState.isSelectionMode,
+                enter = slideInVertically(initialOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut()
+            ) {
                 Surface(
                     color = DarkCard,
                     tonalElevation = 8.dp,
@@ -467,7 +479,12 @@ fun CloudExplorerScreen(
                         }
                     }
                 }
-            } else if (uiState.clipboardPaths.isNotEmpty() && uiState.downloadProgress == null) {
+            }
+            AnimatedVisibility(
+                visible = !uiState.isSelectionMode && uiState.clipboardPaths.isNotEmpty() && uiState.downloadProgress == null,
+                enter = slideInVertically(initialOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut()
+            ) {
                 // Hidden while a transfer is actually running (downloadProgress != null) — the
                 // clipboard itself only clears at the very end of paste(), so without this check
                 // "Paste Here" sat there the whole time a copy/move was in flight, alongside the
@@ -683,10 +700,12 @@ fun CloudExplorerScreen(
                         items(filteredFiles, key = { it.id }) { file ->
                             FileListItem(
                                 file = file,
-                                modifier = Modifier.dualPaneDragSource(
-                                    sourceLocation = cloudLocation(accountId, uiState.currentPath),
-                                    items = { viewModel.dragItems(file) },
-                                    onFinished = { viewModel.clearSelection() }
+                                modifier = Modifier.animateItemPlacement().then(
+                                    Modifier.dualPaneDragSource(
+                                        sourceLocation = cloudLocation(accountId, uiState.currentPath),
+                                        items = { viewModel.dragItems(file) },
+                                        onFinished = { viewModel.clearSelection() }
+                                    )
                                 ).then(
                                     if (file.isDirectory && !uiState.isInsideTrashView) {
                                         Modifier.dualPaneDropZone(location = cloudLocation(accountId, file.path), name = file.name) { items ->

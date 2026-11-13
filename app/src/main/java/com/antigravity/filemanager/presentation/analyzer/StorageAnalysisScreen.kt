@@ -1,5 +1,8 @@
 package com.antigravity.filemanager.presentation.analyzer
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -116,9 +119,14 @@ fun StorageAnalysisScreen(
 
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // Progress Bar
+                        // Animated Progress Bar
+                        val animatedUsedFraction by animateFloatAsState(
+                            targetValue = data.volumeInfo.usedPercentage,
+                            animationSpec = tween(durationMillis = 700, easing = FastOutSlowInEasing),
+                            label = "storageUsedFraction"
+                        )
                         LinearProgressIndicator(
-                            progress = { data.volumeInfo.usedPercentage },
+                            progress = { animatedUsedFraction },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(6.dp)

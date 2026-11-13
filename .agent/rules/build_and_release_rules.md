@@ -15,3 +15,7 @@
 - Develop distinct features on dedicated branches (e.g., `feature/<feature-name>`).
 - Always run `./gradlew testDebugUnitTest` and compile `./gradlew assembleRelease` before merging into `main`.
 - Clean up merged branches after successful merge.
+
+## 4. Explicit Git Commit & Push Rule
+- **Never commit or push automatically**: Do not execute `git commit` or `git push` unless the user explicitly requests it (e.g., "commit", "commit push", "push lên git").
+- Keep changes in the working tree/local files, run tests/builds, report results to the user, and wait for the user's explicit command before committing or pushing.

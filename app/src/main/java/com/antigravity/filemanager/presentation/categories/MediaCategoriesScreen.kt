@@ -3,6 +3,13 @@ package com.antigravity.filemanager.presentation.categories
 import android.content.Context
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -48,7 +55,7 @@ import com.antigravity.filemanager.presentation.viewers.LocalViewerSession
 import com.antigravity.filemanager.utils.FileOpener
 import java.io.File
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun MediaCategoriesScreen(
     onNavigateBack: () -> Unit,
@@ -383,7 +390,11 @@ fun MediaCategoriesScreen(
             }
         },
         bottomBar = {
-            if (uiState.isSelectionMode) {
+            AnimatedVisibility(
+                visible = uiState.isSelectionMode,
+                enter = slideInVertically(initialOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut()
+            ) {
                 Surface(
                     color = DarkCard,
                     tonalElevation = 8.dp,
@@ -547,7 +558,12 @@ fun MediaCategoriesScreen(
                         }
                     }
                 }
-            } else if (uiState.clipboardPaths.isNotEmpty()) {
+            }
+            AnimatedVisibility(
+                visible = !uiState.isSelectionMode && uiState.clipboardPaths.isNotEmpty(),
+                enter = slideInVertically(initialOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }, animationSpec = spring(stiffness = Spring.StiffnessMediumLow)) + fadeOut()
+            ) {
                 PasteBottomBar(
                     itemCount = uiState.clipboardPaths.size,
                     onPaste = { viewModel.paste() },
@@ -669,7 +685,7 @@ fun MediaCategoriesScreen(
                                 items(filteredFiles, key = { it.path }) { file ->
                                     FileGridCard(
                                         file = file,
-                                        modifier = dragSource(file),
+                                        modifier = Modifier.animateItemPlacement().then(dragSource(file)),
                                         isSelectionMode = uiState.isSelectionMode,
                                         isSelected = uiState.selectedPaths.contains(file.path),
                                         onClick = {
@@ -696,7 +712,7 @@ fun MediaCategoriesScreen(
                                 items(filteredFiles, key = { it.path }) { file ->
                                     FileDetailedListItem(
                                         file = file,
-                                        modifier = dragSource(file),
+                                        modifier = Modifier.animateItemPlacement().then(dragSource(file)),
                                         isSelectionMode = uiState.isSelectionMode,
                                         isSelected = uiState.selectedPaths.contains(file.path),
                                         onClick = {
@@ -734,7 +750,7 @@ fun MediaCategoriesScreen(
                                     items(filteredFiles, key = { it.path }) { file ->
                                         FileListItem(
                                             file = file,
-                                            modifier = dragSource(file),
+                                            modifier = Modifier.animateItemPlacement().then(dragSource(file)),
                                             isSelectionMode = uiState.isSelectionMode,
                                             isSelected = uiState.selectedPaths.contains(file.path),
                                             onClick = {
@@ -811,7 +827,7 @@ fun MediaCategoriesScreen(
                         items(filteredFolders, key = { it.id }) { folder ->
                             MediaFolderCard(
                                 folder = folder,
-                                modifier = folderDragSource(folder),
+                                modifier = Modifier.animateItemPlacement().then(folderDragSource(folder)),
                                 isSelected = uiState.selectedPaths.contains(folder.path),
                                 onClick = {
                                     if (uiState.isSelectionMode) {
@@ -831,7 +847,7 @@ fun MediaCategoriesScreen(
                                 folder = folder,
                                 badgeIcon = badgeIcon,
                                 badgeColor = badgeColor,
-                                modifier = folderDragSource(folder),
+                                modifier = Modifier.animateItemPlacement().then(folderDragSource(folder)),
                                 isSelected = uiState.selectedPaths.contains(folder.path),
                                 onClick = {
                                     if (uiState.isSelectionMode) {
