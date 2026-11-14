@@ -64,6 +64,7 @@ class TransferConcurrencyFtplet(maxConcurrentTransfers: Int) : DefaultFtplet() {
     }
 
     override fun onUploadStart(session: FtpSession, request: FtpRequest): FtpletResult = acquire(session)
+
     override fun onDownloadStart(session: FtpSession, request: FtpRequest): FtpletResult = acquire(session)
 
     override fun onUploadEnd(session: FtpSession, request: FtpRequest): FtpletResult {

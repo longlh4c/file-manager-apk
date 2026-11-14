@@ -46,6 +46,7 @@ class FtpServerService : Service() {
     // Start and stop run as separate coroutines; this keeps a quick stop->start (or a start with
     // new settings) from interleaving halfway through each other.
     private val lifecycleMutex = Mutex()
+    @Volatile private var lastAddressContent: String = ""
 
     companion object {
         const val ACTION_START = "ACTION_START_FTP"
@@ -54,7 +55,8 @@ class FtpServerService : Service() {
         const val EXTRA_HTTP_PORT = "EXTRA_HTTP_PORT"
         const val EXTRA_PASSWORD = "EXTRA_PASSWORD"
         const val EXTRA_RANDOM_PASS = "EXTRA_RANDOM_PASS"
-        const val NOTIFICATION_CHANNEL_ID = "ftp_server_channel"
+        const val NOTIFICATION_CHANNEL_ID = "ftp_server_channel_v2"
+        private const val LEGACY_NOTIFICATION_CHANNEL_ID = "ftp_server_channel"
         const val NOTIFICATION_ID = 1524
 
         private val _ftpState = MutableStateFlow(FtpServerState())
@@ -200,25 +202,36 @@ class FtpServerService : Service() {
             powerLocks.release()
             _ftpState.value = _ftpState.value.copy(isRunning = false)
             stopForeground(STOP_FOREGROUND_REMOVE)
+            (getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)?.cancel(NOTIFICATION_ID)
             stopSelf()
         }
     }
 
-    private fun startForegroundNotification(content: String) {
+    private fun buildNotification(): android.app.Notification {
         val pendingIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
+        val title = getString(R.string.service_running_notification)
 
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle(getString(R.string.service_running_notification))
-            .setContentText(content)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(content))
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
+        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(lastAddressContent)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(lastAddressContent))
+            .setSmallIcon(R.drawable.ic_ftp_idle)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
+    }
+
+    private fun startForegroundNotification(content: String) {
+        lastAddressContent = content
+        val notification = buildNotification()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
@@ -229,14 +242,22 @@ class FtpServerService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            try {
+                manager.deleteNotificationChannel(LEGACY_NOTIFICATION_CHANNEL_ID)
+            } catch (_: Exception) {
+            }
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
                 "FTP Server Service",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = "Notification while FTP Server is running"
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(true)
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
             }
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(channel)
         }
     }

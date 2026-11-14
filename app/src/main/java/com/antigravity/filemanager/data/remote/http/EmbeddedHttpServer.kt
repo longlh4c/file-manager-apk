@@ -12,6 +12,7 @@ import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
+import java.io.InputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.util.zip.ZipEntry
@@ -630,6 +631,12 @@ class EmbeddedHttpServer @Inject constructor(
         }
 
         private fun handleUpload(session: IHTTPSession): Response {
+            val explicitName = session.headers["x-file-name"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
+                ?: session.parms["filename"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
+            return handleUploadInternal(session, explicitName)
+        }
+
+        private fun handleUploadInternal(session: IHTTPSession, explicitFileName: String?): Response {
             val relPath = session.parms["path"] ?: ""
             val targetDir = resolveSafeFile(relPath) ?: return finalizeResponse(
                 newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json", "{\"error\":\"Invalid path\"}")
@@ -642,11 +649,6 @@ class EmbeddedHttpServer @Inject constructor(
             }
 
             if (!targetDir.exists()) targetDir.mkdirs()
-
-            // Resolve explicit file name from query parameter or custom header to bypass NanoHTTPD's
-            // multipart regex bug where filenames containing single quotes are truncated (e.g. "Sid Meier's" -> "Sid Meier")
-            val explicitFileName = session.headers["x-file-name"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
-                ?: session.parms["filename"]?.let { decodeUrlSafe(it) }?.takeIf { it.isNotBlank() }
 
             // A same-named file gets a numbered name unless the web UI asked (after checking with
             // /api/exists and the user) to replace it.

@@ -81,7 +81,7 @@ import java.util.Calendar
 fun RecentFilesScreen(
     onNavigateBack: () -> Unit,
     onOpenFile: (FileItem, FileSortOption, String?) -> Unit,
-    onOpenFolder: (path: String, title: String) -> Unit,
+    onOpenFolder: (path: String, title: String, rootBoundary: String) -> Unit,
     viewModel: RecentFilesViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -167,7 +167,21 @@ fun RecentFilesScreen(
                                 onClick = {
                                     val folder = File(selected.first()).parentFile
                                     viewModel.clearSelection()
-                                    if (folder != null) onOpenFolder(folder.absolutePath, folder.name)
+                                    if (folder != null) {
+                                        val externalRoot = android.os.Environment.getExternalStorageDirectory().absolutePath
+                                        val rootBoundary = if (folder.absolutePath.startsWith(externalRoot)) {
+                                            externalRoot
+                                        } else {
+                                            val segments = folder.absolutePath.split('/').filter { it.isNotEmpty() }
+                                            if (segments.size >= 2 && segments[0] == "storage") {
+                                                "/storage/${segments[1]}"
+                                            } else {
+                                                externalRoot
+                                            }
+                                        }
+                                        val title = if (rootBoundary == externalRoot) "Main storage" else folder.name
+                                        onOpenFolder(folder.absolutePath, title, rootBoundary)
+                                    }
                                 }
                             )
                         }

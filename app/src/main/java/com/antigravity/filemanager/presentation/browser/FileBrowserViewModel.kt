@@ -125,8 +125,22 @@ class FileBrowserViewModel @Inject constructor(
 
     private val initialPath: String = savedStateHandle.get<String>("path") ?: android.os.Environment.getExternalStorageDirectory().absolutePath
     private val initialTitle: String = savedStateHandle.get<String>("title") ?: "Main storage"
+    private val passedBoundary: String = savedStateHandle.get<String>("rootBoundary")?.trim() ?: ""
+    private val externalStorageRoot: String = android.os.Environment.getExternalStorageDirectory().absolutePath
+
+    private val resolvedBoundary: String = when {
+        passedBoundary.isNotEmpty() -> passedBoundary
+        (initialTitle.equals("Download", ignoreCase = true) || initialTitle.equals("Downloads", ignoreCase = true)) && initialPath.endsWith("Download") -> initialPath
+        initialPath.startsWith(externalStorageRoot) -> externalStorageRoot
+        initialPath.startsWith("/storage/") && !initialPath.startsWith("/storage/emulated") -> {
+            val segments = initialPath.split('/').filter { it.isNotEmpty() }
+            if (segments.size >= 2) "/storage/${segments[1]}" else initialPath
+        }
+        else -> initialPath
+    }
+
     private val determinedCategory: com.antigravity.filemanager.domain.model.CategoryType =
-        if (initialTitle.equals("Download", ignoreCase = true) || initialTitle.equals("Downloads", ignoreCase = true) || initialPath.endsWith("Download")) {
+        if ((initialTitle.equals("Download", ignoreCase = true) || initialTitle.equals("Downloads", ignoreCase = true) || initialPath.endsWith("Download")) && resolvedBoundary.endsWith("Download")) {
             com.antigravity.filemanager.domain.model.CategoryType.DOWNLOADS
         } else if (initialTitle.contains("USB", ignoreCase = true) || (initialPath.startsWith("/storage/") && !initialPath.startsWith("/storage/emulated"))) {
             com.antigravity.filemanager.domain.model.CategoryType.USB_OTG
@@ -137,7 +151,7 @@ class FileBrowserViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(
         FileBrowserUiState(
             currentPath = initialPath,
-            rootBoundaryPath = initialPath,
+            rootBoundaryPath = resolvedBoundary,
             categoryType = determinedCategory,
             title = initialTitle
         )

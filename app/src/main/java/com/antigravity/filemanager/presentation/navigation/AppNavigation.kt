@@ -586,8 +586,8 @@ private fun LeftPaneContent(
                         com.antigravity.filemanager.presentation.recent.RecentFilesScreen(
                             onNavigateBack = { navController.popBackStack() },
                             onOpenFile = openFileHandler,
-                            onOpenFolder = { path, title ->
-                                navController.navigate(Screen.FileBrowser.createRoute(path, title))
+                            onOpenFolder = { path, title, rootBoundary ->
+                                navController.navigate(Screen.FileBrowser.createRoute(path, title, rootBoundary))
                             }
                         )
                     }
@@ -608,7 +608,8 @@ private fun LeftPaneContent(
                         route = Screen.FileBrowser.route,
                         arguments = listOf(
                             navArgument("path") { type = NavType.StringType; defaultValue = "" },
-                            navArgument("title") { type = NavType.StringType; defaultValue = "Main storage" }
+                            navArgument("title") { type = NavType.StringType; defaultValue = "Main storage" },
+                            navArgument("rootBoundary") { type = NavType.StringType; defaultValue = "" }
                         )
                     ) {
                         FileBrowserScreen(
@@ -939,8 +940,8 @@ private fun RightPaneContent(
                         com.antigravity.filemanager.presentation.recent.RecentFilesScreen(
                             onNavigateBack = { navController.popBackStack() },
                             onOpenFile = openFileHandler,
-                            onOpenFolder = { path, title ->
-                                navController.navigate(Screen.FileBrowser.createRoute(path, title))
+                            onOpenFolder = { path, title, rootBoundary ->
+                                navController.navigate(Screen.FileBrowser.createRoute(path, title, rootBoundary))
                             }
                         )
                     }
@@ -961,7 +962,8 @@ private fun RightPaneContent(
                         route = Screen.FileBrowser.route,
                         arguments = listOf(
                             navArgument("path") { type = NavType.StringType; defaultValue = "" },
-                            navArgument("title") { type = NavType.StringType; defaultValue = "Main storage" }
+                            navArgument("title") { type = NavType.StringType; defaultValue = "Main storage" },
+                            navArgument("rootBoundary") { type = NavType.StringType; defaultValue = "" }
                         )
                     ) {
                         FileBrowserScreen(

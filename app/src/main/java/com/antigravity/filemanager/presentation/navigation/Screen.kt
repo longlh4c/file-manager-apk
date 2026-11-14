@@ -20,11 +20,12 @@ sealed class Screen(val route: String) {
         fun createRoute(categoryType: CategoryType): String = "category/${categoryType.name}"
     }
 
-    object FileBrowser : Screen("browser?path={path}&title={title}") {
-        fun createRoute(path: String, title: String = ""): String {
+    object FileBrowser : Screen("browser?path={path}&title={title}&rootBoundary={rootBoundary}") {
+        fun createRoute(path: String, title: String = "", rootBoundary: String = ""): String {
             val encodedPath = Uri.encode(path)
             val encodedTitle = Uri.encode(title)
-            return "browser?path=$encodedPath&title=$encodedTitle"
+            val encodedBoundary = Uri.encode(rootBoundary)
+            return "browser?path=$encodedPath&title=$encodedTitle&rootBoundary=$encodedBoundary"
         }
     }
 
