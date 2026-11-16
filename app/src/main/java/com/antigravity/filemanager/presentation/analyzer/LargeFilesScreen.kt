@@ -477,10 +477,13 @@ private fun LargeFileDetailedRow(
             val imgExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic")
             when {
                 ext in imgExts || ext in videoExts -> {
-                    coil.compose.AsyncImage(
-                        model = item.path,
+                    com.antigravity.filemanager.presentation.components.LocalThumbnailImage(
+                        thumbnailUri = item.path,
                         contentDescription = item.name,
                         contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        fallbackIcon = if (ext in videoExts) Icons.Default.Movie else Icons.Default.Image,
+                        fallbackTint = if (ext in videoExts) Color(0xFFFFAB91) else Color(0xFFCE93D8),
+                        targetSizePx = 128,
                         modifier = Modifier.fillMaxSize()
                     )
                 }

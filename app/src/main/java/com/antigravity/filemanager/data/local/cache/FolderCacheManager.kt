@@ -22,7 +22,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
+import java.io.File
+import java.util.Locale
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -134,12 +135,34 @@ class FolderCacheManager @Inject constructor(
      * as-is — no revalidation needed, since ContentObserver/explicit invalidation keep it live). */
     private fun markReconciledOnce(key: String): Boolean = !reconciledOnceKeys.add(key)
 
-    private fun mediaFoldersKey(categoryType: CategoryType, sort: FileSortOption) = "mediafolders_${categoryType.name}_${sort.name}"
+    private fun mediaFoldersKey(categoryType: CategoryType, sort: FileSortOption) = "mediafolders_${categoryType.name}_${sort.name}"
+
+    fun deduplicateMediaFolders(folders: List<MediaFolder>): List<MediaFolder> {
+        val groups = folders.groupBy { it.path.trimEnd('/').lowercase(Locale.ROOT) }
+        if (groups.size == folders.size) return folders
+        return groups.values.map { bucket ->
+            if (bucket.size == 1) bucket[0]
+            else {
+                val primary = bucket.maxByOrNull { it.itemCount } ?: bucket[0]
+                val combinedCount = bucket.sumOf { it.itemCount }
+                val combinedSize = bucket.sumOf { it.totalSizeBytes }
+                val latestTime = bucket.maxOfOrNull { it.lastModified } ?: primary.lastModified
+                primary.copy(
+                    itemCount = combinedCount,
+                    totalSizeBytes = combinedSize,
+                    lastModified = latestTime
+                )
+            }
+        }
+    }
 
     suspend fun getMediaFolders(categoryType: CategoryType, sort: FileSortOption): CachedMediaFoldersResult? {
         val key = mediaFoldersKey(categoryType, sort)
 
-        mediaFoldersCache[key]?.let { return CachedMediaFoldersResult(it.folders, markReconciledOnce(key)) }
+        mediaFoldersCache[key]?.let {
+            val deduped = deduplicateMediaFolders(it.folders)
+            return CachedMediaFoldersResult(deduped, markReconciledOnce(key))
+        }
 
         return withContext(Dispatchers.IO) {
             val hashed = hashKey(key)
@@ -169,8 +192,9 @@ class FolderCacheManager @Inject constructor(
                         )
                     )
                 }
-                mediaFoldersCache[key] = MediaFoldersCacheEntry(list, timestamp)
-                CachedMediaFoldersResult(list, markReconciledOnce(key))
+                val deduped = deduplicateMediaFolders(list)
+                mediaFoldersCache[key] = MediaFoldersCacheEntry(deduped, timestamp)
+                CachedMediaFoldersResult(deduped, markReconciledOnce(key))
             } catch (e: Exception) {
                 null
             }
@@ -213,19 +237,20 @@ class FolderCacheManager @Inject constructor(
         }
     }
 
-    suspend fun putMediaFolders(categoryType: CategoryType, sort: FileSortOption, folders: List<MediaFolder>) {
+    suspend fun putMediaFolders(categoryType: CategoryType, sort: FileSortOption, folders: List<MediaFolder>) {
+        val cleanFolders = deduplicateMediaFolders(folders)
         val key = mediaFoldersKey(categoryType, sort)
         val timestamp = System.currentTimeMillis()
         // Writing a fresh result IS the reconcile — mark it done so a get() that raced in behind
         // this put (or arrives moments later) doesn't think it still owes the process its one
         // background double-check.
         reconciledOnceKeys.add(key)
-        mediaFoldersCache[key] = MediaFoldersCacheEntry(folders, timestamp)
+        mediaFoldersCache[key] = MediaFoldersCacheEntry(cleanFolders, timestamp)
         withContext(Dispatchers.IO) {
             val hashed = hashKey(key)
             try {
                 val arr = JSONArray()
-                folders.forEach { f ->
+                cleanFolders.forEach { f ->
                     arr.put(JSONObject().apply {
                         put("id", f.id)
                         put("name", f.name)

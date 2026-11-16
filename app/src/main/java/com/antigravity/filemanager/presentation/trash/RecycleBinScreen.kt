@@ -235,11 +235,13 @@ private fun TrashItemThumbnail(item: TrashItem) {
                     extension = ext
                 )
             }
-            AsyncImage(
-                model = item.trashPath,
+            com.antigravity.filemanager.presentation.components.LocalThumbnailImage(
+                thumbnailUri = item.trashPath,
                 contentDescription = item.fileName,
                 contentScale = ContentScale.Crop,
-                error = rememberVectorPainter(getFileIcon(fakeFile)),
+                fallbackIcon = getFileIcon(fakeFile),
+                fallbackTint = com.antigravity.filemanager.presentation.components.getFileIconColor(fakeFile),
+                targetSizePx = 128,
                 modifier = Modifier.fillMaxSize()
             )
         }

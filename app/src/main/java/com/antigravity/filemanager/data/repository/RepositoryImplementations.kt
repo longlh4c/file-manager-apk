@@ -305,7 +305,7 @@ class FileRepositoryImpl @Inject constructor(
         folderPath: String,
         categoryType: CategoryType,
         sortOption: FileSortOption
-    ): List<FileItem> = scanner.listFilesInDir(folderPath, sortOption, showHidden = false)
+    ): List<FileItem> = scanner.getMediaFilesInFolder(folderPath, categoryType, sortOption)
 
     override suspend fun getAllDocuments(sortOption: FileSortOption): List<FileItem> =
         scanner.getAllDocumentFiles(sortOption)

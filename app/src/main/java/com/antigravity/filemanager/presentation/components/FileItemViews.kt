@@ -15,7 +15,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -30,8 +33,11 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import coil.Coil
 import coil.compose.AsyncImage
+import coil.memory.MemoryCache
 import coil.request.ImageRequest
+import coil.size.Precision
 import com.antigravity.filemanager.domain.model.AppSourceBadge
 import com.antigravity.filemanager.domain.model.FileItem
 import com.antigravity.filemanager.domain.model.FolderBadgeType
@@ -48,6 +54,80 @@ import java.util.Locale
 // pass at all) had nothing fixed to prefetch *at*. One shared size across all three call sites
 // means the warm-up's decode is the SAME cache entry the grid/list card ends up asking for.
 const val MEDIA_FOLDER_THUMB_PX = 240
+
+/**
+ * High-performance, scroll-aware lazy thumbnail loader for local media (Images, Videos, Audio, APKs, etc.).
+ *
+ * 1. Checks Coil's in-memory cache synchronously: If already decoded, renders instantly with 0ms delay.
+ * 2. If not cached, debounces by [debounceMs] (default 75ms) while showing a lightweight vector icon placeholder.
+ *    During rapid fling/scrolling (20-40ms per item), items leave composition before the timer elapses,
+ *    cancelling the LaunchedEffect and preventing wasteful CPU/disk/MediaCodec decode jobs.
+ * 3. Enforces an explicit decode target size ([targetSizePx]) so that:
+ *    - Rust EXIF thumbnail extraction (< 0.1ms) is always triggered for photos.
+ *    - Hardware downsampled video frame extraction (Size(256, 256)) is used instead of decoding full 4K frames.
+ *    - Both memory and disk caches share unified keys across Grid and List views.
+ */
+@Composable
+fun LocalThumbnailImage(
+    thumbnailUri: String,
+    contentDescription: String?,
+    contentScale: ContentScale,
+    fallbackIcon: ImageVector,
+    modifier: Modifier = Modifier,
+    fallbackTint: Color? = null,
+    targetSizePx: Int = 256,
+    debounceMs: Long = 75L
+) {
+    val context = LocalContext.current
+    val imageLoader = remember { Coil.imageLoader(context) }
+
+    val cacheKey = remember(thumbnailUri) { MemoryCache.Key(thumbnailUri) }
+    val isInMemoryCached = remember(thumbnailUri) {
+        imageLoader.memoryCache?.get(cacheKey) != null
+    }
+
+    var shouldLoad by remember(thumbnailUri) { mutableStateOf(isInMemoryCached) }
+
+    if (!isInMemoryCached && !shouldLoad) {
+        LaunchedEffect(thumbnailUri) {
+            kotlinx.coroutines.delay(debounceMs)
+            shouldLoad = true
+        }
+    }
+
+    val request = remember(thumbnailUri, targetSizePx) {
+        ImageRequest.Builder(context)
+            .data(thumbnailUri)
+            .size(targetSizePx, targetSizePx)
+            .memoryCacheKey(thumbnailUri)
+            .diskCacheKey(thumbnailUri)
+            .crossfade(false)
+            .precision(Precision.INEXACT)
+            .build()
+    }
+
+    if (shouldLoad) {
+        AsyncImage(
+            model = request,
+            contentDescription = contentDescription,
+            contentScale = contentScale,
+            error = rememberVectorPainter(fallbackIcon),
+            modifier = modifier
+        )
+    } else {
+        Box(
+            modifier = modifier,
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = fallbackIcon,
+                contentDescription = null,
+                tint = fallbackTint ?: TextSecondary,
+                modifier = Modifier.size(if (targetSizePx <= 128) 26.dp else 40.dp)
+            )
+        }
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -81,17 +161,13 @@ fun MediaFolderCard(
                 .then(if (isSelected) Modifier.border(2.dp, TealPrimary, RoundedCornerShape(8.dp)) else Modifier)
         ) {
             if (folder.latestThumbnailUri != null) {
-                val context = LocalContext.current
-                AsyncImage(
-                    model = remember(folder.latestThumbnailUri) {
-                        ImageRequest.Builder(context)
-                            .data(folder.latestThumbnailUri)
-                            .size(MEDIA_FOLDER_THUMB_PX)
-                            .build()
-                    },
+                LocalThumbnailImage(
+                    thumbnailUri = folder.latestThumbnailUri,
                     contentDescription = folder.name,
                     contentScale = ContentScale.Crop,
-                    error = rememberVectorPainter(Icons.Default.Folder),
+                    fallbackIcon = Icons.Default.Folder,
+                    fallbackTint = TextSecondary,
+                    targetSizePx = MEDIA_FOLDER_THUMB_PX,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
@@ -200,17 +276,13 @@ fun AudioListItem(
                 .background(DarkCard)
         ) {
             if (folder.latestThumbnailUri != null) {
-                val context = LocalContext.current
-                AsyncImage(
-                    model = remember(folder.latestThumbnailUri) {
-                        ImageRequest.Builder(context)
-                            .data(folder.latestThumbnailUri)
-                            .size(MEDIA_FOLDER_THUMB_PX)
-                            .build()
-                    },
+                LocalThumbnailImage(
+                    thumbnailUri = folder.latestThumbnailUri,
                     contentDescription = folder.name,
                     contentScale = ContentScale.Crop,
-                    error = rememberVectorPainter(badgeIcon),
+                    fallbackIcon = badgeIcon,
+                    fallbackTint = TealPrimary,
+                    targetSizePx = MEDIA_FOLDER_THUMB_PX,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
@@ -361,13 +433,13 @@ fun FileListItem(
                 contentAlignment = Alignment.Center
             ) {
                 if (file.thumbnailUri != null) {
-                    AsyncImage(
-                        model = file.thumbnailUri,
+                    LocalThumbnailImage(
+                        thumbnailUri = file.thumbnailUri,
                         contentDescription = file.name,
                         contentScale = ContentScale.Crop,
-                        // Audio files without embedded art (and any other decode failure) fall
-                        // back to the normal type icon instead of rendering blank.
-                        error = rememberVectorPainter(getFileIcon(file)),
+                        fallbackIcon = getFileIcon(file),
+                        fallbackTint = getFileIconColor(file),
+                        targetSizePx = 128,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
@@ -640,11 +712,13 @@ fun FileGridCard(
                     .then(if (isSelected) Modifier.border(2.dp, TealPrimary, RoundedCornerShape(8.dp)) else Modifier),
                 contentAlignment = Alignment.Center
             ) {
-                AsyncImage(
-                    model = file.thumbnailUri,
+                LocalThumbnailImage(
+                    thumbnailUri = file.thumbnailUri,
                     contentDescription = file.name,
                     contentScale = ContentScale.Crop,
-                    error = rememberVectorPainter(getFileIcon(file)),
+                    fallbackIcon = getFileIcon(file),
+                    fallbackTint = getFileIconColor(file),
+                    targetSizePx = 256,
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -724,11 +798,13 @@ fun FileDetailedListItem(
                 contentAlignment = Alignment.Center
             ) {
                 if (file.thumbnailUri != null) {
-                    AsyncImage(
-                        model = file.thumbnailUri,
+                    LocalThumbnailImage(
+                        thumbnailUri = file.thumbnailUri,
                         contentDescription = file.name,
                         contentScale = ContentScale.Crop,
-                        error = rememberVectorPainter(getFileIcon(file)),
+                        fallbackIcon = getFileIcon(file),
+                        fallbackTint = getFileIconColor(file),
+                        targetSizePx = 128,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {

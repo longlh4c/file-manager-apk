@@ -197,10 +197,13 @@ private fun DuplicateEntryRow(
             val imgExts = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic")
             val videoExts = setOf("mp4", "mkv", "avi", "mov", "webm", "flv", "wmv", "3gp")
             if (ext in imgExts || ext in videoExts) {
-                coil.compose.AsyncImage(
-                    model = entry.path,
+                com.antigravity.filemanager.presentation.components.LocalThumbnailImage(
+                    thumbnailUri = entry.path,
                     contentDescription = entry.name,
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    fallbackIcon = if (ext in videoExts) Icons.Default.Movie else Icons.Default.Image,
+                    fallbackTint = if (ext in videoExts) Color(0xFFFFAB91) else Color(0xFFCE93D8),
+                    targetSizePx = 128,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {

@@ -62,6 +62,12 @@ class FileOperationsUseCase @Inject constructor(
         mergeCloneDownloads: Boolean = false
     ): List<FileItem> = fileRepository.getFilesInDirectory(directoryPath, sort, showHidden, mergeCloneDownloads)
 
+    suspend fun getMediaFilesInFolder(
+        folderPath: String,
+        category: CategoryType,
+        sortOption: FileSortOption = FileSortOption.BY_DATE_DESC
+    ): List<FileItem> = fileRepository.getMediaFilesInFolder(folderPath, category, sortOption)
+
     suspend fun copy(
         sourcePaths: List<String>,
         targetDir: String,

@@ -309,10 +309,10 @@ class CategoriesViewModel @Inject constructor(
             ) }
             if (cached != null && cached.isFresh) return@launchNavigation
 
-            val allFiles = fileOperationsUseCase.getFiles(
+            val allFiles = mediaUseCase.getFilesInFolder(
                 folderPath,
-                savedSort,
-                showHidden = savedHidden
+                categoryType,
+                savedSort
             )
             val filteredFiles = filterFilesForCategory(allFiles)
             folderCacheManager.putCategorySubfolder(categoryType, folderPath, savedSort, savedHidden, filteredFiles)
