@@ -649,6 +649,7 @@ fun FileBrowserScreen(
             // Switchable View Mode: LIST, GRID, DETAILED
             PullToRefreshWrapper(
                 onRefresh = { viewModel.refresh() },
+                isRefreshing = uiState.isLoading,
                 modifier = Modifier.fillMaxSize().dualPaneDropZone(
                     location = uiState.currentPath,
                     name = java.io.File(uiState.currentPath).name,
